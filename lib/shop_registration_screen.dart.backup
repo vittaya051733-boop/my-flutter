@@ -1,0 +1,1717 @@
+import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'dart:io';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'map_picker_screen.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
+class ShopRegistrationScreen extends StatefulWidget {
+  final String? serviceType;
+  
+  const ShopRegistrationScreen({super.key, this.serviceType});
+
+  @override
+  State<ShopRegistrationScreen> createState() => _ShopRegistrationScreenState();
+}
+
+class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
+  final _formKey = GlobalKey<FormState>();
+  AutovalidateMode _autoValidateMode = AutovalidateMode.disabled;
+  final _shopNameController = TextEditingController();
+  final _shopDescriptionController = TextEditingController();
+  final _addressController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _emailController = TextEditingController();
+  
+  // ข้อมูลสมุดบัญชีธนาคาร
+  final _bankNameController = TextEditingController();
+  final _accountNumberController = TextEditingController();
+  final _accountOwnerController = TextEditingController();
+  
+  // รายชื่อธนาคารในประเทศไทยสำหรับตัวเลือก
+  static const List<String> _thaiBanks = <String>[
+    'ธนาคารกรุงเทพ (BBL)',
+    'ธนาคารกสิกรไทย (KBank)',
+    'ธนาคารไทยพาณิชย์ (SCB)',
+    'ธนาคารกรุงไทย (KTB)',
+    'ธนาคารกรุงศรีอยุธยา (BAY)',
+    'ทีเอ็มบีธนชาต (TTB)',
+    'ธนาคารยูโอบี (UOB)',
+    'ธนาคารซีไอเอ็มบีไทย (CIMB)',
+    'ธนาคารเกียรตินาคินภัทร (KKP)',
+    'ธนาคารทิสโก้ (TISCO)',
+    'ธนาคารแลนด์แอนด์เฮ้าส์ (LH Bank)',
+    'ธนาคารออมสิน',
+    'ธ.ก.ส. (ธนาคารเพื่อการเกษตรและสหกรณ์การเกษตร)',
+    'อื่นๆ',
+  ];
+  
+  File? _selectedImage;
+  bool _isUploading = false;
+  bool _isSaving = false;
+  
+  File? _selectedBookBankImage;
+  bool _isUploadingBookBank = false;
+  
+  // เก็บผล OCR จากรูปสมุดบัญชี
+  String _ocrText = '';
+  
+  // ข้อความแจ้งเตือนแบบ real-time
+  String? _bankNameError;
+  String? _accountNumberError;
+  String? _accountOwnerError;
+  
+  // พิกัด GPS
+  double? _latitude;
+  double? _longitude;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserEmail();
+  }
+
+  Future<void> _loadUserEmail() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null && user.email != null) {
+      setState(() {
+        _emailController.text = user.email!;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _shopNameController.dispose();
+    _shopDescriptionController.dispose();
+    _addressController.dispose();
+    _phoneController.dispose();
+    _emailController.dispose();
+    _bankNameController.dispose();
+    _accountNumberController.dispose();
+    _accountOwnerController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1200,
+      maxHeight: 1200,
+      imageQuality: 85,
+    );
+
+    if (image != null) {
+      setState(() {
+        _selectedImage = File(image.path);
+      });
+      _showSnackBar('✅ เลือกรูปภาพสำเร็จ', Colors.green);
+    }
+  }
+
+  Future<String?> _uploadImage() async {
+    if (_selectedImage == null) return null;
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'shop_images/${user.uid}_$timestamp.jpg';
+      
+      final storageRef = FirebaseStorage.instance.ref().child(fileName);
+      final uploadTask = await storageRef.putFile(_selectedImage!);
+      final downloadUrl = await uploadTask.ref.getDownloadURL();
+
+      return downloadUrl;
+    } catch (e) {
+      throw Exception('อัปโหลดรูปภาพร้านค้าล้มเหลว: $e');
+    }
+  }
+
+  Future<void> _pickBookBankImage() async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1400,
+      maxHeight: 1400,
+      imageQuality: 90,
+    );
+
+    if (image != null) {
+      setState(() {
+        _selectedBookBankImage = File(image.path);
+      });
+      
+      // ตรวจสอบว่าเป็นรูปสมุดบัญชีหรือไม่
+      final isValid = await _validateBookBankImage(File(image.path));
+      
+      if (!isValid) {
+        setState(() {
+          _selectedBookBankImage = null;
+        });
+        return;
+      }
+      
+      _showSnackBar('✅ เลือกรูปสมุดบัญชีสำเร็จ', Colors.green);
+      
+      // หลังจากอัปโหลดรูปสำเร็จ ให้ AI ตรวจสอบข้อมูลที่กรอกไว้แล้วทันที
+      if (_ocrText.isNotEmpty) {
+        // ตรวจสอบทุกช่องที่กรอกไปแล้ว
+        if (_bankNameController.text.isNotEmpty) {
+          _validateFieldAgainstOCR('bank');
+        }
+        if (_accountNumberController.text.isNotEmpty) {
+          _validateFieldAgainstOCR('account');
+        }
+        if (_accountOwnerController.text.isNotEmpty) {
+          _validateFieldAgainstOCR('owner');
+        }
+      }
+    }
+  }
+
+  Future<String?> _uploadBookBankImage() async {
+    if (_selectedBookBankImage == null) return null;
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'bookbank_images/${user.uid}_$timestamp.jpg';
+      
+      final storageRef = FirebaseStorage.instance.ref().child(fileName);
+      final uploadTask = await storageRef.putFile(_selectedBookBankImage!);
+      final downloadUrl = await uploadTask.ref.getDownloadURL();
+
+      return downloadUrl;
+    } catch (e) {
+      throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว: $e');
+    }
+  }
+
+  // ใช้ OpenAI GPT-4 Vision เพื่อดึงข้อมูลแบบโครงสร้าง
+  Future<Map<String, String>?> _extractStructuredDataWithAI(File imageFile) async {
+    try {
+      final bytes = await imageFile.readAsBytes();
+      final base64Image = base64Encode(bytes);
+      
+      // TODO: ใส่ OpenAI API Key ของคุณที่นี่
+      const openaiApiKey = 'YOUR_OPENAI_API_KEY_HERE';
+      
+      if (openaiApiKey == 'YOUR_OPENAI_API_KEY_HERE') {
+        print('⚠️ OpenAI API Key not configured, skipping structured extraction');
+        return null;
+      }
+      
+      final url = Uri.parse('https://api.openai.com/v1/chat/completions');
+      
+      final requestBody = jsonEncode({
+        'model': 'gpt-4o-mini', // รุ่นที่ถูกกว่าแต่ดีพอ
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {
+                'type': 'text',
+                'text': '''วิเคราะห์รูปสมุดบัญชีธนาคารนี้และทำ 2 สิ่ง:
+
+1. ตรวจสอบคุณภาพรูปภาพ:
+   - ถ้ารูปเบลอมาก อ่านข้อความไม่ชัด หรือไม่ใช่สมุดบัญชี ให้ใส่ "imageQuality": "poor"
+   - ถ้ารูปชัดเจน อ่านได้ดี ให้ใส่ "imageQuality": "good"
+   - ให้เหตุผลใน "qualityReason"
+
+2. ถ้ารูปชัดเจน ให้ดึงข้อมูล:
+   - ชื่อธนาคาร (เต็ม เช่น ธนาคารกสิกรไทย)
+   - หมายเลขบัญชี (ตัวเลขอย่างเดียว ไม่ต้องมีขีด)
+   - ชื่อเจ้าของบัญชี (ชื่อ-นามสกุล เต็ม)
+
+ตอบกลับในรูปแบบ JSON เท่านั้น:
+{
+  "imageQuality": "good" หรือ "poor",
+  "qualityReason": "เหตุผล",
+  "bankName": "ชื่อธนาคาร" หรือ null,
+  "accountNumber": "เลขบัญชี" หรือ null,
+  "accountOwner": "ชื่อเจ้าของบัญชี" หรือ null
+}'''
+              },
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,$base64Image'
+                }
+              }
+            ]
+          }
+        ],
+        'max_tokens': 400,
+        'temperature': 0.2
+      });
+      
+      final response = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $openaiApiKey',
+        },
+        body: requestBody,
+      );
+      
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final content = jsonResponse['choices'][0]['message']['content'] as String;
+        
+        print('🤖 OpenAI Response: $content');
+        
+        // Parse JSON จาก response
+        final jsonMatch = RegExp(r'\{[^\}]+\}').firstMatch(content);
+        if (jsonMatch != null) {
+          final extractedJson = jsonDecode(jsonMatch.group(0)!);
+          
+          // ตรวจสอบคุณภาพรูปภาพก่อน
+          if (extractedJson['imageQuality'] == 'poor') {
+            final reason = extractedJson['qualityReason'] ?? 'รูปภาพไม่ชัดเจน';
+            throw Exception('IMAGE_QUALITY_POOR:$reason');
+          }
+          
+          final result = <String, String>{};
+          if (extractedJson['bankName'] != null && extractedJson['bankName'] != 'null') {
+            result['bankName'] = extractedJson['bankName'];
+          }
+          if (extractedJson['accountNumber'] != null && extractedJson['accountNumber'] != 'null') {
+            result['accountNumber'] = extractedJson['accountNumber'].toString().replaceAll(RegExp(r'[\s\-]'), '');
+          }
+          if (extractedJson['accountOwner'] != null && extractedJson['accountOwner'] != 'null') {
+            result['accountOwner'] = extractedJson['accountOwner'];
+          }
+          
+          print('✅ OpenAI Structured Data: $result');
+          return result.isEmpty ? null : result;
+        }
+      } else {
+        print('❌ OpenAI API Error: ${response.statusCode} - ${response.body}');
+      }
+      
+      return null;
+    } catch (e) {
+      if (e.toString().contains('IMAGE_QUALITY_POOR')) {
+        rethrow; // ส่งต่อ error คุณภาพรูปภาพ
+      }
+      print('❌ OpenAI Exception: $e');
+      return null;
+    }
+  }
+
+  // เรียก Google Cloud Vision API เพื่ออ่านข้อความจากรูป
+  Future<String> _extractTextWithVisionAPI(File imageFile) async {
+    try {
+      // อ่านไฟล์เป็น base64
+      final bytes = await imageFile.readAsBytes();
+      final base64Image = base64Encode(bytes);
+      
+      // API Key ของ Google Cloud Vision
+      const apiKey = 'AIzaSyAIKueErj1mUOBDCjPZD9tEyM7Kf7iNfwI';
+      final url = Uri.parse('https://vision.googleapis.com/v1/images:annotate?key=$apiKey');
+      
+      // สร้าง request body
+      final requestBody = jsonEncode({
+        'requests': [
+          {
+            'image': {'content': base64Image},
+            'features': [
+              {'type': 'DOCUMENT_TEXT_DETECTION', 'maxResults': 1}
+            ],
+            'imageContext': {
+              'languageHints': ['th', 'en'] // รองรับภาษาไทยและอังกฤษ
+            }
+          }
+        ]
+      });
+      
+      // เรียก API
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: requestBody,
+      );
+      
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final textAnnotations = jsonResponse['responses'][0]['textAnnotations'];
+        
+        if (textAnnotations != null && textAnnotations.isNotEmpty) {
+          // ข้อความทั้งหมดอยู่ใน element แรก
+          final fullText = textAnnotations[0]['description'] as String;
+          print('✅ Vision API Success: ${fullText.length} chars extracted');
+          return fullText.toLowerCase();
+        } else {
+          print('⚠️ Vision API: No text found');
+          return '';
+        }
+      } else {
+        print('❌ Vision API Error: ${response.statusCode} - ${response.body}');
+        return '';
+      }
+    } catch (e) {
+      print('❌ Vision API Exception: $e');
+      return '';
+    }
+  }
+
+  Future<bool> _validateBookBankImage(File imageFile) async {
+    try {
+      // แสดง loading
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                CircularProgressIndicator(color: Colors.white),
+                SizedBox(width: 16),
+                Text('🤖 AI กำลังวิเคราะห์สมุดบัญชี...'),
+              ],
+            ),
+            duration: Duration(seconds: 15),
+          ),
+        );
+      }
+
+      // ใช้ OpenAI เท่านั้น - ไม่ใช้ Vision API หรือ ML Kit
+      print('🤖 Using OpenAI for analysis...');
+      Map<String, String>? structuredData;
+      
+      try {
+        structuredData = await _extractStructuredDataWithAI(imageFile);
+      } catch (e) {
+        // ตรวจสอบว่าเป็น error จากรูปภาพเบลอหรือไม่
+        if (e.toString().contains('IMAGE_QUALITY_POOR')) {
+          final reason = e.toString().split(':').last;
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).clearSnackBars();
+            
+            // แสดง dialog แจ้งเตือนรูปภาพไม่ชัดเจน
+            final retry = await showDialog<bool>(
+              context: context,
+              barrierDismissible: false,
+              builder: (context) => AlertDialog(
+                title: Row(
+                  children: [
+                    Icon(Icons.warning, color: Colors.orange),
+                    SizedBox(width: 8),
+                    Expanded(child: Text('แจ้งเตือน')),
+                  ],
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'รูปภาพไม่ชัดเจน',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                    SizedBox(height: 12),
+                    Container(
+                      padding: EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.orange.shade200),
+                      ),
+                      child: Text(
+                        reason,
+                        style: TextStyle(color: Colors.orange.shade900),
+                      ),
+                    ),
+                    SizedBox(height: 16),
+                    Text('คำแนะนำ:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SizedBox(height: 8),
+                    Text('• ถ่ายรูปในที่มีแสงสว่างเพียงพอ'),
+                    Text('• ให้กล้องโฟกัสชัดเจน'),
+                    Text('• ถ่ายรูปตรงไม่เอียง'),
+                    Text('• ถ่ายรูปหน้าแรกของสมุดบัญชี'),
+                    Text('• หลีกเลี่ยงเงาและแสงสะท้อน'),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: Text('ยกเลิก'),
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: () => Navigator.pop(context, true),
+                    icon: Icon(Icons.camera_alt),
+                    label: Text('ถ่ายรูปใหม่'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            );
+            
+            if (retry == true) {
+              // ให้เลือกรูปใหม่
+              setState(() {
+                _selectedBookBankImage = null;
+              });
+            }
+          }
+          
+          return false;
+        }
+        
+        // Error อื่นๆ
+        print('❌ OpenAI error: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          _showSnackBar('❌ ไม่สามารถวิเคราะห์รูปภาพได้ กรุณาลองใหม่', Colors.red);
+        }
+        return false;
+      }
+      
+      // ปิด loading
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+      }
+      
+      if (structuredData != null && structuredData.isNotEmpty) {
+        // AI ดึงข้อมูลได้ แสดง dialog ให้ผู้ใช้ยืนยัน
+        if (mounted) {
+          final confirmed = await _showAutoFillConfirmationDialog(structuredData);
+          
+          if (confirmed == true) {
+            // เติมข้อมูลอัตโนมัติ
+            setState(() {
+              final data = structuredData!;
+              if (data['bankName'] != null) {
+                // หาชื่อธนาคารที่ใกล้เคียงใน dropdown
+                final bankName = data['bankName']!;
+                for (final bank in _thaiBanks) {
+                  if (bank.toLowerCase().contains(bankName.toLowerCase()) ||
+                      bankName.toLowerCase().contains(bank.toLowerCase())) {
+                    _bankNameController.text = bank;
+                    break;
+                  }
+                }
+              }
+              if (data['accountNumber'] != null) {
+                _accountNumberController.text = data['accountNumber']!;
+              }
+              if (data['accountOwner'] != null) {
+                _accountOwnerController.text = data['accountOwner']!;
+              }
+              
+              // เก็บข้อมูลจาก AI ไว้ใน _ocrText เพื่อใช้ในการตรวจสอบ
+              final ocrTextParts = <String>[];
+              if (data['bankName'] != null) ocrTextParts.add(data['bankName']!);
+              if (data['accountNumber'] != null) ocrTextParts.add(data['accountNumber']!);
+              if (data['accountOwner'] != null) ocrTextParts.add(data['accountOwner']!);
+              _ocrText = ocrTextParts.join(' ').toLowerCase();
+            });
+            
+            _showSnackBar('✅ เติมข้อมูลจาก AI สำเร็จ! กรุณาตรวจสอบความถูกต้อง', Colors.green);
+          } else {
+            // ถ้าไม่ยืนยัน ให้เก็บข้อมูลไว้ใน _ocrText เพื่อใช้ตรวจสอบแบบ manual
+            setState(() {
+              final data = structuredData!;
+              final ocrTextParts = <String>[];
+              if (data['bankName'] != null) ocrTextParts.add(data['bankName']!);
+              if (data['accountNumber'] != null) ocrTextParts.add(data['accountNumber']!);
+              if (data['accountOwner'] != null) ocrTextParts.add(data['accountOwner']!);
+              _ocrText = ocrTextParts.join(' ').toLowerCase();
+            });
+          }
+        }
+        
+        return true;
+      } else {
+        // AI ไม่สามารถดึงข้อมูลได้
+        _showSnackBar('⚠️ ไม่พบข้อมูลสมุดบัญชีในรูป กรุณาลองถ่ายรูปใหม่', Colors.orange);
+        return false;
+      }
+      
+    } catch (e) {
+      print('❌ Error in _validateBookBankImage: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        _showSnackBar('❌ เกิดข้อผิดพลาด: ${e.toString()}', Colors.red);
+      }
+      return false;
+    }
+  }
+                ],
+              ),
+            );
+            
+            if (retry == true) {
+              // ให้เลือกรูปใหม่
+              setState(() {
+                _selectedBookBankImage = null;
+              });
+            }
+          }
+          
+          return false;
+        }
+        
+        // Error อื่นๆ ให้ผ่านไป
+        print('❌ OpenAI error (not quality): $e');
+      }
+      
+      if (structuredData != null && structuredData.isNotEmpty) {
+        // AI ดึงข้อมูลได้ แสดง dialog ให้ผู้ใช้ยืนยัน
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          final confirmed = await _showAutoFillConfirmationDialog(structuredData);
+          
+          if (confirmed == true) {
+            // เติมข้อมูลอัตโนมัติ
+            setState(() {
+              final data = structuredData!;
+              if (data['bankName'] != null) {
+                // หาชื่อธนาคารที่ใกล้เคียงใน dropdown
+                final bankName = data['bankName']!;
+                for (final bank in _thaiBanks) {
+                  if (bank.toLowerCase().contains(bankName.toLowerCase()) ||
+                      bankName.toLowerCase().contains(bank.toLowerCase())) {
+                    _bankNameController.text = bank;
+                    break;
+                  }
+                }
+              }
+              if (data['accountNumber'] != null) {
+                _accountNumberController.text = data['accountNumber']!;
+              }
+              if (data['accountOwner'] != null) {
+                _accountOwnerController.text = data['accountOwner']!;
+              }
+            });
+            
+            _showSnackBar('✅ เติมข้อมูลจาก AI สำเร็จ! กรุณาตรวจสอบความถูกต้อง', Colors.green);
+          }
+        }
+      }
+      
+      // ขั้นที่ 2: ใช้ Vision API เพื่ออ่านข้อความทั้งหมด (สำหรับ real-time validation)
+      print('🔍 Starting Vision API OCR...');
+      String allText = await _extractTextWithVisionAPI(imageFile);
+      int blockCount = allText.split('\n').length;
+      
+      // ถ้า Vision API ไม่ได้ผล ลอง ML Kit สำรอง
+      if (allText.isEmpty) {
+        print('⚠️ Vision API failed, trying ML Kit fallback...');
+        try {
+          final textRecognizer = TextRecognizer();
+          final inputImage = InputImage.fromFile(imageFile);
+          final recognizedText = await textRecognizer.processImage(inputImage);
+          await textRecognizer.close();
+          
+          allText = recognizedText.text.toLowerCase();
+          blockCount = recognizedText.blocks.length;
+          print('📝 ML Kit Fallback: ${allText.length} chars, ${blockCount} blocks');
+        } catch (e) {
+          print('❌ ML Kit also failed: $e');
+          if (structuredData == null || structuredData.isEmpty) {
+            _showSnackBar('❌ ไม่สามารถอ่านข้อความจากรูปภาพได้', Colors.red);
+            return false;
+          }
+        }
+      }
+      
+      // Debug: แสดงข้อความที่อ่านได้
+      print('📝 Final OCR Result: ${allText.length} chars');
+      print('📝 OCR Text (first 300 chars): ${allText.substring(0, allText.length > 300 ? 300 : allText.length)}');
+      
+      // บันทึก OCR text สำหรับการตรวจสอบ real-time
+      setState(() {
+        _ocrText = allText;
+      });
+      
+      // แสดง snackbar ให้ดูข้อความ OCR
+      if (mounted && allText.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('อ่านข้อความได้ ${allText.length} ตัวอักษร'),
+            backgroundColor: Colors.blue,
+            duration: Duration(seconds: 2),
+            action: SnackBarAction(
+              label: 'ดูข้อความ',
+              textColor: Colors.white,
+              onPressed: () {
+                _showOCRPreviewDialog(allText);
+              },
+            ),
+          ),
+        );
+      }
+      
+      // ปิด loading
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+      }
+      
+      // ตรวจสอบพื้นฐาน: มีข้อความหรือไม่
+      if (allText.trim().isEmpty) {
+        _showValidationDialog([
+          'ไม่สามารถอ่านข้อความจากรูปภาพได้',
+          '',
+          'กรุณา:',
+          '• ถ่ายรูปในที่มีแสงสว่างเพียงพอ',
+          '• ให้กล้องโฟกัสชัดเจน',
+          '• ถ่ายรูปตรงไม่เอียง',
+        ]);
+        return false;
+      }
+      
+      // ถ้ามีการกรอกข้อมูลแล้ว ให้ตรวจสอบความตรงกัน
+      final bankName = _bankNameController.text.trim().toLowerCase();
+      final accountNumber = _accountNumberController.text.trim().replaceAll(RegExp(r'[\s\-]'), '');
+      final accountOwner = _accountOwnerController.text.trim().toLowerCase();
+      
+      final errors = <String>[];
+      
+      // 1. ตรวจสอบชื่อธนาคาร (ถ้ากรอกแล้ว)
+      if (bankName.isNotEmpty) {
+        // แยกคำจากชื่อธนาคาร เช่น "ธนาคารกสิกรไทย" -> ["ธนาคาร", "กสิกร", "ไทย"]
+        final bankWords = bankName.split(RegExp(r'\s+'));
+        bool foundBank = false;
+        
+        for (final word in bankWords) {
+          if (word.length >= 3 && allText.contains(word)) {
+            foundBank = true;
+            break;
+          }
+        }
+        
+        if (!foundBank) {
+          errors.add('• ชื่อธนาคารในรูปไม่ตรงกับที่กรอก "$bankName"');
+        }
+      }
+      
+      // 2. ตรวจสอบหมายเลขบัญชี (ถ้ากรอกแล้ว)
+      if (accountNumber.isNotEmpty && accountNumber.length >= 8) {
+        final cleanedText = allText.replaceAll(RegExp(r'[\s\-]'), '');
+        
+        // ตรวจสอบว่ามีตัวเลขตรงกันอย่างน้อย 70%
+        bool foundNumber = false;
+        
+        // ตรวจสอบแบบเต็ม
+        if (cleanedText.contains(accountNumber)) {
+          foundNumber = true;
+        } else {
+          // ตรวจสอบแบบบางส่วน (70% ของเลข)
+          final minMatch = (accountNumber.length * 0.7).round();
+          for (int i = 0; i <= accountNumber.length - minMatch; i++) {
+            final substring = accountNumber.substring(i, i + minMatch);
+            if (cleanedText.contains(substring)) {
+              foundNumber = true;
+              break;
+            }
+          }
+        }
+        
+        if (!foundNumber) {
+          errors.add('• หมายเลขบัญชีในรูปไม่ตรงกับที่กรอก');
+        }
+      }
+      
+      // 3. ตรวจสอบชื่อเจ้าของบัญชี (ถ้ากรอกแล้ว)
+      if (accountOwner.isNotEmpty) {
+        // แยกคำจากชื่อ เช่น "นาย สมชาย ใจดี" -> ["นาย", "สมชาย", "ใจดี"]
+        final nameWords = accountOwner.split(RegExp(r'\s+'));
+        int matchedWords = 0;
+        
+        for (final word in nameWords) {
+          if (word.length >= 2 && allText.contains(word)) {
+            matchedWords++;
+          }
+        }
+        
+        // ต้องตรงกันอย่างน้อย 50% ของคำ
+        if (matchedWords < (nameWords.length * 0.5)) {
+          errors.add('• ชื่อเจ้าของบัญชีในรูปไม่ตรงกับที่กรอก "$accountOwner"');
+        }
+      }
+      
+      // ถ้ามี error แสดงว่าข้อมูลไม่ตรงกัน
+      if (errors.isNotEmpty) {
+        _showValidationDialog([
+          '⚠️ ข้อมูลในรูปไม่ตรงกับที่กรอก',
+          '',
+          'ปัญหาที่พบ:',
+          ...errors,
+          '',
+          'กรุณา:',
+          '• ตรวจสอบว่ากรอกข้อมูลถูกต้อง',
+          '• หรืออัปโหลดรูปสมุดบัญชีที่ถูกต้อง',
+        ]);
+        return false;
+      }
+      
+      // มีข้อความ = ผ่าน
+      if (allText.length > 10 || blockCount > 1) {
+        _showSnackBar('✅ ตรวจสอบสมุดบัญชีเรียบร้อย', Colors.green);
+        return true;
+      }
+      
+      // กรณีมีข้อความน้อยมาก
+      _showValidationDialog([
+        'อ่านข้อความจากรูปภาพได้ไม่ชัดเจน',
+        '',
+        'กรุณาลองใหม่:',
+        '• ถ่ายรูปให้ชัดเจนขึ้น',
+        '• เพิ่มแสงสว่าง',
+        '• ถ่ายรูปหน้าสมุดบัญชีที่มีข้อมูลครบถ้วน',
+      ]);
+      
+      return false;
+
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+      }
+      _showSnackBar('❌ ไม่สามารถตรวจสอบรูปภาพได้: $e', Colors.red);
+      return false;
+    }
+  }
+
+  // ตรวจสอบข้อมูลกับ OCR แบบ real-time
+  void _validateFieldAgainstOCR(String fieldName) {
+    // ถ้ายังไม่ได้เลือกรูปหรือไม่มี OCR text ข้ามไป
+    if (_ocrText.isEmpty || _selectedBookBankImage == null) {
+      return;
+    }
+
+    setState(() {
+      // ตรวจสอบชื่อธนาคาร
+      if (fieldName == 'bank' || fieldName == 'all') {
+        final bankNameRaw = _bankNameController.text.trim().toLowerCase();
+        if (bankNameRaw.isNotEmpty) {
+          // ตัดส่วน (BBL), (KBank) ออก และตัดคำว่า "ธนาคาร" ที่อาจซ้ำ
+          final bankName = bankNameRaw
+              .replaceAll(RegExp(r'\([^)]*\)'), '') // ตัดวงเล็บและข้างใน
+              .replaceAll('ธนาคาร', '')
+              .replaceAll('ธ.ก.ส.', 'ธกส')
+              .replaceAll(RegExp(r'[^\u0E00-\u0E7Fa-z0-9\s]'), '') // เก็บแค่ไทย อังกฤษ ตัวเลข ช่องว่าง
+              .trim();
+          
+          final bankWords = bankName.split(RegExp(r'\s+'));
+          bool foundBank = false;
+          
+          for (final word in bankWords) {
+            if (word.length >= 3 && _ocrText.contains(word)) {
+              foundBank = true;
+              break;
+            }
+          }
+          
+          // Debug: พิมพ์ออกมาดู
+          print('🏦 Bank check: "$bankName" -> words: $bankWords -> found: $foundBank');
+          
+          _bankNameError = foundBank ? null : 'ชื่อธนาคารไม่ตรงกับรูปสมุดบัญชี';
+        } else {
+          _bankNameError = null;
+        }
+      }
+
+      // ตรวจสอบหมายเลขบัญชี
+      if (fieldName == 'account' || fieldName == 'all') {
+        final accountNumber = _accountNumberController.text.trim().replaceAll(RegExp(r'[\s\-\.]'), '');
+        if (accountNumber.isNotEmpty && accountNumber.length >= 8) {
+          // ทำความสะอาด OCR: เอาแค่ตัวเลข
+          final cleanedOCR = _ocrText.replaceAll(RegExp(r'[^\d]'), '');
+          
+          bool foundNumber = false;
+          
+          // ตรวจสอบแบบเต็ม (100%)
+          if (cleanedOCR.contains(accountNumber)) {
+            foundNumber = true;
+            print('🔢 Account: ตรง 100% "$accountNumber"');
+          } else {
+            // ตรวจสอบแบบบางส่วน (50% ของเลข เผื่อ OCR ผิดบ้าง)
+            // สำหรับ 10 หลัก = ต้องตรงกัน 5 หลักติดกัน
+            final minMatch = (accountNumber.length * 0.5).round().clamp(4, accountNumber.length);
+            
+            // ลองหาจากทุกส่วนของเลขบัญชี
+            for (int i = 0; i <= accountNumber.length - minMatch; i++) {
+              final substring = accountNumber.substring(i, i + minMatch);
+              if (cleanedOCR.contains(substring)) {
+                foundNumber = true;
+                print('🔢 Account: พบบางส่วน "$substring" (${minMatch} หลัก)');
+                break;
+              }
+            }
+            
+            // ถ้ายังไม่เจอ ลองตรวจแบบ flexible มากขึ้น (40% สำหรับเลข 10 หลัก = 4 หลัก)
+            if (!foundNumber && accountNumber.length >= 10) {
+              final relaxedMatch = 4;
+              for (int i = 0; i <= accountNumber.length - relaxedMatch; i++) {
+                final substring = accountNumber.substring(i, i + relaxedMatch);
+                if (cleanedOCR.contains(substring)) {
+                  foundNumber = true;
+                  print('🔢 Account: พบบางส่วน (relaxed) "$substring" (${relaxedMatch} หลัก)');
+                  break;
+                }
+              }
+            }
+          }
+          
+          // Debug: แสดงข้อมูลที่ชัดเจน
+          print('🔢 Account Input: "$accountNumber" (${accountNumber.length} หลัก)');
+          print('🔢 OCR Digits: "$cleanedOCR"');
+          print('🔢 Result: ${foundNumber ? "✅ ผ่าน" : "❌ ไม่ผ่าน"}');
+          
+          _accountNumberError = foundNumber ? null : 'หมายเลขบัญชีไม่ตรงกับรูปสมุดบัญชี';
+        } else {
+          _accountNumberError = null;
+        }
+      }
+
+      // ตรวจสอบชื่อเจ้าของบัญชี
+      if (fieldName == 'owner' || fieldName == 'all') {
+        final accountOwner = _accountOwnerController.text.trim().toLowerCase();
+        if (accountOwner.isNotEmpty) {
+          final nameWords = accountOwner.split(RegExp(r'\s+'));
+          int matchedWords = 0;
+          
+          for (final word in nameWords) {
+            // ข้ามคำนำหน้า นาย, นาง, นางสาว (อาจไม่มีใน OCR)
+            if (word == 'นาย' || word == 'นาง' || word == 'นางสาว' || word == 'mr' || word == 'mrs' || word == 'miss') {
+              matchedWords++; // นับให้เป็นถูกต้องอยู่แล้ว
+              continue;
+            }
+            
+            if (word.length >= 2 && _ocrText.contains(word)) {
+              matchedWords++;
+            }
+          }
+          
+          // ต้องตรงกันอย่างน้อย 40% ของคำ (ลดลงเผื่อ OCR พลาดบ้าง)
+          final threshold = nameWords.length * 0.4;
+          final isValid = matchedWords >= threshold;
+          
+          // Debug
+          print('👤 Owner check: "$accountOwner" -> words: $nameWords (${nameWords.length}) -> matched: $matchedWords -> threshold: $threshold -> valid: $isValid');
+          
+          _accountOwnerError = isValid 
+              ? null 
+              : 'ชื่อเจ้าของบัญชีไม่ตรงกับรูปสมุดบัญชี';
+        } else {
+          _accountOwnerError = null;
+        }
+      }
+    });
+  }
+
+  Future<void> _pickLocationFromMap() async {
+    // ก่อนเปิดแผนที่ ให้ตรวจสอบชื่อเจ้าของบัญชีที่กรอกไปแล้ว
+    if (_accountOwnerController.text.isNotEmpty && _ocrText.isNotEmpty) {
+      _validateFieldAgainstOCR('owner');
+    }
+    
+    final result = await Navigator.of(context).push<Map<String, double>>(
+      MaterialPageRoute(
+        builder: (context) => MapPickerScreen(
+          initialLatitude: _latitude,
+          initialLongitude: _longitude,
+        ),
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _latitude = result['latitude'];
+        _longitude = result['longitude'];
+      });
+      
+      _showSnackBar('✅ ปักหมุดตำแหน่งสำเร็จ!', Colors.green);
+    }
+  }
+
+  Future<void> _saveShopRegistration() async {
+    // เปิดโหมดแสดงข้อผิดพลาดในฟอร์ม
+    setState(() {
+      _autoValidateMode = AutovalidateMode.always;
+    });
+
+    final errors = _validateFields();
+    if (errors.isNotEmpty) {
+      _showValidationDialog(errors);
+      return;
+    }
+
+    setState(() => _isSaving = true);
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
+
+      // อัปโหลดรูปภาพร้านค้าและสมุดบัญชีก่อน
+      String? shopImageUrl;
+      String? bookBankImageUrl;
+
+      if (_selectedImage != null) {
+        shopImageUrl = await _uploadImage();
+        if (shopImageUrl == null) throw Exception('อัปโหลดรูปร้านค้าล้มเหลว');
+      }
+
+      if (_selectedBookBankImage != null) {
+        bookBankImageUrl = await _uploadBookBankImage();
+        if (bookBankImageUrl == null) throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว');
+      }
+
+      // ใช้ serviceType เป็นชื่อ collection
+      final serviceType = widget.serviceType ?? 'ทั่วไป';
+      
+      // นับจำนวนร้านในประเภทนี้เพื่อกำหนดลำดับ
+      final querySnapshot = await FirebaseFirestore.instance
+          .collection(serviceType)
+          .get();
+      
+      final orderNumber = querySnapshot.docs.length + 1;
+
+      // บันทึกข้อมูลร้านค้าลง Firestore (แต่ละประเภทเป็น Collection แยก)
+      await FirebaseFirestore.instance
+          .collection(serviceType)
+          .doc(user.uid)
+          .set({
+        'name': _shopNameController.text.trim(),
+        'type': serviceType,
+        'rating': 0.0, // เริ่มต้นที่ 0 รอรีวิว
+        'location': {
+          'latitude': _latitude ?? 0.0,
+          'longitude': _longitude ?? 0.0,
+        },
+        'ownerId': user.uid,
+        'order': orderNumber, // ลำดับที่ของร้านในประเภทนี้
+        'description': _shopDescriptionController.text.trim(),
+        'address': 'Lat: ${_latitude!.toStringAsFixed(6)}, Lng: ${_longitude!.toStringAsFixed(6)}',
+        'phone': _phoneController.text.trim(),
+        'email': _emailController.text.trim(),
+        'shopImageUrl': shopImageUrl,
+        'bookBankImageUrl': bookBankImageUrl,
+        'bankName': _bankNameController.text.trim(),
+        'accountNumber': _accountNumberController.text.trim(),
+        'accountOwner': _accountOwnerController.text.trim(),
+        'status': 'pending', // รอการอนุมัติ
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      _showSnackBar('✅ ลงทะเบียนร้านค้าสำเร็จ!', Colors.green);
+      
+      await Future.delayed(const Duration(seconds: 1));
+      
+      if (mounted) {
+        // ไปหน้า Home หลังจากลงทะเบียนเสร็จ
+        Navigator.of(context).pushReplacementNamed('/home');
+      }
+    } catch (e) {
+      _showSnackBar('❌ เกิดข้อผิดพลาด: $e', Colors.red);
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  void _showSnackBar(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  Future<bool?> _showAutoFillConfirmationDialog(Map<String, String> data) async {
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.auto_awesome, color: Colors.purple),
+            SizedBox(width: 8),
+            Text('🤖 AI ดึงข้อมูลได้แล้ว'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'AI วิเคราะห์สมุดบัญชีและพบข้อมูลต่อไปนี้:',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 16),
+            if (data['bankName'] != null) ...[
+              Text('🏦 ชื่อธนาคาร:', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+              Text(data['bankName']!, style: TextStyle(fontSize: 16)),
+              SizedBox(height: 8),
+            ],
+            if (data['accountNumber'] != null) ...[
+              Text('🔢 หมายเลขบัญชี:', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+              Text(data['accountNumber']!, style: TextStyle(fontSize: 16)),
+              SizedBox(height: 8),
+            ],
+            if (data['accountOwner'] != null) ...[
+              Text('👤 ชื่อเจ้าของบัญชี:', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+              Text(data['accountOwner']!, style: TextStyle(fontSize: 16)),
+              SizedBox(height: 8),
+            ],
+            SizedBox(height: 12),
+            Container(
+              padding: EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orange.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.orange, size: 20),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'กรุณาตรวจสอบความถูกต้องหลังเติมข้อมูล',
+                      style: TextStyle(fontSize: 13, color: Colors.orange.shade900),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('ไม่เอา ฉันจะกรอกเอง'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(context, true),
+            icon: Icon(Icons.check),
+            label: Text('เติมข้อมูลให้ฉัน'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.purple,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showOCRPreviewDialog(String ocrText) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.preview, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('ข้อความที่อ่านได้จากรูป'),
+          ],
+        ),
+        content: Container(
+          width: double.maxFinite,
+          constraints: BoxConstraints(maxHeight: 400),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Vision API อ่านข้อความได้ ${ocrText.length} ตัวอักษร:',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                SizedBox(height: 12),
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: SelectableText(
+                    ocrText,
+                    style: TextStyle(fontSize: 13, height: 1.5),
+                  ),
+                ),
+                SizedBox(height: 16),
+                Text(
+                  'เปรียบเทียบกับข้อมูลที่กรอก:',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.orange),
+                ),
+                SizedBox(height: 8),
+                Text('• ชื่อธนาคาร: ${_bankNameController.text}', style: TextStyle(fontSize: 13)),
+                Text('• หมายเลขบัญชี: ${_accountNumberController.text}', style: TextStyle(fontSize: 13)),
+                Text('• ชื่อเจ้าของ: ${_accountOwnerController.text}', style: TextStyle(fontSize: 13)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('ปิด'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ตรวจสอบอีเมลรูปแบบทั่วไป
+  bool _isValidEmail(String email) {
+    final regex = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+    return regex.hasMatch(email);
+  }
+
+  // ตรวจสอบเบอร์โทรแบบไทย: รองรับ 0XXXXXXXXX (10 หลัก) หรือ +66XXXXXXXXX/66XXXXXXXXX (11 หลัก)
+  bool _isValidThaiPhone(String input) {
+    final digits = input.replaceAll(RegExp(r'\D'), '');
+    if (digits.startsWith('0')) {
+      return digits.length == 10;
+    }
+    if (digits.startsWith('66')) {
+      return digits.length == 11; // 66 + 9 หลักที่เหลือ
+    }
+    return false;
+  }
+
+  // รวมตรวจสอบทุกช่องที่จำเป็น และคืนรายการข้อความผิดพลาด
+  List<String> _validateFields() {
+    final errors = <String>[];
+
+    final name = _shopNameController.text.trim();
+    final phone = _phoneController.text.trim();
+    final email = _emailController.text.trim();
+
+    if (name.isEmpty || name.length < 2) {
+      errors.add('• ชื่อร้านค้า: กรุณากรอกอย่างน้อย 2 ตัวอักษร');
+    }
+    if (_latitude == null || _longitude == null) {
+      errors.add('• ที่อยู่: กรุณาปักหมุดตำแหน่งร้านค้าบนแผนที่');
+    }
+    if (phone.isEmpty || !_isValidThaiPhone(phone)) {
+      errors.add('• เบอร์โทรศัพท์: รูปแบบไม่ถูกต้อง (เช่น 0812345678 หรือ +66812345678)');
+    }
+    if (email.isEmpty || !_isValidEmail(email)) {
+      errors.add('• อีเมล: รูปแบบไม่ถูกต้อง');
+    }
+
+    // หมายเหตุ: คำอธิบายร้าน ไม่บังคับ ตามที่ผู้ใช้ระบุ
+    // สมุดบัญชีธนาคาร: อนุญาตให้เว้นได้ (ไม่บังคับ)
+
+    return errors;
+  }
+
+  void _showValidationDialog(List<String> errors) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('แจ้งเตือน'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: errors.map((e) => Text(e)).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('ตกลง'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text('ลงทะเบียนร้านค้า'),
+        backgroundColor: const Color(0xFFFF6B35),
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Form(
+          key: _formKey,
+          autovalidateMode: _autoValidateMode,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // หัวข้อ
+              Text(
+                'กรอกข้อมูลร้านค้า',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // ชื่อร้านค้า
+              TextFormField(
+                controller: _shopNameController,
+                decoration: InputDecoration(
+                  labelText: 'ชื่อร้านค้า *',
+                  hintText: 'เช่น ร้านอาหารสมชาย',
+                  prefixIcon: const Icon(Icons.store),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                validator: (value) {
+                  final v = value?.trim() ?? '';
+                  if (v.isEmpty) return 'กรุณากรอกชื่อร้านค้า';
+                  if (v.length < 2) return 'กรุณากรอกชื่อร้านค้าอย่างน้อย 2 ตัวอักษร';
+                  return null;
+                },
+              ),
+              
+              const SizedBox(height: 16),
+
+              // คำอธิบายร้านค้า (ย้ายมาใต้ชื่อร้าน และให้สูงเท่าช่องทั่วไป)
+              TextFormField(
+                controller: _shopDescriptionController,
+                maxLines: 1,
+                textInputAction: TextInputAction.next,
+                decoration: InputDecoration(
+                  labelText: 'คำอธิบายร้านค้า',
+                  hintText: 'เช่น ร้านอาหารไทยพื้นบ้าน รสชาติอร่อย',
+                  prefixIcon: const Icon(Icons.description),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 24),
+
+              // รูปภาพร้านค้า
+              const Text(
+                'รูปภาพร้านค้า',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2C3E50),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              GestureDetector(
+                onTap: _isUploading ? null : _pickImage,
+                child: Container(
+                  height: 200,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: _isUploading
+                      ? const Center(
+                          child: CircularProgressIndicator(),
+                        )
+                      : _selectedImage != null
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.file(
+                                _selectedImage!,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.add_photo_alternate,
+                                  size: 64,
+                                  color: Colors.grey.shade400,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'คลิกเพื่อเลือกรูปภาพ',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade600,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                              ],
+                            ),
+                ),
+              ),
+              
+              const SizedBox(height: 24),
+
+              // สมุดบัญชีธนาคาร
+              const Text(
+                'สมุดบัญชีธนาคาร',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2C3E50),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              GestureDetector(
+                onTap: _isUploadingBookBank ? null : _pickBookBankImage,
+                child: Container(
+                  height: 160,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: _isUploadingBookBank
+                      ? const Center(child: CircularProgressIndicator())
+                      : _selectedBookBankImage != null
+                          ? ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.file(
+                                _selectedBookBankImage!,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          : Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.credit_card,
+                                  size: 56,
+                                  color: Colors.grey.shade400,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'คลิกเพื่ออัปโหลดรูปหน้าสมุดบัญชี',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade600,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                const Text(
+                                  'ควรให้เห็นชื่อบัญชีและเลขบัญชีชัดเจน',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                )
+                              ],
+                            ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // ชื่อธนาคาร (ตัวเลือกแบบ Dropdown)
+              DropdownButtonFormField<String>(
+                value: _bankNameController.text.isNotEmpty && _thaiBanks.contains(_bankNameController.text)
+                    ? _bankNameController.text
+                    : null,
+                items: _thaiBanks
+                    .map((bank) => DropdownMenuItem<String>(
+                          value: bank,
+                          child: Text(bank),
+                        ))
+                    .toList(),
+                decoration: InputDecoration(
+                  labelText: 'ชื่อธนาคาร *',
+                  hintText: 'เลือกชื่อธนาคาร',
+                  prefixIcon: const Icon(Icons.account_balance),
+                  errorText: _bankNameError,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onChanged: (value) {
+                  setState(() {
+                    _bankNameController.text = value ?? '';
+                  });
+                  _validateFieldAgainstOCR('bank');
+                },
+                validator: (value) {
+                  final val = (value ?? _bankNameController.text).trim();
+                  if (val.isEmpty) {
+                    return 'กรุณาเลือกชื่อธนาคาร';
+                  }
+                  return null;
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              // หมายเลขบัญชี
+              TextFormField(
+                controller: _accountNumberController,
+                keyboardType: TextInputType.text, // เปลี่ยนเป็น text เพื่อให้พิมพ์ขีดได้
+                decoration: InputDecoration(
+                  labelText: 'หมายเลขบัญชี *',
+                  hintText: 'เช่น 164-3-44034-9 หรือ 1643440349',
+                  helperText: 'สามารถพิมพ์ตัวเลขอย่างเดียวหรือมีขีดคั่นก็ได้',
+                  helperStyle: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  prefixIcon: const Icon(Icons.credit_card),
+                  errorText: _accountNumberError,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onTap: () {
+                  // เมื่อเริ่มกรอกหมายเลขบัญชี ให้ตรวจสอบชื่อธนาคารที่กรอกไปแล้ว
+                  if (_bankNameController.text.isNotEmpty && _ocrText.isNotEmpty) {
+                    _validateFieldAgainstOCR('bank');
+                  }
+                },
+                onChanged: (value) {
+                  _validateFieldAgainstOCR('account');
+                },
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'กรุณากรอกหมายเลขบัญชี';
+                  }
+                  // อนุญาตให้มีแค่ตัวเลขและขีด
+                  final cleaned = value.trim().replaceAll(RegExp(r'[^0-9\-]'), '');
+                  if (cleaned.length < 8) {
+                    return 'หมายเลขบัญชีต้องมีอย่างน้อย 8 หลัก';
+                  }
+                  return null;
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              // ชื่อเจ้าของบัญชี
+              TextFormField(
+                controller: _accountOwnerController,
+                decoration: InputDecoration(
+                  labelText: 'ชื่อเจ้าของบัญชี *',
+                  hintText: 'เช่น นาย สมชาย ใจดี',
+                  prefixIcon: const Icon(Icons.person),
+                  errorText: _accountOwnerError,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onTap: () {
+                  // เมื่อเริ่มกรอกชื่อเจ้าของบัญชี ให้ตรวจสอบหมายเลขบัญชีที่กรอกไปแล้ว
+                  if (_accountNumberController.text.isNotEmpty && _ocrText.isNotEmpty) {
+                    _validateFieldAgainstOCR('account');
+                  }
+                },
+                onChanged: (value) {
+                  _validateFieldAgainstOCR('owner');
+                },
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'กรุณากรอกชื่อเจ้าของบัญชี';
+                  }
+                  return null;
+                },
+              ),
+
+              const SizedBox(height: 16),
+
+              // ที่อยู่ร้านค้า - ปักหมุดเท่านั้น
+              const Text(
+                'ที่อยู่ร้านค้า *',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2C3E50),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // ปุ่มปักหมุด
+              InkWell(
+                onTap: _pickLocationFromMap,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _latitude != null && _longitude != null
+                        ? Colors.green.shade50
+                        : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: _latitude != null && _longitude != null
+                          ? Colors.green.shade300
+                          : Colors.grey.shade300,
+                      width: 2,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: _latitude != null && _longitude != null
+                              ? Colors.green.shade100
+                              : Colors.orange.shade100,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.location_pin,
+                          color: _latitude != null && _longitude != null
+                              ? Colors.green.shade700
+                              : const Color(0xFFFF6B35),
+                          size: 32,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _latitude != null && _longitude != null
+                                  ? 'ปักหมุดแล้ว'
+                                  : 'ปักหมุดตำแหน่งร้านค้า',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: _latitude != null && _longitude != null
+                                    ? Colors.green.shade700
+                                    : Colors.grey.shade700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _latitude != null && _longitude != null
+                                  ? 'Lat: ${_latitude!.toStringAsFixed(6)}\nLng: ${_longitude!.toStringAsFixed(6)}'
+                                  : 'คลิกเพื่อเปิดแผนที่และเลือกตำแหน่ง',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: _latitude != null && _longitude != null
+                                    ? Colors.green.shade600
+                                    : Colors.grey.shade600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        Icons.arrow_forward_ios,
+                        color: Colors.grey.shade400,
+                        size: 20,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              
+              const SizedBox(height: 16),
+
+              // เบอร์โทรศัพท์
+              TextFormField(
+                controller: _phoneController,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  labelText: 'เบอร์โทรศัพท์ *',
+                  hintText: 'เช่น 081-234-5678',
+                  prefixIcon: const Icon(Icons.phone),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                validator: (value) {
+                  final v = value?.trim() ?? '';
+                  if (v.isEmpty) return 'กรุณากรอกเบอร์โทรศัพท์';
+                  if (!_isValidThaiPhone(v)) {
+                    return 'กรุณากรอกเบอร์โทรศัพท์ให้ถูกต้อง (เช่น 0812345678 หรือ +66812345678)';
+                  }
+                  return null;
+                },
+              ),
+              
+              const SizedBox(height: 16),
+
+              // อีเมล
+              TextFormField(
+                controller: _emailController,
+                keyboardType: TextInputType.emailAddress,
+                decoration: InputDecoration(
+                  labelText: 'อีเมล *',
+                  hintText: 'example@email.com',
+                  prefixIcon: const Icon(Icons.email),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                validator: (value) {
+                  final v = value?.trim() ?? '';
+                  if (v.isEmpty) return 'กรุณากรอกอีเมล';
+                  if (!_isValidEmail(v)) return 'รูปแบบอีเมลไม่ถูกต้อง';
+                  return null;
+                },
+              ),
+              
+              const SizedBox(height: 32),
+
+              // ปุ่มบันทึก
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  onPressed: (_isSaving || _isUploading)
+                      ? null
+                      : _saveShopRegistration,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF6B35),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.grey.shade300,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: _isSaving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : const Text(
+                          'บันทึกข้อมูล',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+              
+              const SizedBox(height: 16),
+
+              // ข้อความเพิ่มเติม
+              Center(
+                child: Text(
+                  '* หมายถึงข้อมูลที่จำเป็นต้องกรอก',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
