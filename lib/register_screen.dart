@@ -364,6 +364,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         'userId': user.uid,
         'createdAt': FieldValue.serverTimestamp(),
         'status': 'pending_contract',
+        'isProfileCompleted': false,
       }, SetOptions(merge: true));
       
       // บันทึกลง contracts collection

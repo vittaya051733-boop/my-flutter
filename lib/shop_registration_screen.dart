@@ -194,8 +194,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       final collection = _collectionForService(serviceType);
       final doc = await FirebaseFirestore.instance.collection(collection).doc(user.uid).get();
       if (doc.exists) {
-        // ถ้าลงทะเบียนแล้ว และไม่ได้อยู่ในโหมดแก้ไข ให้กลับหน้า Home
-        if (widget.shopData == null) {
+        final Map<String, dynamic>? data = doc.data();
+        final alreadyComplete = _hasCompletedProfile(data);
+        // ถ้าลงทะเบียนครบแล้ว และไม่ได้อยู่ในโหมดแก้ไข ให้กลับหน้า Home
+        if (alreadyComplete && widget.shopData == null) {
           if (!mounted) return;
           _navigateHome();
           return;
@@ -235,6 +237,27 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       default:
         throw Exception('ประเภทบริการไม่ถูกต้อง: $serviceType');
     }
+  }
+
+  bool _hasCompletedProfile(Map<String, dynamic>? data) {
+    if (data == null) return false;
+    final completedFlag = data['isProfileCompleted'];
+    if (completedFlag is bool && completedFlag) {
+      return true;
+    }
+
+    final status = (data['status'] as String?)?.toLowerCase();
+    if (status == null || status == 'pending_contract') {
+      return false;
+    }
+
+    final hasCoreDetails =
+        (data['name']?.toString().isNotEmpty ?? false) &&
+        (data['address']?.toString().isNotEmpty ?? false) &&
+        (data['shopImageUrl']?.toString().isNotEmpty ?? false) &&
+        (data['bankName']?.toString().isNotEmpty ?? false);
+
+    return hasCoreDetails;
   }
 
   @override
@@ -505,8 +528,9 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         'accountNumber': _accountNumberController.text.trim(),
         'accountOwner': _accountOwnerController.text.trim(),
         'status': 'pending', // รอการอนุมัติ
+        'isProfileCompleted': true,
         'createdAt': FieldValue.serverTimestamp(),
-      });
+      }, SetOptions(merge: true));
 
       _showSnackBar('✅ ลงทะเบียนร้านค้าสำเร็จ!', Colors.green);
 

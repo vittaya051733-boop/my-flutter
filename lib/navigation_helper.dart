@@ -38,17 +38,20 @@ class NavigationHelper {
         'pharmacy_registrations'
       ];
       DocumentSnapshot? shopDoc;
+      Map<String, dynamic>? shopData;
 
       for (final collectionName in possibleCollections) {
         final doc = await FirebaseFirestore.instance.collection(collectionName).doc(user.uid).get();
         if (doc.exists) {
           shopDoc = doc;
+          shopData = doc.data();
           break;
         }
       }
       if (!context.mounted) return;
 
-      if (shopDoc == null || !shopDoc.exists) {
+      final hasCompletedShopProfile = _hasCompletedShopProfile(shopData);
+      if (shopDoc == null || !shopDoc.exists || !hasCompletedShopProfile) {
         // ยังไม่ได้ลงทะเบียนร้านค้า -> ไปหน้าลงทะเบียนร้านค้า
         _navigate(
           context,
@@ -104,6 +107,43 @@ class NavigationHelper {
     }
   }
 
+  static bool _hasCompletedShopProfile(Map<String, dynamic>? data) {
+    if (data == null) return false;
+
+    final completedFlag = data['isProfileCompleted'];
+    if (completedFlag is bool && completedFlag) {
+      return true;
+    }
+
+    final status = (data['status'] as String?)?.toLowerCase();
+    final hasCoreFields =
+        (data['name']?.toString().isNotEmpty ?? false) &&
+        (data['address']?.toString().isNotEmpty ?? false) &&
+        (data['shopImageUrl']?.toString().isNotEmpty ?? false) &&
+        (data['bankName']?.toString().isNotEmpty ?? false);
+
+    if (status == null || status == 'pending_contract') {
+      return false;
+    }
+
+    return hasCoreFields;
+  }
+
+  static String _collectionForServiceName(String serviceType) {
+    switch (serviceType) {
+      case 'ตลาด':
+        return 'market_registrations';
+      case 'ร้านค้า':
+        return 'shop_registrations';
+      case 'ร้านอาหาร':
+        return 'restaurant_registrations';
+      case 'ร้านขายยา':
+        return 'pharmacy_registrations';
+      default:
+        return 'shop_registrations';
+    }
+  }
+
   /// ตรวจสอบว่า user ลงทะเบียนครบถ้วนหรือยัง
   static Future<bool> isRegistrationComplete(String userId) async {
     try {
@@ -118,12 +158,17 @@ class NavigationHelper {
 
       final serviceType = contractDoc.data()?['serviceType'] as String?;
       if (serviceType == null) return false; // ถ้าไม่มี serviceType ก็ยังไม่สมบูรณ์
+      final collectionName = _collectionForServiceName(serviceType);
       final shopDoc = await FirebaseFirestore.instance
-          .collection('${serviceType.toLowerCase()}_registrations') // แก้ไขการอ้างอิงชื่อ collection
+          .collection(collectionName)
           .doc(userId)
           .get();
 
-      return shopDoc.exists;
+      if (!shopDoc.exists) {
+        return false;
+      }
+
+      return _hasCompletedShopProfile(shopDoc.data());
     } catch (e) {
       debugPrint('Error checking registration status: $e');
       return false;

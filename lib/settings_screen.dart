@@ -262,6 +262,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               }
                             }
 
+                            final hasBookBankImage = bookBankImageUrl?.isNotEmpty ?? false;
+                            final bookBankImage = bookBankImageUrl ?? '';
+
                             return Column(
                               children: [
                                 Padding(
@@ -352,16 +355,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         ListTile(
                                           dense: true,
                                           leading: const Icon(Icons.location_on_outlined),
-                                          title: Text('Lat: ${lat!.toStringAsFixed(6)}  Lng: ${lng!.toStringAsFixed(6)}'),
+                                          title: Text('Lat: ${lat.toStringAsFixed(6)}  Lng: ${lng.toStringAsFixed(6)}'),
                                         ),
-                                      if (bookBankImageUrl != null && bookBankImageUrl.isNotEmpty) const Divider(height: 0),
-                                      if (bookBankImageUrl != null && bookBankImageUrl.isNotEmpty)
+                                      if (hasBookBankImage) const Divider(height: 0),
+                                      if (hasBookBankImage)
                                         ListTile(
                                           dense: true,
                                           leading: ClipRRect(
                                             borderRadius: BorderRadius.circular(6),
                                             child: Image.network(
-                                              bookBankImageUrl!,
+                                              bookBankImage,
                                               width: 44,
                                               height: 44,
                                               fit: BoxFit.cover,
@@ -373,7 +376,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                               context: context,
                                               builder: (_) => Dialog(
                                                 child: InteractiveViewer(
-                                                  child: Image.network(bookBankImageUrl!),
+                                                  child: Image.network(bookBankImage),
                                                 ),
                                               ),
                                             );
