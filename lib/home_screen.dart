@@ -1,6 +1,7 @@
 ﻿import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'wallet_screen.dart';
 import 'notifications_screen.dart';
@@ -36,6 +37,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _pages[0] = _buildPage(0);
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
+
+    // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      systemNavigationBarColor: Colors.white,
+      systemNavigationBarIconBrightness: Brightness.dark,
+      systemNavigationBarDividerColor: Colors.white,
+      systemNavigationBarContrastEnforced: false,
+    ));
   }
 
   Future<void> _loadShopDetails() async {
@@ -242,7 +251,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        systemNavigationBarColor: Colors.white,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarDividerColor: Colors.white,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
       body: IndexedStack(
         index: _currentIndex,
         children: _pages.map((page) => page ?? const SizedBox.shrink()).toList(),
@@ -278,6 +294,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             ),
           ),
         ),
+      ),
       ),
     );
   }
@@ -397,16 +414,20 @@ class _HomeDashboard extends StatelessWidget {
         ),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.only(right: 12),
             child: GestureDetector(
               onTap: onProfileTap,
-              child: CircleAvatar(
-                radius: 26,
-                backgroundColor: AppColors.accent,
-                backgroundImage: avatarImage,
-                child: avatarImage == null
-                    ? const Icon(Icons.account_circle, color: Colors.white, size: 36)
-                    : null,
+              child: SizedBox(
+                width: 68,
+                height: 68,
+                child: CircleAvatar(
+                  radius: 34,
+                  backgroundColor: AppColors.accent,
+                  backgroundImage: avatarImage,
+                  child: avatarImage == null
+                      ? const Icon(Icons.account_circle, color: Colors.white, size: 42)
+                      : null,
+                ),
               ),
             ),
           ),

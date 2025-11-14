@@ -14,8 +14,9 @@ import 'utils/app_colors.dart';
 
 class ShopRegistrationScreen extends StatefulWidget {
   final String? serviceType;
+  final DocumentSnapshot? shopData; // optional: existing shop doc to edit
   
-  const ShopRegistrationScreen({super.key, this.serviceType});
+  const ShopRegistrationScreen({super.key, this.serviceType, this.shopData});
 
   @override
   State<ShopRegistrationScreen> createState() => _ShopRegistrationScreenState();
@@ -55,9 +56,11 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   
   File? _selectedImage;
   bool _isSaving = false;
+  String? _existingShopImageUrl;
   
   File? _selectedBookBankImage;
   bool _isUploadingBookBank = false;
+  String? _existingBookBankImageUrl;
   bool _isCheckingExisting = true;
   String? _resolvedServiceType;
   
@@ -128,9 +131,40 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     super.initState();
     _loadUserEmail();
     WidgetsBinding.instance.addPostFrameCallback((_) => _initRegistrationStatus());
+    _prefillIfEditing();
+  }
+
+  void _prefillIfEditing() {
+    if (widget.shopData == null || !widget.shopData!.exists) return;
+    final data = widget.shopData!.data() as Map<String, dynamic>?;
+    if (data == null) return;
+    _shopNameController.text = (data['name'] ?? '').toString();
+    _shopDescriptionController.text = (data['description'] ?? '').toString();
+    _addressController.text = (data['address'] ?? '').toString();
+    _phoneController.text = (data['phone'] ?? '').toString();
+    _emailController.text = (data['email'] ?? '').toString();
+    _bankNameController.text = (data['bankName'] ?? '').toString();
+    _accountNumberController.text = (data['accountNumber'] ?? '').toString();
+    _accountOwnerController.text = (data['accountOwner'] ?? '').toString();
+    final loc = data['location'];
+    if (loc is Map) {
+      _latitude = (loc['latitude'] as num?)?.toDouble();
+      _longitude = (loc['longitude'] as num?)?.toDouble();
+    }
+    _resolvedServiceType = (data['serviceType'] ?? widget.serviceType)?.toString();
+    _isCheckingExisting = false; // ready to edit
+
+    // keep existing media urls for preview/save
+    _existingShopImageUrl = (data['shopImageUrl'] ?? '').toString();
+    _existingBookBankImageUrl = (data['bookBankImageUrl'] ?? '').toString();
   }
 
   Future<void> _initRegistrationStatus() async {
+    // ถ้าเป็นโหมดแก้ไข (มี shopData) ให้ข้ามการ redirect
+    if (widget.shopData != null && widget.shopData!.exists) {
+      if (mounted) setState(() => _isCheckingExisting = false);
+      return;
+    }
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       if (mounted) setState(() => _isCheckingExisting = false);
@@ -160,9 +194,12 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       final collection = _collectionForService(serviceType);
       final doc = await FirebaseFirestore.instance.collection(collection).doc(user.uid).get();
       if (doc.exists) {
-        if (!mounted) return;
-        _navigateHome();
-        return;
+        // ถ้าลงทะเบียนแล้ว และไม่ได้อยู่ในโหมดแก้ไข ให้กลับหน้า Home
+        if (widget.shopData == null) {
+          if (!mounted) return;
+          _navigateHome();
+          return;
+        }
       }
     } catch (e) {
       debugPrint('Failed to check existing registration: $e');
@@ -411,18 +448,29 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       final serviceType = _resolvedServiceType ?? widget.serviceType;
       if (serviceType == null) throw Exception('ประเภทบริการไม่ถูกต้อง');
 
-      // อัปโหลดรูปภาพร้านค้าและสมุดบัญชีก่อน
-      String? shopImageUrl;
-      String? bookBankImageUrl;
+      // เตรียมรูปภาพ: ถ้าไม่อัปโหลดใหม่ ให้ใช้ของเดิม
+      String? shopImageUrl = _existingShopImageUrl;
+      String? bookBankImageUrl = _existingBookBankImageUrl;
 
+      // อัปโหลดไฟล์ใหม่ถ้ามี และลบไฟล์เก่าใน Storage
       if (_selectedImage != null) {
-        shopImageUrl = await _uploadImage();
-        if (shopImageUrl == null) throw Exception('อัปโหลดรูปร้านค้าล้มเหลว');
+        final newUrl = await _uploadImage();
+        if (newUrl == null) throw Exception('อัปโหลดรูปร้านค้าล้มเหลว');
+        final oldUrl = _existingShopImageUrl;
+        shopImageUrl = newUrl;
+        if (oldUrl != null && oldUrl.isNotEmpty && oldUrl != newUrl) {
+          _deleteOldStorageFile(oldUrl);
+        }
       }
 
       if (_selectedBookBankImage != null) {
-        bookBankImageUrl = await _uploadBookBankImage();
-        if (bookBankImageUrl == null) throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว');
+        final newUrl = await _uploadBookBankImage();
+        if (newUrl == null) throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว');
+        final oldUrl = _existingBookBankImageUrl;
+        bookBankImageUrl = newUrl;
+        if (oldUrl != null && oldUrl.isNotEmpty && oldUrl != newUrl) {
+          _deleteOldStorageFile(oldUrl);
+        }
       }
 
       final collection = _collectionForService(serviceType);
@@ -471,6 +519,15 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       if (mounted) {
         setState(() => _isSaving = false);
       }
+    }
+  }
+
+  Future<void> _deleteOldStorageFile(String url) async {
+    try {
+      final ref = FirebaseStorage.instance.refFromURL(url);
+      await ref.delete();
+    } catch (e) {
+      debugPrint('Skip delete old file: $e');
     }
   }
 
@@ -731,7 +788,7 @@ Future<String?> _uploadBookBankImage() async {
                             ? const Center(
                                 child: CircularProgressIndicator(),
                               )
-                            : _selectedImage != null
+                              : _selectedImage != null
                                 ? ClipRRect(
                                     borderRadius: BorderRadius.circular(12),
                                     child: Image.file(
@@ -739,6 +796,14 @@ Future<String?> _uploadBookBankImage() async {
                                       fit: BoxFit.cover,
                                     ),
                                   )
+                                  : (_existingShopImageUrl != null && _existingShopImageUrl!.isNotEmpty)
+                                      ? ClipRRect(
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Image.network(
+                                            _existingShopImageUrl!,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        )
                                 : Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
@@ -793,6 +858,14 @@ Future<String?> _uploadBookBankImage() async {
                                       fit: BoxFit.cover,
                                     ),
                                   )
+                                : (_existingBookBankImageUrl != null && _existingBookBankImageUrl!.isNotEmpty)
+                                    ? ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: Image.network(
+                                          _existingBookBankImageUrl!,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      )
                                 : Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [

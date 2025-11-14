@@ -11,15 +11,7 @@ class NavigationHelper {
     bool replace = true,
   }) async {
   try {
-      // 0. ตรวจสอบการยืนยันอีเมลก่อนเสมอ (สำหรับผู้ใช้ที่สมัครด้วยอีเมล)
-      // รีโหลดข้อมูลผู้ใช้ล่าสุดก่อนตรวจสอบ
-      await user.reload();
-      final freshUser = FirebaseAuth.instance.currentUser;
-
-      if (freshUser != null && !freshUser.emailVerified && freshUser.providerData.any((p) => p.providerId == 'password') && context.mounted) {
-        _navigate(context, '/email-verification', replace: replace);
-        return;
-      }
+      // ไม่บังคับตรวจยืนยันอีเมลที่นี่ ตามนโยบายล่าสุดของโปรเจกต์
 
       // 1. ตรวจสอบว่าเคยเซ็นสัญญาหรือยัง
       final contractDoc = await FirebaseFirestore.instance
@@ -134,6 +126,30 @@ class NavigationHelper {
       return shopDoc.exists;
     } catch (e) {
       debugPrint('Error checking registration status: $e');
+      return false;
+    }
+  }
+
+  /// ตรวจสอบการลงทะเบียนร้านค้าโดยใช้อีเมล (ไม่พึ่งข้อมูลสัญญา)
+  static Future<bool> isShopRegisteredByEmail(String email) async {
+    try {
+      final collections = [
+        'market_registrations',
+        'shop_registrations',
+        'restaurant_registrations',
+        'pharmacy_registrations',
+      ];
+      for (final col in collections) {
+        final snap = await FirebaseFirestore.instance
+            .collection(col)
+            .where('email', isEqualTo: email)
+            .limit(1)
+            .get();
+        if (snap.docs.isNotEmpty) return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('Error checking shop by email: $e');
       return false;
     }
   }

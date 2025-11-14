@@ -5,8 +5,6 @@ import 'package:cloud_firestore/cloud_firestore.dart'; // เพิ่ม import
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
-import 'slider_captcha_widget.dart';
-import 'navigation_helper.dart';
 import 'register_shop_next.dart';
 import 'contract_screen.dart';
 import 'utils/app_colors.dart';
@@ -333,47 +331,94 @@ class _RegisterScreenState extends State<RegisterScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  // แปลงประเภทบริการเป็นชื่อคอลเลกชั่น
+  String _getCollectionName(String serviceType) {
+    switch (serviceType) {
+      case 'ตลาด':
+        return 'market_registrations';
+      case 'ร้านค้า':
+        return 'shop_registrations';
+      case 'ร้านอาหาร':
+        return 'restaurant_registrations';
+      case 'ร้านขายยา':
+        return 'pharmacy_registrations';
+      default:
+        return 'shop_registrations';
+    }
+  }
+
   Future<void> _saveServiceRegistration() async {
     final serviceType = _serviceTypeNormalized;
     if (serviceType == null) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+    
     try {
+      final collectionName = _getCollectionName(serviceType);
+      
+      // บันทึกลงคอลเลกชั่นตามประเภทบริการ
+      await FirebaseFirestore.instance.collection(collectionName).doc(user.uid).set({
+        'email': user.email ?? '',
+        'phone': user.phoneNumber ?? '',
+        'serviceType': serviceType,
+        'userId': user.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+        'status': 'pending_contract',
+      }, SetOptions(merge: true));
+      
+      // บันทึกลง contracts collection
       await FirebaseFirestore.instance.collection('contracts').doc(user.uid).set({
         'serviceType': serviceType,
         'status': 'pending_acceptance',
-      });
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      
+      debugPrint('✅ บันทึกข้อมูลลง $collectionName และ contracts สำเร็จ');
     } catch (e) {
-      debugPrint('Firestore error: $e');
+      debugPrint('❌ Firestore error: $e');
     }
   }
 
-  void _showCaptchaAndSaveService() {
+  Future<void> _handleSocialSignIn() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (widget.serviceType == null || user == null) {
-      if (user != null && mounted) {
-        NavigationHelper.navigateBasedOnUserStatus(context, user);
-      }
+    if (user == null) return;
+    
+    // ตรวจสอบว่ามีประเภทบริการหรือยัง
+    if (_serviceTypeNormalized == null) {
+      _promptServiceTypeSelection();
       return;
     }
-
-    showDialog(
-      context: context,
-      barrierDismissible: false, // Prevents closing the dialog by tapping outside
-      builder: (dialogContext) => SliderCaptchaWidget(
-        onSuccess: () async {
-          Navigator.of(dialogContext).pop(); // Close captcha dialog first
-          await _saveServiceRegistration();
-          if (!mounted) return;
-
-          final user = FirebaseAuth.instance.currentUser;
-          if (user != null) {
-            await NavigationHelper.navigateBasedOnUserStatus(context, user);
-          }
+    
+    // บันทึกข้อมูลลงคอลเลกชั่นตามประเภทบริการทันที
+    await _saveServiceRegistration();
+    
+    if (!mounted) return;
+    
+    // ส่งอีเมลยืนยัน (ถ้าเป็น Google/Facebook ที่มีอีเมล)
+    if (user.email != null && !user.emailVerified) {
+      try {
+        await user.sendEmailVerification();
+        debugPrint('📧 ส่งอีเมลยืนยันไปที่: ${user.email}');
+      } catch (e) {
+        debugPrint('⚠️ ไม่สามารถส่งอีเมลยืนยัน: $e');
+      }
+    }
+    
+    // นำทางไปยืนยันอีเมลก่อนไปหน้าสัญญา
+    if (user.email != null && !user.emailVerified) {
+      Navigator.pushNamedAndRemoveUntil(
+        context,
+        '/email-verification',
+        (route) => false,
+        arguments: {
+          'serviceType': _serviceTypeNormalized,
+          'nextRoute': 'contract',
         },
-        onFail: () => _showSnack('Captcha ไม่ถูกต้อง กรุณาลองใหม่'),
-      ),
-    );
+      );
+    } else {
+      // ถ้ายืนยันแล้วหรือไม่มีอีเมล → ไปหน้าสัญญาเลย
+      _navigateToContract();
+    }
   }
 
   Future<void> _signInWithGoogle() async {
@@ -401,7 +446,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       if (!mounted) return;
       setState(() { _isSocialLoading = false; _socialLoadingKey = null; });
       if (!mounted) return;
-      _showCaptchaAndSaveService();
+      await _handleSocialSignIn();
 
     } on FirebaseAuthException catch (e) {
       _showSnack(e.message ?? 'Google เข้าสู่ระบบล้มเหลว');
@@ -443,7 +488,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       if (!mounted) return;
       setState(() { _isSocialLoading = false; _socialLoadingKey = null; });
       if (!mounted) return;
-  _showCaptchaAndSaveService();
+      await _handleSocialSignIn();
     } on FirebaseAuthException catch (e) {
       _showSnack(e.message ?? 'Facebook เข้าสู่ระบบล้มเหลว');
       if (mounted) {

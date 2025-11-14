@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Stub definition to satisfy printing plugin resource linking when platform attr android:attr/lStar is unavailable -->
+    <attr name="lStar" format="float" />
+</resources>

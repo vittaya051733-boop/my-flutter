@@ -1,4 +1,4 @@
-package com.example.myapp
+package ton.vit
 
 import io.flutter.embedding.android.FlutterActivity
 

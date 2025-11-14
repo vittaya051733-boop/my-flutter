@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'register_shop_next.dart';
 
 import 'utils/app_colors.dart';
 
@@ -76,7 +75,7 @@ class RegisterShopBlankScreen extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
+                children: [
                   Text(
                     'เซนสัญญา',
                     style: TextStyle(
@@ -101,7 +100,7 @@ class RegisterShopBlankScreen extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
+                children: [
                   Text(
                     'ตั้งค่าร้านค้าของฉัน',
                     style: TextStyle(
@@ -134,13 +133,11 @@ class RegisterShopBlankScreen extends StatelessWidget {
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    elevation: 2,
                   ),
                   onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (context) => const RegisterShopNextScreen(),
-                      ),
-                    );
+                    debugPrint('ปุ่มต่อไปถูกกด!');
+                    Navigator.of(context).pushNamed('/register-shop-next');
                   },
                   child: const Text('ต่อไป'),
                 ),

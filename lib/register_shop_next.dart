@@ -39,9 +39,7 @@ class _RegisterShopNextScreenState extends State<RegisterShopNextScreen> {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.black),
           onPressed: () {
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const RegisterShopBlankScreen()),
-            );
+            Navigator.of(context).maybePop();
           },
         ),
       ),

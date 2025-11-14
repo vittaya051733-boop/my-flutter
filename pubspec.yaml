@@ -17,7 +17,7 @@ dependencies:
   firebase_storage: ^11.7.7
   firebase_auth: ^4.6.3
   firebase_messaging: ^14.7.9
-  flutter_local_notifications: ^16.3.0
+  flutter_local_notifications: ^17.2.3
   google_sign_in: ^6.1.1
   shared_preferences: ^2.2.3
   flutter_svg: ^2.0.10+1
@@ -32,7 +32,7 @@ dependencies:
   http: ^1.1.0
   geocoding: ^4.0.0
   signature: ^5.4.1
-  printing: 5.13.1
+  # printing: 5.13.1  # Temporarily disabled due to Android build conflict with lStar attribute
   pdf: ^3.10.8
   file_saver: ^0.2.12
   image: ^4.2.0
@@ -52,10 +52,20 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
-    - assets/IMG_20251020_202817.jpg
 
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/logo.png"
+  image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
   remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+    background_color: "#ffffff"
+    theme_color: "#ffffff"
+  windows:
+    generate: true
+    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+  macos:
+    generate: true
+    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"

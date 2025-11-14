@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'dart:async'; // เพิ่ม: จัดการ async error/timeout ให้ไม่ทำให้แอปเด้ง
 import 'register_shop_blank.dart';
+import 'register_shop_next.dart';
 import 'contract_screen.dart';
 import 'shop_registration_screen.dart';
 import 'post_verification_intro_screen.dart';
@@ -189,6 +190,8 @@ class MyApp extends StatelessWidget {
         ),
       ),
       routes: {
+        '/welcome': (context) => const WelcomeScreen(),
+        '/register-shop-next': (context) => const RegisterShopNextScreen(),
         '/login': (context) {
           final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
           return LoginScreen(serviceType: serviceType);

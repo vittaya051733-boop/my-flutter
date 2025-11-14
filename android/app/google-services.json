@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "331553349621",
+    "project_id": "vanmarket-50d9d",
+    "storage_bucket": "vanmarket-50d9d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:331553349621:android:c3e96655b1063283430abc",
+        "android_client_info": {
+          "package_name": "ton.vit"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "331553349621-0uln3ptk2hldhkjqb2gok075f72p765v.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "ton.vit",
+            "certificate_hash": "17d51e94743cdd9958bb4389876feb67d68e6061"
+          }
+        },
+        {
+          "client_id": "331553349621-mbepoct87hefjvie42863qnu9cqmk1i8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAIKueErj1mUOBDCjPZD9tEyM7Kf7iNfwI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "331553349621-mbepoct87hefjvie42863qnu9cqmk1i8.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "331553349621-j60bsqf5t1jjnbajtq8qg4lalj8ps65o.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "tam.vit"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -45,10 +45,13 @@ class WelcomeScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: Icon(
-                  Icons.shopping_bag,
-                  size: 80,
-                  color: AppColors.accentDark,
+                child: ClipOval(
+                  child: Image.asset(
+                    'assets/file_000000008fc872089268acc9b04e5bcf.png',
+                    width: 100,
+                    height: 100,
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ),
               

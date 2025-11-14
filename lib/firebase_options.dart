@@ -41,7 +41,7 @@ class DefaultFirebaseOptions {
     appId: '1:331553349621:android:c3e96655b1063283430abc',
     messagingSenderId: '331553349621',
     projectId: 'vanmarket-50d9d',
-    storageBucket: 'vanmarket-50d9d.appspot.com',
+    storageBucket: 'vanmarket-50d9d.firebasestorage.app',
   );
 
   // WARNING: These are copied from Android for build purposes.
@@ -51,7 +51,7 @@ class DefaultFirebaseOptions {
     appId: '1:331553349621:ios:YOUR_IOS_APP_ID_SUFFIX', // Placeholder - MUST be replaced
     messagingSenderId: '331553349621',
     projectId: 'vanmarket-50d9d',
-    storageBucket: 'vanmarket-50d9d.appspot.com', // Corrected bucket name
+    storageBucket: 'vanmarket-50d9d.firebasestorage.app', // Corrected bucket name
     iosBundleId: 'com.example.myapp', // Placeholder - MUST match your Xcode bundle ID
   );
 }

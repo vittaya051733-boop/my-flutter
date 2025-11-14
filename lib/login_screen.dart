@@ -4,8 +4,6 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'slider_captcha_widget.dart';
 import 'navigation_helper.dart';
 
 import 'utils/app_colors.dart';
@@ -42,6 +40,7 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
+    // เช็คว่าเป็นเบอร์โทรหรือไม่
     final isPhone = RegExp(r'^\+?[0-9]{9,}$').hasMatch(input);
     if (isPhone) {
       if (!mounted) return;
@@ -49,6 +48,9 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
+    // ไม่ต้องเช็คว่า user exists หรือยัง ให้ลองล็อกอินเลย
+    // ถ้าไม่มี Firebase Auth จะ error เอง
+    // แต่จะเช็คการลงทะเบียนร้านใน _handlePostLogin() แทน
     setState(() => _isLoading = true);
     try {
       final userCredential = await FirebaseAuth.instance.signInWithEmailAndPassword(email: input, password: password);
@@ -58,23 +60,25 @@ class _LoginScreenState extends State<LoginScreen> {
         throw Exception('ไม่พบข้อมูลผู้ใช้หลังเข้าสู่ระบบ');
       }
 
-      // ตรวจสอบการยืนยันอีเมลหลังล็อกอินสำเร็จ
-      await user.reload(); // รีเฟรชข้อมูลล่าสุด
-      if (!user.emailVerified) {
-        // ถ้ายังไม่ยืนยันอีเมล ให้ไปหน้ายืนยัน และออกจากระบบเบื้องหลัง
-        await FirebaseAuth.instance.signOut(); // ป้องกันไม่ให้เข้าสู่ระบบโดยไม่ยืนยัน
-        if (mounted) Navigator.of(context).pushNamed('/email-verification');
-        setState(() => _isLoading = false);
-        return;
-      }
+      // ไม่บังคับยืนยันอีเมลในขั้นตอนล็อกอิน (ตามที่ผู้ใช้กำหนด)
       
-      // แสดง Captcha หลังล็อกอินสำเร็จ
+      // เช็คการลงทะเบียนร้านหลังล็อกอินสำเร็จ
       if (!mounted) return; // use_build_context_synchronously
       setState(() => _isLoading = false);
       await _handlePostLogin();
     } on FirebaseAuthException catch (e) { // use_build_context_synchronously
       if (!mounted) return;
-      _showSnack(e.message ?? 'ไม่สามารถเข้าสู่ระบบได้');
+      String message = 'ไม่สามารถเข้าสู่ระบบได้';
+      if (e.code == 'user-not-found') {
+        message = 'ไม่พบผู้ใช้นี้ในระบบ กรุณาลงทะเบียนก่อน';
+      } else if (e.code == 'wrong-password') {
+        message = 'รหัสผ่านไม่ถูกต้อง';
+      } else if (e.code == 'invalid-email') {
+        message = 'รูปแบบอีเมลไม่ถูกต้อง';
+      } else if (e.code == 'user-disabled') {
+        message = 'บัญชีนี้ถูกปิดการใช้งาน';
+      }
+      _showSnack(message);
       setState(() => _isLoading = false);
     }
   }
@@ -176,82 +180,39 @@ class _LoginScreenState extends State<LoginScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  // บันทึกข้อมูลบริการลง Firestore
-  Future<void> _saveServiceRegistration() async {
-    if (widget.serviceType == null) return;
-    
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    try {
-      // บันทึก serviceType ไปที่ collection 'contracts' ของ user คนนั้นๆ
-      // เพื่อให้ NavigationHelper นำทางไปหน้า contract ที่ถูกต้อง
-      await FirebaseFirestore.instance.collection('contracts').doc(user.uid).set({
-        'serviceType': widget.serviceType,
-        'status': 'pending_acceptance', // สถานะเริ่มต้น
-      });
-    } catch (e) {
-      debugPrint('Firestore error: $e');
-    }
-  }
-
-  // แสดง Captcha และบันทึกข้อมูล
-  void _showCaptchaAndSaveService() {
-    final user = FirebaseAuth.instance.currentUser;
-    if (widget.serviceType == null || user == null) {
-      if (user != null && mounted) {
-        NavigationHelper.navigateBasedOnUserStatus(context, user);
-      }
-      return;
-    }
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => SliderCaptchaWidget(
-        onSuccess: () async {
-          Navigator.of(dialogContext).pop();
-          await _saveServiceRegistration();
-          if (!mounted) return;
-
-          final refreshedUser = FirebaseAuth.instance.currentUser;
-          if (refreshedUser != null) {
-            await NavigationHelper.navigateBasedOnUserStatus(context, refreshedUser);
-          }
-        },
-        onFail: () {
-          _showSnack('Captcha ไม่ถูกต้อง กรุณาลองใหม่');
-        },
-      ),
-    );
-  }
+  
 
   Future<void> _handlePostLogin() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
-      final snapshot = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
-      final existingServiceType = snapshot.data()?['serviceType'] as String?;
-      if (snapshot.exists && existingServiceType != null) {
+      final email = user.email;
+      if (email == null || email.isEmpty) {
         if (!mounted) return;
-        await NavigationHelper.navigateBasedOnUserStatus(context, user);
+        await FirebaseAuth.instance.signOut();
+        _showSnack('บัญชีนี้ไม่มีอีเมล ไม่สามารถตรวจสอบการลงทะเบียนร้านค้าได้');
+        Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
         return;
       }
-      if (widget.serviceType != null) {
-        if (!mounted) return;
-        _showCaptchaAndSaveService();
-      } else {
-        if (!mounted) return;
-        await NavigationHelper.navigateBasedOnUserStatus(context, user);
+
+      // ตรวจสอบว่าเคยลงทะเบียนร้านหรือยัง
+      final eligible = await NavigationHelper.isShopRegisteredByEmail(email);
+      if (!mounted) return;
+      if (!eligible) {
+        // ถ้ายังไม่เคยลงทะเบียนร้าน → ออกจากระบบและกลับไปหน้า welcome
+        await FirebaseAuth.instance.signOut();
+        _showSnack('กรุณาลงทะเบียนร้านค้าก่อนเข้าสู่ระบบ');
+        Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
+        return;
       }
+      // ถ้าเคยลงทะเบียนแล้ว → เข้าสู่ระบบได้
+      Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
     } catch (e) {
-      debugPrint('Post-login check failed: $e');
-      if (widget.serviceType != null) {
-        if (!mounted) return;
-        _showCaptchaAndSaveService();
-      } else {
-        if (!mounted) return;
-        await NavigationHelper.navigateBasedOnUserStatus(context, user);
-      }
+      debugPrint('Post-login eligibility check failed: $e');
+      if (!mounted) return;
+      await FirebaseAuth.instance.signOut();
+      _showSnack('เกิดข้อผิดพลาดในการตรวจสอบข้อมูล');
+      Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
     }
   }
 
@@ -415,29 +376,11 @@ class _LoginScreenState extends State<LoginScreen> {
               buttonKey: 'facebook',
             ),
             const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                GestureDetector(
-                  onTap: () => Navigator.of(context).maybePop(),
-                  child: const Text('← ย้อนกลับ', style: TextStyle(color: AppColors.accent, fontSize: 16, fontWeight: FontWeight.w500)),
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('ยังไม่มีบัญชี? ', style: TextStyle(color: Color(0xFF718096))),
-                    GestureDetector(
-                      onTap: () {
-                        // แก้ไข: ใช้ pushNamed เพื่อให้สอดคล้องกับ routes ใน main.dart
-                        // และส่ง serviceType เป็น arguments
-                        Navigator.of(context).pushNamed('/register',
-                            arguments: widget.serviceType);
-                      },
-                      child: const Text('สมัครสมาชิก', style: TextStyle(color: AppColors.accent, fontWeight: FontWeight.bold)),
-                    ),
-                  ],
-                ),
-              ],
+            Center(
+              child: GestureDetector(
+                onTap: () => Navigator.of(context).maybePop(),
+                child: const Text('← ย้อนกลับ', style: TextStyle(color: AppColors.accent, fontSize: 16, fontWeight: FontWeight.w500)),
+              ),
             ),
             const SizedBox(height: 32),
           ],
@@ -463,7 +406,7 @@ class _LoginHeader extends StatelessWidget {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20.0),
               child: const Image(
-                image: AssetImage('assets/logo.png'),
+                image: AssetImage('assets/file_000000008fc872089268acc9b04e5bcf.png'),
                 fit: BoxFit.cover,
               ),
             ),

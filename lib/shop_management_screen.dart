@@ -204,35 +204,20 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       return const Center(child: CircularProgressIndicator());
     }
     if (_products.isEmpty) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: ElevatedButton(
-              onPressed: () => _navigateToAddProduct(context),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.accent,
-                foregroundColor: Colors.white,
-                shape: const StadiumBorder(),
-                padding: const EdgeInsets.all(16),
-              ),
-              child: const Icon(Icons.add, size: 28),
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.inbox_outlined, size: 80, color: Colors.grey[400]),
+            const SizedBox(height: 16),
+            const Text('ยังไม่มีสินค้าในร้านของคุณ', style: TextStyle(fontSize: 18, color: Colors.grey)),
+            const SizedBox(height: 8),
+            Text(
+              'แตะปุ่ม + มุมขวาล่างเพื่อเพิ่มสินค้า',
+              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
             ),
-          ),
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.inbox_outlined, size: 80, color: Colors.grey[400]),
-                  const SizedBox(height: 16),
-                  const Text('ยังไม่มีสินค้าในร้านของคุณ', style: TextStyle(fontSize: 18, color: Colors.grey)),
-                ],
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       );
     }
 

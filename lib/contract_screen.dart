@@ -246,17 +246,14 @@ class _ContractScreenState extends State<ContractScreen> {
       if (mounted) {
         _showSnackBar('กำลังอัปโหลดรูปบัตรประชาชน...', Colors.blue);
       }
-      String? idCardFrontUrl;
-      String? idCardBackUrl;
       String? signatureUrl;
       
-      // อัปโหลดรูปบัตรประชาชน (ด้านหน้า) เป็น WebP
+      // อัปโหลดรูปบัตรประชาชน (ไม่ต้องเก็บ URL)
       if (_selectedIdCardFrontImage != null) {
-        idCardFrontUrl = await _uploadImageAsWebp(_selectedIdCardFrontImage!, 'id_card_images');
+        await _uploadImageOnly(_selectedIdCardFrontImage!, 'id_card_images');
       }
-      // อัปโหลดรูปบัตรประชาชน (ด้านหลัง) เป็น WebP
       if (_selectedIdCardBackImage != null) {
-        idCardBackUrl = await _uploadImageAsWebp(_selectedIdCardBackImage!, 'id_card_images');
+        await _uploadImageOnly(_selectedIdCardBackImage!, 'id_card_images');
       }
 
       // อัปโหลดลายเซ็นเป็น WebP
@@ -301,8 +298,6 @@ class _ContractScreenState extends State<ContractScreen> {
         'serviceType': _resolvedServiceType,
         'status': 'accepted',
         'contractTextUrl': contractDownloadUrl,
-        'idCardFrontImageUrl': idCardFrontUrl,
-        'idCardBackImageUrl': idCardBackUrl,
         'signatureImageUrl': signatureUrl,
         'contractText': _contractTextController.text,
         'acceptedAt': FieldValue.serverTimestamp(),
@@ -387,6 +382,43 @@ class _ContractScreenState extends State<ContractScreen> {
   }
 
   // ฟังก์ชันอัปโหลดรูปภาพเป็น WebP
+  /// อัปโหลดไฟล์แบบไม่ดึง URL กลับมา (สำหรับบัตรประชาชน)
+  Future<void> _uploadImageOnly(File file, String path) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
+
+      if (!await file.exists()) {
+        throw Exception('ไม่พบไฟล์ที่เลือก กรุณาเลือกรูปภาพใหม่');
+      }
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = '$path/${user.uid}_$timestamp.png';
+
+      final bytes = await file.readAsBytes();
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
+      final pngBytes = img.encodePng(decoded);
+
+      final storage = FirebaseStorage.instanceFor(
+        bucket: 'vanmarket-50d9d.firebasestorage.app',
+      );
+      final storageRef = storage.ref().child(fileName);
+      print('📤 กำลังอัปโหลดไฟล์: $fileName');
+      print('📍 Bucket: ${storage.bucket}');
+
+      await storageRef.putData(
+        Uint8List.fromList(pngBytes),
+        SettableMetadata(contentType: 'image/png'),
+      );
+
+      print('✅ อัปโหลดสำเร็จ (ไม่ดึง URL)');
+    } catch (e) {
+      print('❌ Error อัปโหลด $path: $e');
+      throw Exception('อัปโหลดไฟล์ใน $path ล้มเหลว: $e');
+    }
+  }
+
   Future<String?> _uploadImageAsWebp(File file, String path) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
@@ -404,13 +436,20 @@ class _ContractScreenState extends State<ContractScreen> {
       if (decoded == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
       final pngBytes = img.encodePng(decoded);
 
-      final storageRef = FirebaseStorage.instance.ref().child(fileName);
+      final storage = FirebaseStorage.instanceFor(
+        bucket: 'vanmarket-50d9d.firebasestorage.app',
+      );
+      final storageRef = storage.ref().child(fileName);
+      print('📤 กำลังอัปโหลดไฟล์: $fileName');
       final uploadTask = await storageRef.putData(
         Uint8List.fromList(pngBytes),
         SettableMetadata(contentType: 'image/png'),
       );
-      return await uploadTask.ref.getDownloadURL();
+      final downloadUrl = await uploadTask.ref.getDownloadURL();
+      print('✅ อัปโหลดสำเร็จ: $downloadUrl');
+      return downloadUrl;
     } catch (e) {
+      print('❌ Error อัปโหลด $path: $e');
       throw Exception('อัปโหลดไฟล์ใน $path ล้มเหลว: $e');
     }
   }
