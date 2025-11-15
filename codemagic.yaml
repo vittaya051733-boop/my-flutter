@@ -1,13 +1,12 @@
 workflows:
-  boild_ios:
-    name: Build ios IPA
+  build_ios:
+    name: Build iOS IPA
     max_build_duration: 60
     environment:
       flutter: stable
-      xcode: letest
-   scripts:
-     - flutter pub get
-     -flutter build ipa --release
-   artifacts:
-    - build/ios/ipa/*.ipa
-    
+      xcode: latest
+    scripts:
+      - flutter pub get
+      - flutter build ipa --release
+    artifacts:
+      - build/ios/ipa/*.ipa
