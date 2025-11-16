@@ -21,6 +21,7 @@ import 'post_verification_intro_screen.dart';
 import 'navigation_helper.dart';
 import 'utils/app_colors.dart';
 import 'services/notification_service.dart';
+import 'widgets/app_update_gate.dart';
 
 // เพิ่ม: สวิตช์บังคับใช้ App Check Debug ผ่าน --dart-define=APP_CHECK_DEBUG=true
 const bool kAppCheckForceDebug =
@@ -222,7 +223,9 @@ class MyApp extends StatelessWidget {
         },
         '/home': (context) => const HomeScreen(),
       },
-      home: StreamBuilder<User?>(
+      home: AppUpdateGate(
+        allowSkipForMandatory: true,
+        child: StreamBuilder<User?>(
         // กลืน error ของสตรีม Auth เพื่อให้ไม่ทำให้แอปเด้ง
         stream: FirebaseAuth.instance.authStateChanges().handleError((e, stackTrace) {
           // Log the error for debugging purposes, but don't crash the app.
@@ -240,6 +243,7 @@ class MyApp extends StatelessWidget {
           }
           return snapshot.hasData ? const AuthWrapper() : const WelcomeScreen();
         },
+        ),
       ),
     );
   }

@@ -1,0 +1,48 @@
+name: file_saver
+description: >-
+  A Flutter plugin for saving files across all platforms (Android, iOS, Web, Windows, macOS, Linux).
+  Save files from bytes, File objects, file paths, or download from URLs with a single method call.
+  Features include MIME type support, Dio integration, and platform-specific save locations.
+  Supports saveAs() dialog for user-selected locations on supported platforms.
+version: 0.3.1
+repository: https://github.com/incrediblezayed/file_saver
+homepage: https://hassanansari.dev
+
+environment:
+  sdk: ">=2.17.0 <4.0.0"
+  flutter: ">=3.0.0"
+
+dependencies:
+  collection: ^1.19.1
+  dio: ^5.8.0+1
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  path_provider: ^2.1.5
+  path_provider_linux: ^2.2.1
+  path_provider_windows: ^2.3.0
+  web: ^1.1.1
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.incrediblezayed.file_saver
+        pluginClass: FileSaverPlugin
+      ios:
+        pluginClass: FileSaverPlugin
+      linux:
+        pluginClass: FileSaverPlugin
+      macos:
+        pluginClass: FileSaverPlugin
+      windows:
+        pluginClass: FileSaverPlugin
+      web:
+        pluginClass: FileSaverWeb
+        fileName: file_saver_web.dart

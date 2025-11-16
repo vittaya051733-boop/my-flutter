@@ -2,6 +2,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import 'wallet_screen.dart';
 import 'notifications_screen.dart';
@@ -11,6 +12,7 @@ import 'shop_management_screen.dart';
 import 'order_management_screen_new.dart';
 import 'driver_scanner_screen.dart';
 import 'utils/app_colors.dart';
+import 'chat_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -20,7 +22,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-  static const int _tabCount = 8;
+  static const int _tabCount = 9;
 
   late final TabController _tabController;
   int _currentIndex = 0;
@@ -79,6 +81,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final bool isOpen = data['isOpen'] as bool? ?? true;
 
         if (!mounted) return;
+        if (imageUrl != null && imageUrl.isNotEmpty) {
+          await precacheImage(CachedNetworkImageProvider(imageUrl), context);
+        }
         setState(() {
           if (imageUrl != null && imageUrl.isNotEmpty) {
             _shopImageUrl = imageUrl;
@@ -235,6 +240,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       case 6:
         return const NotificationsScreen();
       case 7:
+        return const ChatScreen();
+      case 8:
         return const SettingsScreen();
       default:
         return const SizedBox.shrink();
@@ -286,7 +293,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       _buildNavButton(icon: Icons.delivery_dining, index: 4),
                       _buildNavButton(icon: Icons.wallet, index: 5),
                       _buildNavButton(icon: Icons.notifications_outlined, index: 6),
-                      _buildNavButton(icon: Icons.settings_outlined, index: 7),
+                      _buildNavButton(icon: Icons.chat_bubble_outline, index: 7),
+                      _buildNavButton(icon: Icons.settings_outlined, index: 8),
                     ],
                   ),
                 ),
@@ -382,7 +390,7 @@ class _HomeDashboard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ImageProvider? avatarImage = (shopImageUrl != null && shopImageUrl!.isNotEmpty)
-        ? NetworkImage(shopImageUrl!)
+      ? CachedNetworkImageProvider(shopImageUrl!)
         : null;
     final String displayName = (shopName != null && shopName!.isNotEmpty)
         ? shopName!
@@ -511,10 +519,19 @@ class _HomeDashboard extends StatelessWidget {
                                 children: [
                                   Positioned.fill(
                                     child: imageUrl != null
-                                        ? Image.network(
-                                            imageUrl,
+                                        ? CachedNetworkImage(
+                                            imageUrl: imageUrl,
                                             fit: BoxFit.cover,
-                                            errorBuilder: (context, error, stack) => Container(
+                                            placeholder: (context, url) => Container(
+                                              color: Colors.grey[100],
+                                              alignment: Alignment.center,
+                                              child: const SizedBox(
+                                                width: 24,
+                                                height: 24,
+                                                child: CircularProgressIndicator(strokeWidth: 2),
+                                              ),
+                                            ),
+                                            errorWidget: (context, url, error) => Container(
                                               color: Colors.grey[200],
                                               alignment: Alignment.center,
                                               child: const Icon(Icons.broken_image, size: 36, color: Colors.grey),
@@ -671,14 +688,11 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                       final url = widget.images[index];
                       return ClipRRect(
                         borderRadius: BorderRadius.circular(12),
-                        child: Image.network(
-                          url,
+                        child: CachedNetworkImage(
+                          imageUrl: url,
                           fit: BoxFit.cover,
-                          loadingBuilder: (context, child, loadingProgress) {
-                            if (loadingProgress == null) return child;
-                            return const Center(child: CircularProgressIndicator());
-                          },
-                          errorBuilder: (context, error, stackTrace) => Container(
+                          placeholder: (context, _) => const Center(child: CircularProgressIndicator()),
+                          errorWidget: (context, _, __) => Container(
                             color: Colors.grey[200],
                             alignment: Alignment.center,
                             child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),

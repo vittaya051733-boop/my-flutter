@@ -310,9 +310,10 @@ class _ContractScreenState extends State<ContractScreen> {
       // บันทึกไฟล์ลงเครื่องผู้ใช้ (ข้อความสัญญา)
       try {
         await FileSaver.instance.saveFile(
-          name: 'contract_${freshUser.uid}_$timestamp',
-          bytes: contractBytes,
-          ext: 'txt');
+            name: 'contract_${freshUser.uid}_$timestamp',
+            bytes: Uint8List.fromList(contractBytes),
+            fileExtension: 'txt',
+            mimeType: MimeType.text);
         if (mounted) {
           _showSnackBar('📄 สัญญาถูกบันทึกในโฟลเดอร์ Downloads แล้ว', Colors.blue);
         }
@@ -324,9 +325,10 @@ class _ContractScreenState extends State<ContractScreen> {
       if (signatureBytes != null) {
         try {
           await FileSaver.instance.saveFile(
-            name: 'signature_${freshUser.uid}_$timestamp',
-            bytes: signatureBytes,
-            ext: 'png');
+              name: 'signature_${freshUser.uid}_$timestamp',
+              bytes: signatureBytes,
+              fileExtension: 'png',
+              mimeType: MimeType.png);
         } catch (e) {
           _showErrorDialog('ไม่สามารถบันทึกลายเซ็นลงเครื่องได้: $e');
         }
@@ -336,9 +338,10 @@ class _ContractScreenState extends State<ContractScreen> {
       if (_selectedIdCardFrontImage != null) {
         try {
           await FileSaver.instance.saveFile(
-            name: 'id_card_front_${freshUser.uid}_$timestamp',
-            bytes: await _selectedIdCardFrontImage!.readAsBytes(),
-            ext: 'png');
+              name: 'id_card_front_${freshUser.uid}_$timestamp',
+              bytes: await _selectedIdCardFrontImage!.readAsBytes(),
+              fileExtension: 'png',
+              mimeType: MimeType.png);
         } catch (e) {
           _showErrorDialog('ไม่สามารถบันทึกรูปบัตรประชาชน (หน้า) ลงเครื่องได้: $e');
         }
