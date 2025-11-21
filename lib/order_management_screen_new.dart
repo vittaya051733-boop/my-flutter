@@ -462,7 +462,7 @@ extension on _OrderManagementScreenState {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => OrderQRScreen(orderId: order.orderId),
+                    builder: (context) => OrderQRScreen(order: order),
                   ),
                 );
               },

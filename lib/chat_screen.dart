@@ -1,8 +1,10 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import 'chat_room_screen.dart';
 import 'models/user_profile.dart';
 import 'services/friend_service.dart';
+import 'utils/app_colors.dart';
 
 /// Conversation list with friend management similar to LINE.
 class ChatScreen extends StatefulWidget {
@@ -13,12 +15,12 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const Color _lineGreen = Color(0xFF00B900);
+  static const Color _lineOrange = AppColors.accent;
 
   final FriendService _friendService = FriendService();
   Stream<List<FriendPreview>>? _friendsStream;
   bool _initializing = true;
-  String? _error;
+  // Removed: _error (no longer needed)
 
   @override
   void initState() {
@@ -31,7 +33,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (user == null) {
       setState(() {
         _initializing = false;
-        _error = 'กรุณาเข้าสู่ระบบเพื่อใช้งานแชต';
       });
       return;
     }
@@ -47,7 +48,6 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() {
         _initializing = false;
-        _error = 'โหลดรายชื่อเพื่อนไม่สำเร็จ (${e.toString()})';
       });
     }
   }
@@ -72,9 +72,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F6F7),
+      backgroundColor: AppColors.accentLight,
       appBar: AppBar(
-        backgroundColor: _lineGreen,
+        backgroundColor: _lineOrange,
         elevation: 0,
         titleSpacing: 0,
         title: const Text('แชต'),
@@ -94,7 +94,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
-          _SearchField(green: _lineGreen),
+          _SearchField(accent: _lineOrange),
           Expanded(child: _buildFriendList()),
         ],
       ),
@@ -107,7 +107,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (_friendsStream == null) {
-      return _EmptyState(message: _error ?? 'ไม่พบผู้ใช้');
+      return const _EmptyState(message: 'ไม่พบผู้ใช้');
     }
 
     return StreamBuilder<List<FriendPreview>>(
@@ -128,26 +128,38 @@ class _ChatScreenState extends State<ChatScreen> {
 
         return ListView.separated(
           padding: const EdgeInsets.symmetric(vertical: 12),
-          itemBuilder: (context, index) => _ChatTile(friend: friends[index], accent: _lineGreen),
+          itemBuilder: (context, index) => _ChatTile(
+            friend: friends[index],
+            accent: _lineOrange,
+            onTap: () => _openChat(friends[index]),
+          ),
           separatorBuilder: (context, index) => const Divider(height: 1, indent: 88),
           itemCount: friends.length,
         );
       },
     );
   }
+
+  void _openChat(FriendPreview friend) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatRoomScreen(friendProfile: friend.profile),
+      ),
+    );
+  }
 }
 
 class _SearchField extends StatelessWidget {
-  const _SearchField({required this.green});
+  const _SearchField({required this.accent});
 
-  final Color green;
+  final Color accent;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-      color: Colors.white,
+      color: AppColors.accentLight,
       child: Container(
         decoration: BoxDecoration(
           color: const Color(0xFFF0F0F0),
@@ -155,13 +167,13 @@ class _SearchField extends StatelessWidget {
         ),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
-          children: const [
-            Icon(Icons.search, color: Colors.grey),
-            SizedBox(width: 8),
-            Expanded(
+          children: [
+            Icon(Icons.search, color: accent),
+            const SizedBox(width: 8),
+            const Expanded(
               child: Text(
                 'ค้นหาเพื่อนหรือข้อความ',
-                style: TextStyle(color: Colors.grey, fontSize: 15),
+                style: TextStyle(color: AppColors.accent, fontSize: 15),
               ),
             ),
           ],
@@ -172,10 +184,11 @@ class _SearchField extends StatelessWidget {
 }
 
 class _ChatTile extends StatelessWidget {
-  const _ChatTile({required this.friend, required this.accent});
+  const _ChatTile({required this.friend, required this.accent, this.onTap});
 
   final FriendPreview friend;
   final Color accent;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -184,9 +197,9 @@ class _ChatTile extends StatelessWidget {
     final subtitleStyle = theme.textTheme.bodyMedium?.copyWith(color: Colors.grey[600]);
 
     return InkWell(
-      onTap: () {},
+      onTap: onTap,
       child: Container(
-        color: Colors.white,
+        color: AppColors.accentLight,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           children: [
@@ -237,7 +250,7 @@ class _ChatTile extends StatelessWidget {
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFE6F9EA),
+                          color: AppColors.accentSoft,
                           borderRadius: BorderRadius.circular(16),
                         ),
                         child: Row(
@@ -293,7 +306,7 @@ class _UnreadBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color,
+        color: AppColors.accent,
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -341,7 +354,6 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
   final TextEditingController _controller = TextEditingController();
   UserProfile? _result;
   bool _searching = false;
-  String? _error;
   late Future<List<UserProfile>> _suggestionsFuture;
 
   @override
@@ -367,49 +379,12 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('เพิ่มเพื่อนด้วยเบอร์โทรศัพท์',
+            const Text('เพิ่มเพื่อนด้วยชื่อร้าน',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            TextField(
-              controller: _controller,
-              keyboardType: TextInputType.phone,
-              decoration: InputDecoration(
-                labelText: 'เบอร์โทรศัพท์ที่ลงทะเบียน',
-                prefixIcon: const Icon(Icons.phone),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _searching ? null : _search,
-                icon: _searching
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Icon(Icons.search),
-                label: Text(_searching ? 'กำลังค้นหา...' : 'ค้นหาเพื่อน'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _ChatScreenState._lineGreen,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 12),
-              Text(_error!, style: const TextStyle(color: Colors.red)),
-            ],
-            if (_result != null) ...[
-              const SizedBox(height: 16),
-              _FriendResultCard(
-                profile: _result!,
-                onAdd: _searching ? null : _addFriend,
-              ),
-            ],
+            // No phone input, only show suggestions
+            const Text('เลือกจากรายชื่อร้านค้าด้านล่างเพื่อเพิ่มเป็นเพื่อน',
+                style: TextStyle(fontSize: 16)),
             const SizedBox(height: 20),
             const Text('ร้านค้าที่อาจรู้จัก',
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -445,37 +420,7 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
     );
   }
 
-  Future<void> _search() async {
-    final query = _controller.text.trim();
-    if (query.isEmpty) {
-      setState(() => _error = 'กรุณากรอกเบอร์โทรศัพท์');
-      return;
-    }
-    setState(() {
-      _searching = true;
-      _error = null;
-      _result = null;
-    });
-    try {
-      final result = await widget.friendService.findUserByPhone(query);
-      if (!mounted) return;
-      if (result == null) {
-        setState(() => _error = 'ไม่พบผู้ใช้งานในระบบด้วยเบอร์นี้');
-      } else if (result.uid == widget.ownerId) {
-        setState(() => _error = 'นี่คือบัญชีของคุณเอง');
-      } else {
-        setState(() => _result = result);
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _error = 'ค้นหาไม่สำเร็จ: $e');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _searching = false);
-      }
-    }
-  }
+  // Removed: _search() (no longer needed)
 
   Future<void> _addFriend() async {
     final target = _result;
@@ -485,10 +430,8 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
       await widget.friendService.addFriend(ownerId: widget.ownerId, friend: target);
       if (!mounted) return;
       Navigator.of(context).pop(true);
-    } on FriendException catch (e) {
-      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      if (mounted) setState(() => _error = 'เพิ่มเพื่อนไม่สำเร็จ: $e');
+      // Optionally show error with SnackBar or ignore
     } finally {
       if (mounted) setState(() => _searching = false);
     }
@@ -497,7 +440,6 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
   Future<void> _addSuggested(UserProfile profile) async {
     setState(() {
       _result = profile;
-      _error = null;
     });
     await _addFriend();
   }
@@ -537,7 +479,7 @@ class _FriendResultCard extends StatelessWidget {
           ElevatedButton(
             onPressed: onAdd,
             style: ElevatedButton.styleFrom(
-              backgroundColor: _ChatScreenState._lineGreen,
+              backgroundColor: AppColors.accent,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
             ),

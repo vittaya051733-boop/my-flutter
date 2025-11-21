@@ -3,7 +3,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
 import 'navigation_helper.dart';
 
 import 'utils/app_colors.dart';
@@ -131,50 +130,6 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _signInWithFacebook() async {
-    setState(() {
-      _isSocialLoading = true;
-      _socialLoadingKey = 'facebook';
-    });
-    try {
-      final LoginResult result = await FacebookAuth.instance.login();
-      if (result.status != LoginStatus.success) {
-        if (mounted) {
-          setState(() {
-            _isSocialLoading = false;
-            _socialLoadingKey = null;
-          });
-        }
-        return;
-      }
-      final OAuthCredential credential = FacebookAuthProvider.credential(result.accessToken!.token);
-      await FirebaseAuth.instance.signInWithCredential(credential);
-      
-      // แสดง Captcha หลังล็อกอินสำเร็จ
-      if (!mounted) return; // use_build_context_synchronously
-      setState(() {
-        _isSocialLoading = false;
-        _socialLoadingKey = null;
-      });
-      await _handlePostLogin();
-    } on FirebaseAuthException catch (e) { // use_build_context_synchronously
-      debugPrint('Facebook sign-in failed: ${e.message}');
-      if (mounted) {
-        setState(() {
-          _isSocialLoading = false;
-          _socialLoadingKey = null;
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _isSocialLoading = false;
-          _socialLoadingKey = null;
-        });
-      }
-    }
-  }
-
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -223,6 +178,7 @@ class _LoginScreenState extends State<LoginScreen> {
     required Color foregroundColor,
     required String buttonKey,
     String? assetSvg,
+    String? assetImage,
     IconData? icon,
   }) {
     final isLoading = _isSocialLoading && _socialLoadingKey == buttonKey;
@@ -247,9 +203,16 @@ class _LoginScreenState extends State<LoginScreen> {
                   valueColor: AlwaysStoppedAnimation<Color>(foregroundColor),
                 ),
               )
-            : (assetSvg != null
-                ? SvgPicture.asset(assetSvg, height: 22, width: 22)
-                : Icon(icon, size: 22, color: foregroundColor)),
+            : (assetImage != null
+                ? Image.asset(
+                    assetImage,
+                    width: 22,
+                    height: 22,
+                    fit: BoxFit.contain,
+                  )
+                : assetSvg != null
+                    ? SvgPicture.asset(assetSvg, height: 22, width: 22)
+                    : Icon(icon, size: 22, color: foregroundColor)),
         label: Text(label, style: TextStyle(fontSize: 16, color: foregroundColor, fontWeight: FontWeight.w500)),
       ),
     );
@@ -359,21 +322,12 @@ class _LoginScreenState extends State<LoginScreen> {
               width: double.infinity,
               child: _socialButton(
                 onPressed: _isSocialLoading ? null : _signInWithGoogle,
-                assetSvg: 'assets/icons/google_logo.svg',
+                assetImage: 'assets/file_0000000075b0720680f74d4375d75c25.png',
                 label: 'เข้าสู่ระบบด้วย Google',
                 backgroundColor: Colors.white,
                 foregroundColor: Colors.black87,
                 buttonKey: 'google',
               ),
-            ),
-            const SizedBox(height: 12),
-            _socialButton(
-              onPressed: _isSocialLoading ? null : _signInWithFacebook,
-              icon: Icons.facebook,
-              label: 'เข้าสู่ระบบด้วย Facebook',
-              backgroundColor: const Color(0xFF1877F2),
-              foregroundColor: Colors.white,
-              buttonKey: 'facebook',
             ),
             const SizedBox(height: 24),
             Center(

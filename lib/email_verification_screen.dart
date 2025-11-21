@@ -19,7 +19,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   void initState() {
     super.initState();
     // Start a timer to periodically check the email verification status.
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _checkEmailVerified());
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) => _checkEmailVerified());
   }
 
   @override
@@ -36,14 +36,31 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         _timer?.cancel();
         if (!mounted) return;
 
-        final serviceType =
-            ModalRoute.of(context)?.settings.arguments as String?;
+        final args = ModalRoute.of(context)?.settings.arguments;
+        String? serviceType;
+        String? nextRoute;
+        if (args is Map<String, dynamic>) {
+          serviceType = args['serviceType'] as String?;
+          nextRoute = args['nextRoute'] as String?;
+        } else if (args is String?) {
+          serviceType = args;
+        }
+
+        final targetRoute = switch (nextRoute) {
+          'contract' => '/contract',
+          'post-intro' => '/post-verification-intro',
+          _ => '/contract',
+        };
 
         Navigator.of(context).pushNamedAndRemoveUntil(
-          '/post-verification-intro',
+          targetRoute,
           (route) => false,
           arguments: serviceType,
         );
+      }
+    } on FirebaseAuthException catch (e) {
+      if (e.message?.contains('Too many attempts') ?? false) {
+        await Future.delayed(const Duration(seconds: 5));
       }
     } catch (e) {
       // ดักจับ error ที่อาจเกิดจากการ reload บ่อยไป (เช่น too-many-requests)

@@ -131,20 +131,18 @@ class FriendService {
     }
 
     final perCollectionLimit = (limit * 2).clamp(6, 30);
-    final futures = _shopCollections.map(
-      (collection) => _firestore
-          .collectionGroup(collection)
+    final suggestions = <UserProfile>[];
+    final seen = <String>{};
+
+    for (final collection in _shopCollections) {
+      final snapshot = await _firestore
+          .collection(collection)
           .where('isProfileCompleted', isEqualTo: true)
           .limit(perCollectionLimit)
-          .get(),
-    );
+          .get();
 
-    final snapshots = await Future.wait(futures);
-    final suggestions = <UserProfile>[];
-    for (var i = 0; i < snapshots.length; i++) {
-      final collection = _shopCollections[i];
-      for (final doc in snapshots[i].docs) {
-        if (exclude.contains(doc.id)) continue;
+      for (final doc in snapshot.docs) {
+        if (exclude.contains(doc.id) || seen.contains(doc.id)) continue;
         final data = doc.data();
         final profile = UserProfile(
           uid: doc.id,
@@ -156,10 +154,13 @@ class FriendService {
           profileCompleted: (data['isProfileCompleted'] as bool?) ?? true,
         );
         suggestions.add(profile);
+        seen.add(doc.id);
         if (suggestions.length >= limit) break;
       }
+
       if (suggestions.length >= limit) break;
     }
+
     return suggestions;
   }
 

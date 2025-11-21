@@ -3,6 +3,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import '../models/user_profile.dart';
+import '../call_screen.dart';
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -110,12 +112,52 @@ class NotificationService {
     }
   }
 
+  /// บันทึก FCM token ของผู้ใช้ลง Firestore
+  Future<void> saveUserFcmToken(String userId) async {
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token != null) {
+      await FirebaseFirestore.instance.collection('users').doc(userId).update({
+        'fcmToken': token,
+      });
+    }
+  }
+
   /// จัดการ notification เมื่อแอพอยู่ foreground
   Future<void> _handleForegroundMessage(RemoteMessage message) async {
     debugPrint('Received foreground message: ${message.messageId}');
 
     final notification = message.notification;
     final data = message.data;
+
+    // แจ้งเตือนสายเข้า/วิดีโอคอลจริง
+    if (data['type'] == 'call') {
+      // สร้าง UserProfile จาก payload
+      final profile = UserProfile(
+        uid: data['callerId'] ?? '',
+        displayName: data['callerName'] ?? 'ผู้โทร',
+        photoUrl: data['callerPhotoUrl'],
+      );
+      // แสดง in-app dialog (ถ้า context พร้อม)
+      final navigator = _getNavigatorKey();
+      if (navigator?.currentState != null) {
+        navigator!.currentState!.push(MaterialPageRoute(
+          builder: (_) => CallScreen(
+            channelName: data['channelId'] ?? '',
+            isVideo: data['callType'] == 'video',
+            targetProfile: profile,
+            isIncoming: true,
+            tokenOverride: data['token'],
+          ),
+        ));
+        return;
+      }
+      // ถ้า context ยังไม่พร้อม ให้แสดง local notification ปกติ
+      await _showLocalNotification(
+        title: 'สายเข้า',
+        body: '${data['callerName'] ?? 'มีสายเข้า'} (${data['callType'] == 'video' ? 'วิดีโอคอล' : 'เสียง'})',
+      );
+      return;
+    }
 
     if (notification != null) {
       await _showLocalNotification(
@@ -124,6 +166,17 @@ class NotificationService {
         payload: data['orderId'],
       );
     }
+  }
+
+  /// ดึง navigatorKey จาก MyApp (ต้องตั้ง navigatorKey ใน MaterialApp)
+  GlobalKey<NavigatorState>? _getNavigatorKey() {
+    try {
+      final app = WidgetsBinding.instance.renderViewElement?.widget;
+      if (app is MaterialApp && app.navigatorKey is GlobalKey<NavigatorState>) {
+        return app.navigatorKey as GlobalKey<NavigatorState>;
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// แสดง local notification

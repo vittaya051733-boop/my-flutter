@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'shop_registration_screen.dart';
 import 'welcome_screen.dart';
@@ -180,10 +179,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final providers = user.providerData.map((p) => p.providerId).toSet();
       if (providers.contains('google.com')) {
         await GoogleSignIn().signOut();
-        if (!context.mounted) return;
-      }
-      if (providers.contains('facebook.com')) {
-        await FacebookAuth.instance.logOut();
         if (!context.mounted) return;
       }
       await FirebaseAuth.instance.signOut();

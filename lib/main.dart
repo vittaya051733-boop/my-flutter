@@ -260,15 +260,15 @@ class _AuthWrapperState extends State<AuthWrapper> {
   @override
   void initState() {
     super.initState();
-    _navigate();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _navigate());
   }
 
   Future<void> _navigate() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user != null && mounted) {
+      // อัปเดต FCM token อัตโนมัติหลัง login
+      await NotificationService().saveUserFcmToken(user.uid);
       // ใช้ NavigationHelper เพื่อตรวจสอบและนำทาง
-      // การใช้ replace: true จะแทนที่หน้าจอปัจจุบัน (AuthWrapper)
-      // เพื่อไม่ให้ผู้ใช้กด back กลับมาหน้านี้ได้
       await NavigationHelper.navigateBasedOnUserStatus(context, user, replace: true);
     }
   }

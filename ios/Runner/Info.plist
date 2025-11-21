@@ -45,6 +45,28 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>FacebookAppID</key>
+	<string>4362533627406092</string>
+	<key>FacebookClientToken</key>
+	<string>fea2d2cce3e10bf12e9a24a8ef1fc55f</string>
+	<key>FacebookDisplayName</key>
+	<string>vittaya333</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>fbapi</string>
+		<string>fb-messenger-share-api</string>
+		<string>fbauth2</string>
+		<string>fbshareextension</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>fb4362533627406092</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>แอปนี้ต้องการเข้าถึงคลังรูปภาพของคุณเพื่อเลือกรูปภาพสำหรับร้านค้าและสมุดบัญชีของคุณ</string>
 	<key>NSCameraUsageDescription</key>

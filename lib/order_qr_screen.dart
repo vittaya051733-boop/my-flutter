@@ -5,9 +5,11 @@ import 'utils/app_colors.dart';
 /// หน้าแสดง QR Code สำหรับไรเดอร์
 /// - Order QR: ให้ไรเดอร์สแกนตอนรับสินค้า
 /// - Location QR: ให้ลูกค้าสแกนตอนรับสินค้า
+import 'models/order_model.dart';
+
 class OrderQRScreen extends StatelessWidget {
-  final String orderId;
-  const OrderQRScreen({super.key, required this.orderId});
+  final DetailedOrder order;
+  const OrderQRScreen({super.key, required this.order});
 
   @override
   Widget build(BuildContext context) {
@@ -21,135 +23,7 @@ class OrderQRScreen extends StatelessWidget {
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
-            // คำอธิบาย
-            Card(
-              color: AppColors.accentLight,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Icon(Icons.info_outline, color: AppColors.accent, size: 32),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'แสดง QR Code ให้ไรเดอร์สแกนเพื่ออัพเดทสถานะการจัดส่ง',
-                        style: TextStyle(
-                          color: AppColors.accent,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
             
-            // Order QR
-            Card(
-              elevation: 4,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade50,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.local_shipping, color: Colors.green.shade700),
-                          const SizedBox(width: 8),
-                          Text(
-                            'QR สินค้า',
-                            style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.green.shade700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'ให้ไรเดอร์สแกนตอนรับสินค้า',
-                      style: TextStyle(color: Colors.grey, fontSize: 14),
-                    ),
-                    const SizedBox(height: 24),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey.shade300, width: 2),
-                      ),
-                      child: QrImageView(
-                        data: 'ORDER:$orderId',
-                        version: QrVersions.auto,
-                        size: 250.0,
-                        backgroundColor: Colors.white,
-                        eyeStyle: QrEyeStyle(
-                          eyeShape: QrEyeShape.square,
-                          color: AppColors.accent,
-                        ),
-                        dataModuleStyle: QrDataModuleStyle(
-                          dataModuleShape: QrDataModuleShape.square,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade100,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        'ORDER:${orderId.substring(0, orderId.length > 8 ? 8 : orderId.length)}...',
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: Colors.black54,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.check_circle, color: Colors.green.shade700, size: 20),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'เมื่อสแกนแล้ว → สถานะเป็น "กำลังจัดส่ง"',
-                              style: TextStyle(
-                                color: Colors.green.shade700,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
             
             // Location QR
             Card(
@@ -184,10 +58,6 @@ class OrderQRScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    const Text(
-                      'ให้ลูกค้าสแกนตอนรับสินค้า',
-                      style: TextStyle(color: Colors.grey, fontSize: 14),
-                    ),
                     const SizedBox(height: 24),
                     Container(
                       padding: const EdgeInsets.all(16),
@@ -197,7 +67,7 @@ class OrderQRScreen extends StatelessWidget {
                         border: Border.all(color: Colors.grey.shade300, width: 2),
                       ),
                       child: QrImageView(
-                        data: 'LOCATION:$orderId',
+                        data: 'LOCATION:${order.orderId}',
                         version: QrVersions.auto,
                         size: 250.0,
                         backgroundColor: Colors.white,
@@ -219,7 +89,7 @@ class OrderQRScreen extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
-                        'LOCATION:${orderId.substring(0, orderId.length > 8 ? 8 : orderId.length)}...',
+                        'LOCATION:${order.orderId.substring(0, order.orderId.length > 8 ? 8 : order.orderId.length)}...',
                         style: const TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 12,
@@ -228,35 +98,42 @@ class OrderQRScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.check_circle, color: Colors.blue.shade700, size: 20),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'เมื่อสแกนแล้ว → สถานะเป็น "ส่งสำเร็จ"',
-                              style: TextStyle(
-                                color: Colors.blue.shade700,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 24),
             
+            // แสดงรายละเอียดสินค้าใต้ QR Code
+            if (order.items.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Card(
+                color: Colors.yellow.shade50,
+                elevation: 2,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('รายละเอียดสินค้า', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      const SizedBox(height: 8),
+                      ...order.items.map((item) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: [
+                            Expanded(child: Text(item.productName, style: const TextStyle(fontSize: 14))),
+                            Text('x${item.quantity}', style: const TextStyle(fontSize: 14)),
+                            const SizedBox(width: 12),
+                            Text('฿${item.price.toStringAsFixed(2)}', style: const TextStyle(fontSize: 14, color: Colors.black54)),
+                          ],
+                        ),
+                      )),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             // ปุ่มแชร์/พิมพ์ (อาจเพิ่มในอนาคต)
             Row(
               children: [

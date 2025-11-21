@@ -25,6 +25,12 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   bool _hasMore = true;
   DocumentSnapshot? _lastDocument;
 
+  bool get _areAllProductsSelected {
+    final productIds = _products.where((p) => p.id != null).map((p) => p.id!).toSet();
+    if (productIds.isEmpty) return false;
+    return productIds.every(_homeProductIds.contains);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -172,6 +178,14 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     return Scaffold(
       backgroundColor: Colors.white,
       appBar: AppBar(
+        leading: IconButton(
+          onPressed: _products.isEmpty ? null : _toggleSelectAllHomeProducts,
+          tooltip: _areAllProductsSelected ? 'ยกเลิกเลือกทั้งหมด' : 'เลือกสินค้าทั้งหมด',
+          icon: Icon(
+            _areAllProductsSelected ? Icons.radio_button_unchecked : Icons.task_alt,
+            color: Colors.white,
+          ),
+        ),
         title: const Text('จัดการร้านค้า'),
         automaticallyImplyLeading: false,
         backgroundColor: AppColors.accent,
@@ -198,6 +212,32 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       ),
     );
   }
+
+    /// Toggle the ready-for-sale status for every currently loaded product at once.
+    void _toggleSelectAllHomeProducts() {
+      final productIds = _products.where((p) => p.id != null).map((p) => p.id!).toSet();
+      if (productIds.isEmpty) return;
+
+      final shouldSelectAll = !_areAllProductsSelected;
+      setState(() {
+        if (shouldSelectAll) {
+          _homeProductIds.addAll(productIds);
+        } else {
+          _homeProductIds.removeAll(productIds);
+        }
+      });
+
+      widget.onHomeProductIdsChanged?.call(_homeProductIds);
+
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(shouldSelectAll ? 'เลือกสถานะพร้อมขายสำหรับสินค้าทั้งหมดแล้ว' : 'ยกเลิกสถานะพร้อมขายสำหรับสินค้าทั้งหมดแล้ว'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
 
   Widget _buildProductList() {
     if (_isFirstLoad) {

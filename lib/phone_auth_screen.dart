@@ -79,7 +79,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     final phoneNumber = _phoneController.text.trim();
     // Firebase requires the E.164 format, which must start with a '+'.
     if (!phoneNumber.startsWith('+')) {
-      if (mounted) { // curly_braces_in_flow_control_structures
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
               content: Text(
@@ -95,6 +95,38 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     });
 
     try {
+      // Check Firestore for user existence
+      final userQuery = await FirebaseFirestore.instance
+          .collection('users')
+          .where('phoneNumber', isEqualTo: phoneNumber)
+          .limit(1)
+          .get();
+
+      if (userQuery.docs.isNotEmpty) {
+        // User exists, log in directly (no OTP required)
+        // Use Firebase Auth to sign in with phone number (custom logic, e.g. link to password or direct navigation)
+        setState(() {
+          _isLoading = false;
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('เข้าสู่ระบบด้วยเบอร์โทรสำเร็จ (ไม่ต้อง OTP)'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          // Navigate to home or user status
+          final user = FirebaseAuth.instance.currentUser;
+          if (user != null) {
+            await NavigationHelper.navigateBasedOnUserStatus(context, user);
+          } else {
+            Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
+          }
+        }
+        return;
+      }
+
+      // User does not exist, proceed with OTP registration
       await _auth.verifyPhoneNumber(
         phoneNumber: phoneNumber,
         verificationCompleted: (PhoneAuthCredential credential) async {
@@ -106,14 +138,12 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
           setState(() {
             _isLoading = false;
           });
-          
           String message = 'เกิดข้อผิดพลาดในการส่ง OTP';
           if (e.code == 'invalid-phone-number') {
             message = 'เบอร์โทรศัพท์ไม่ถูกต้อง';
           } else if (e.code == 'too-many-requests') {
             message = 'มีการขอ OTP มากเกินไป กรุณาลองใหม่ภายหลัง';
           }
-          
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(message),
@@ -131,7 +161,6 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
           });
           if (!mounted) return;
           _startCountdown();
-          
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('ส่ง OTP ไปที่ ${_phoneController.text} แล้ว'),

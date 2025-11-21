@@ -23,7 +23,7 @@ android {
 
     defaultConfig {
         applicationId = "com.incrediblezayed.file_saver_example"
-        minSdk = 23
+        minSdk = flutter.minSdkVersion
         targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName

@@ -11,7 +11,24 @@ class NavigationHelper {
     bool replace = true,
   }) async {
   try {
-      // ไม่บังคับตรวจยืนยันอีเมลที่นี่ ตามนโยบายล่าสุดของโปรเจกต์
+      final shopLookup = await _fetchShopRegistration(user.uid);
+      final bool hasCompletedShopProfile = _hasCompletedShopProfile(shopLookup.data);
+
+      // หากลงทะเบียนร้านครบถ้วนแล้ว ให้ไปหน้าโฮมทันที ไม่ต้องยืนยันอีเมล/เบอร์ซ้ำ
+      if (hasCompletedShopProfile && context.mounted) {
+        _navigate(context, '/home', replace: replace);
+        return;
+      }
+
+      if (!user.emailVerified && context.mounted) {
+        _navigate(
+          context,
+          '/email-verification',
+          replace: replace,
+          arguments: null,
+        );
+        return;
+      }
 
       // 1. ตรวจสอบว่าเคยเซ็นสัญญาหรือยัง
       final contractDoc = await FirebaseFirestore.instance
@@ -31,27 +48,9 @@ class NavigationHelper {
 
       // 2. เซ็นสัญญาแล้ว -> ตรวจสอบว่าลงทะเบียนร้านค้าหรือยัง
       // ตรวจสอบในทุก collection ที่เป็นไปได้
-      final possibleCollections = [
-        'market_registrations', 
-        'shop_registrations', 
-        'restaurant_registrations', 
-        'pharmacy_registrations'
-      ];
-      DocumentSnapshot? shopDoc;
-      Map<String, dynamic>? shopData;
-
-      for (final collectionName in possibleCollections) {
-        final doc = await FirebaseFirestore.instance.collection(collectionName).doc(user.uid).get();
-        if (doc.exists) {
-          shopDoc = doc;
-          shopData = doc.data();
-          break;
-        }
-      }
       if (!context.mounted) return;
 
-      final hasCompletedShopProfile = _hasCompletedShopProfile(shopData);
-      if (shopDoc == null || !shopDoc.exists || !hasCompletedShopProfile) {
+      if (shopLookup.doc == null || !shopLookup.doc!.exists || !_hasCompletedShopProfile(shopLookup.data)) {
         // ยังไม่ได้ลงทะเบียนร้านค้า -> ไปหน้าลงทะเบียนร้านค้า
         _navigate(
           context,
@@ -228,4 +227,30 @@ class NavigationHelper {
       return null;
     }
   }
+
+  static Future<_ShopRegistrationLookup> _fetchShopRegistration(String userId) async {
+    final possibleCollections = [
+      'market_registrations',
+      'shop_registrations',
+      'restaurant_registrations',
+      'pharmacy_registrations',
+    ];
+
+    for (final collectionName in possibleCollections) {
+      final doc = await FirebaseFirestore.instance.collection(collectionName).doc(userId).get();
+      if (doc.exists) {
+        return _ShopRegistrationLookup(doc: doc, data: doc.data(), collection: collectionName);
+      }
+    }
+
+    return const _ShopRegistrationLookup();
+  }
+}
+
+class _ShopRegistrationLookup {
+  const _ShopRegistrationLookup({this.doc, this.data, this.collection});
+
+  final DocumentSnapshot<Map<String, dynamic>>? doc;
+  final Map<String, dynamic>? data;
+  final String? collection;
 }

@@ -22,6 +22,23 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+      int _notificationCount = 3; // ตัวอย่างจำนวนแจ้งเตือนใหม่
+      List<String> _notificationDetails = [
+        'มีออเดอร์ใหม่เข้ามา',
+        'ลูกค้าส่งข้อความ',
+        'ระบบแจ้งเตือนโปรโมชั่น',
+      ];
+    String? _activeNotification;
+    void showOverlayNotification(String message) {
+      setState(() {
+        _activeNotification = message;
+      });
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted && _activeNotification == message) {
+          setState(() => _activeNotification = null);
+        }
+      });
+    }
   static const int _tabCount = 9;
 
   late final TabController _tabController;
@@ -31,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   String? _shopName;
   Set<String> _homeProductIds = <String>{};
   bool _isShopOpen = true;
+  DocumentReference<Map<String, dynamic>>? _shopDocRef;
 
   @override
   void initState() {
@@ -54,24 +72,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
-      final Set<String> collectionsToCheck = <String>{};
-
-      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
-      final String? serviceType = contractDoc.data()?['serviceType'] as String?;
-      if (serviceType != null && serviceType.trim().isNotEmpty) {
-        collectionsToCheck.add(_collectionForServiceType(serviceType));
-      }
-
-      collectionsToCheck.addAll(const [
-        'market_registrations',
-        'shop_registrations',
-        'restaurant_registrations',
-        'pharmacy_registrations',
-        'other_registrations',
-      ]);
+      final collectionsToCheck = await _collectionsToCheck(user);
 
       for (final collectionName in collectionsToCheck) {
-        final snapshot = await FirebaseFirestore.instance.collection(collectionName).doc(user.uid).get();
+        final docRef = FirebaseFirestore.instance.collection(collectionName).doc(user.uid);
+        final snapshot = await docRef.get();
         if (!snapshot.exists) continue;
         final data = snapshot.data();
         if (data == null) continue;
@@ -79,12 +84,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final String? imageUrl = _readImageUrl(data);
         final String? name = _readShopName(data);
         final bool isOpen = data['isOpen'] as bool? ?? true;
+        final Set<String> homeIds = ((data['homeProductIds'] as List?) ?? const [])
+            .whereType<String>()
+            .toSet();
 
         if (!mounted) return;
         if (imageUrl != null && imageUrl.isNotEmpty) {
           await precacheImage(CachedNetworkImageProvider(imageUrl), context);
         }
         setState(() {
+          _shopDocRef = docRef;
           if (imageUrl != null && imageUrl.isNotEmpty) {
             _shopImageUrl = imageUrl;
           }
@@ -92,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             _shopName = name;
           }
           _isShopOpen = isOpen;
+          _homeProductIds = homeIds;
           _pages[0] = _buildPage(0);
         });
         break;
@@ -99,6 +109,36 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     } catch (e) {
       debugPrint('Failed to load shop details: $e');
     }
+  }
+
+  Future<List<String>> _collectionsToCheck(User user) async {
+    final List<String> collections = [];
+    try {
+      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
+      final String? serviceType = contractDoc.data()?['serviceType'] as String?;
+      if (serviceType != null && serviceType.trim().isNotEmpty) {
+        final resolved = _collectionForServiceType(serviceType);
+        collections.add(resolved);
+      }
+    } catch (e) {
+      debugPrint('Failed to read service type: $e');
+    }
+
+    const fallbackCollections = [
+      'market_registrations',
+      'shop_registrations',
+      'restaurant_registrations',
+      'pharmacy_registrations',
+      'other_registrations',
+    ];
+
+    for (final name in fallbackCollections) {
+      if (!collections.contains(name)) {
+        collections.add(name);
+      }
+    }
+
+    return collections;
   }
 
   String? _readImageUrl(Map<String, dynamic> data) {
@@ -140,37 +180,41 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Future<void> _saveShopOpenStatus(bool isOpen) async {
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final Set<String> collectionsToCheck = <String>{};
-
-      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
-      final String? serviceType = contractDoc.data()?['serviceType'] as String?;
-      if (serviceType != null && serviceType.trim().isNotEmpty) {
-        collectionsToCheck.add(_collectionForServiceType(serviceType));
-      }
-
-      collectionsToCheck.addAll(const [
-        'market_registrations',
-        'shop_registrations',
-        'restaurant_registrations',
-        'pharmacy_registrations',
-        'other_registrations',
-      ]);
-
-      for (final collectionName in collectionsToCheck) {
-        final docRef = FirebaseFirestore.instance.collection(collectionName).doc(user.uid);
-        final snapshot = await docRef.get();
-        if (snapshot.exists) {
-          await docRef.update({'isOpen': isOpen});
-          debugPrint('Updated isOpen=$isOpen in $collectionName');
-          break;
-        }
-      }
+      final docRef = await _getOrFindShopDocRef();
+      if (docRef == null) return;
+      await docRef.update({'isOpen': isOpen});
+      debugPrint('Updated isOpen=$isOpen for ${docRef.path}');
     } catch (e) {
       debugPrint('Failed to save shop open status: $e');
     }
+  }
+
+  Future<void> _saveHomeProductIds(Set<String> ids) async {
+    try {
+      final docRef = await _getOrFindShopDocRef();
+      if (docRef == null) return;
+      await docRef.update({'homeProductIds': ids.toList()});
+      debugPrint('Saved homeProductIds (${ids.length}) to ${docRef.path}');
+    } catch (e) {
+      debugPrint('Failed to save home product ids: $e');
+    }
+  }
+
+  Future<DocumentReference<Map<String, dynamic>>?> _getOrFindShopDocRef() async {
+    if (_shopDocRef != null) return _shopDocRef;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return null;
+
+    final collections = await _collectionsToCheck(user);
+    for (final name in collections) {
+      final docRef = FirebaseFirestore.instance.collection(name).doc(user.uid);
+      final snapshot = await docRef.get();
+      if (snapshot.exists) {
+        _shopDocRef = docRef;
+        return _shopDocRef;
+      }
+    }
+    return null;
   }
 
   void _handleTabChange() {
@@ -227,6 +271,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               _homeProductIds = ids;
               _pages[0] = _buildPage(0); // สร้างหน้าโฮมขึ้นมาใหม่
             });
+            _saveHomeProductIds(ids);
           },
         );
       case 2:
@@ -265,44 +310,84 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         systemNavigationBarDividerColor: Colors.white,
         systemNavigationBarContrastEnforced: false,
       ),
-      child: Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _pages.map((page) => page ?? const SizedBox.shrink()).toList(),
-      ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        minimum: EdgeInsets.zero,
-        child: ColoredBox(
-          color: Colors.white,
-          child: Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: SizedBox(
-              height: 65,
-              child: Center(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildNavButton(icon: Icons.home_outlined, index: 0),
-                      _buildNavButton(icon: Icons.store_outlined, index: 1),
-                      _buildNavButton(icon: Icons.receipt_long, index: 2),
-                      _buildNavButton(icon: Icons.qr_code_scanner, index: 3),
-                      _buildNavButton(icon: Icons.delivery_dining, index: 4),
-                      _buildNavButton(icon: Icons.wallet, index: 5),
-                      _buildNavButton(icon: Icons.notifications_outlined, index: 6),
-                      _buildNavButton(icon: Icons.chat_bubble_outline, index: 7),
-                      _buildNavButton(icon: Icons.settings_outlined, index: 8),
-                    ],
+      child: Stack(
+        children: [
+          Scaffold(
+            body: IndexedStack(
+              index: _currentIndex,
+              children: _pages.map((page) => page ?? const SizedBox.shrink()).toList(),
+            ),
+            bottomNavigationBar: SafeArea(
+              top: false,
+              minimum: EdgeInsets.zero,
+              child: ColoredBox(
+                color: Colors.white,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: SizedBox(
+                    height: 65,
+                    child: Center(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildNavButton(icon: Icons.home_outlined, index: 0),
+                            _buildNavButton(icon: Icons.store_outlined, index: 1),
+                            _buildNavButton(icon: Icons.receipt_long, index: 2),
+                            // Hidden QR scanner button (index 3) – feature paused for shop app UX
+                            _buildNavButton(icon: Icons.delivery_dining, index: 4),
+                            _buildNavButton(icon: Icons.wallet, index: 5),
+                            _buildNavButton(icon: Icons.notifications_outlined, index: 6),
+                            _buildNavButton(icon: Icons.chat_bubble_outline, index: 7),
+                            _buildNavButton(icon: Icons.settings_outlined, index: 8),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ),
+          if (_activeNotification != null)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  margin: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade700,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.notifications_active, color: Colors.white),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _activeNotification ?? '',
+                          style: const TextStyle(color: Colors.white, fontSize: 16),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => setState(() => _activeNotification = null),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -318,25 +403,87 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: InkWell(
-        onTap: () => _switchToTab(index),
+        onTap: () {
+          _switchToTab(index);
+          if (index == 6 && _notificationCount > 0) {
+            setState(() {
+              _notificationCount = 0;
+            });
+            _showNotificationDetails(context);
+          }
+        },
         borderRadius: BorderRadius.circular(48),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: isSelected ? 60 : 54,
-              height: isSelected ? 60 : 54,
-              decoration: BoxDecoration(
-                color: circleColor,
-                shape: BoxShape.circle,
-              ),
-              alignment: Alignment.center,
-              child: Icon(icon, color: iconColor, size: 22),
+            Stack(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: isSelected ? 60 : 54,
+                  height: isSelected ? 60 : 54,
+                  decoration: BoxDecoration(
+                    color: circleColor,
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(icon, color: iconColor, size: 22),
+                ),
+                if (index == 6 && _notificationCount > 0)
+                  Positioned(
+                    right: 6,
+                    top: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: Text(
+                        _notificationCount.toString(),
+                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ],
         ),
       ),
+    );
+
+  }
+
+  void _showNotificationDetails(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('รายละเอียดการแจ้งเตือน', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              ..._notificationDetails.map((msg) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    const Icon(Icons.notifications, color: Colors.orange, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 15))),
+                  ],
+                ),
+              )),
+              if (_notificationDetails.isEmpty)
+                const Text('ไม่มีการแจ้งเตือนใหม่', style: TextStyle(fontSize: 15)),
+            ],
+          ),
+        );
+      },
     );
   }
 }

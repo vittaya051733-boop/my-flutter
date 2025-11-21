@@ -1,5 +1,6 @@
 ﻿import 'dart:io';
 import 'package:flutter/material.dart';
+import 'widgets/product_video_player.dart';
 import 'package:image_picker/image_picker.dart';
 
 import 'package:firebase_storage/firebase_storage.dart';
@@ -26,6 +27,7 @@ class AddProductScreenState extends State<AddProductScreen> {
   final _colorsController = TextEditingController();
   final _sizesController = TextEditingController();
   final _weightController = TextEditingController();
+  String _weightUnit = 'g';
   final _otherUnitController = TextEditingController();
 
   final ImagePicker _picker = ImagePicker();
@@ -56,6 +58,10 @@ class AddProductScreenState extends State<AddProductScreen> {
       _colorsController.text = p.colors.join(', ');
       _sizesController.text = p.sizes.join(', ');
       _weightController.text = p.weight?.toString() ?? '';
+      if (p.weight != null) {
+        _weightController.text = p.weight!.toString();
+        _weightUnit = 'kg';
+      }
       _selectedUnit = _units.contains(p.unit) ? p.unit : 'อื่นๆ';
       if (_selectedUnit == 'อื่นๆ') _otherUnitController.text = p.unit;
       _existingImageUrls = p.imageUrls;
@@ -225,8 +231,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกน้ำหนักสินค้า')));
       return;
     }
-    // น้ำหนักสามารถเป็นตัวเลขหรือข้อความได้
-    final String weightValue = _weightController.text.trim();
+    final String weightValue = '${_weightController.text.trim()} $_weightUnit';
 
     if (_priceController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกราคา')));
@@ -338,7 +343,7 @@ class AddProductScreenState extends State<AddProductScreen> {
               children: [
                 Expanded(child: _buildTextField(label: 'ชื่อสินค้า', controller: _nameController)),
                 const SizedBox(width: 16),
-                Expanded(child: _buildTextField(label: 'น้ำหนัก', controller: _weightController, keyboardType: TextInputType.number)),
+                Expanded(child: _buildWeightField()),
               ],
             ),
             const SizedBox(height: 16),
@@ -571,21 +576,37 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   Widget _buildVideoPreviewContent() {
-    final String title = _videoFile != null
-        ? _videoFile!.name
-        : 'วิดีโอที่อัปโหลดแล้ว';
-
-    return Card( 
+    final String? videoUrl = _videoFile != null
+        ? null
+        : _existingVideoUrl;
+    final bool hasVideo = _videoFile != null || (videoUrl?.isNotEmpty ?? false);
+    return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 1,
-      child: ListTile(
-  leading: const Icon(Icons.play_circle_fill, color: AppColors.accent, size: 36),
-        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('ความยาวไม่เกิน ${_maxVideoDuration.inMinutes} นาที'),
-        trailing: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: _removeVideo,
-        ),
+      child: Column(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.play_circle_fill, color: AppColors.accent, size: 36),
+            title: Text(_videoFile != null ? _videoFile!.name : 'วิดีโอที่อัปโหลดแล้ว', maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text('ความยาวไม่เกิน ${_maxVideoDuration.inMinutes} นาที'),
+            trailing: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: _removeVideo,
+            ),
+          ),
+          if (hasVideo)
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: SizedBox(
+                height: 220,
+                child: _videoFile != null
+                    ? ProductVideoPlayer(videoUrl: _videoFile!.path) // ส่วนนี้ถูกต้องแล้ว
+                    : (videoUrl != null
+                        ? ProductVideoPlayer(videoUrl: videoUrl)
+                        : const Text('ไม่พบวิดีโอ')),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -621,6 +642,60 @@ class AddProductScreenState extends State<AddProductScreen> {
               borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
             ),
             contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWeightField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('น้ำหนัก', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 8),
+        Container(
+          height: 52,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(40),
+            border: Border.all(color: Colors.grey.shade400),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _weightController,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    hintText: 'ใส่น้ำหนัก',
+                    border: InputBorder.none,
+                    isCollapsed: true,
+                  ),
+                ),
+              ),
+              Container(
+                width: 1,
+                height: 28,
+                color: Colors.grey.shade300,
+              ),
+              const SizedBox(width: 12),
+              DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _weightUnit,
+                  icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.black54),
+                  style: const TextStyle(fontSize: 16, color: Colors.black87),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setState(() => _weightUnit = value);
+                  },
+                  items: const [
+                    DropdownMenuItem(value: 'g', child: Text('g')),
+                    DropdownMenuItem(value: 'kg', child: Text('kg')),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ],
