@@ -208,8 +208,23 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
               _dialogSetState?.call(() {});
               break;
             case OtaStatus.INSTALLING:
-              setState(() => _progress = null);
-              _dialogSetState?.call(() {});
+              // Download complete, Android installer will take over
+              debugPrint('OTA: Download complete, launching installer');
+              if (mounted && _dialogVisible) {
+                // Show brief message then close dialog
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('ดาวน์โหลดเสร็จแล้ว กรุณาติดตั้งและเปิดแอปใหม่'),
+                    duration: Duration(seconds: 3),
+                  ),
+                );
+                Navigator.of(context, rootNavigator: true).pop();
+              }
+              setState(() {
+                _isInstalling = false;
+                _progress = null;
+                _errorMessage = null;
+              });
               break;
             case OtaStatus.PERMISSION_NOT_GRANTED_ERROR:
             case OtaStatus.ALREADY_RUNNING_ERROR:

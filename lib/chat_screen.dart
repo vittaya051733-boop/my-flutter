@@ -71,8 +71,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.accentLight,
+      return Scaffold(
+        backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: _lineOrange,
         elevation: 0,
@@ -199,7 +199,7 @@ class _ChatTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Container(
-        color: AppColors.accentLight,
+           color: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           children: [

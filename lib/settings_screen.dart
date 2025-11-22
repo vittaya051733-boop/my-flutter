@@ -178,7 +178,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final providers = user.providerData.map((p) => p.providerId).toSet();
       if (providers.contains('google.com')) {
-        await GoogleSignIn().signOut();
+        await GoogleSignIn.instance.signOut();
         if (!context.mounted) return;
       }
       await FirebaseAuth.instance.signOut();

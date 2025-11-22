@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'utils/app_colors.dart';
+import 'package:blue_thermal_printer/blue_thermal_printer.dart';
 
 /// หน้าแสดง QR Code สำหรับไรเดอร์
 /// - Order QR: ให้ไรเดอร์สแกนตอนรับสินค้า
@@ -8,6 +9,35 @@ import 'utils/app_colors.dart';
 import 'models/order_model.dart';
 
 class OrderQRScreen extends StatelessWidget {
+  Future<void> _printQR(BuildContext context, String qrData, List items) async {
+    final printer = BlueThermalPrinter.instance;
+    try {
+      // สแกนหาอุปกรณ์ที่จับคู่แล้ว
+      List<BluetoothDevice> devices = await printer.getBondedDevices();
+      if (devices.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ไม่พบเครื่องปริ้นเตอร์ที่เชื่อมต่อ')),
+        );
+        return;
+      }
+      // เชื่อมต่อเครื่องแรก
+      await printer.connect(devices.first);
+      // สั่งพิมพ์ QR (พิมพ์ข้อความ QR data)
+      await printer.write('QR: $qrData');
+      await printer.write('--------------------------');
+      await printer.write('รายละเอียดสินค้า');
+      for (var item in items) {
+        await printer.write('${item.productName} x${item.quantity} ฿${item.price.toStringAsFixed(2)}');
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('พิมพ์ QR และรายละเอียดสินค้าแล้ว')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('เกิดข้อผิดพลาด: $e')),
+      );
+    }
+  }
   final DetailedOrder order;
   const OrderQRScreen({super.key, required this.order});
 
@@ -158,10 +188,7 @@ class OrderQRScreen extends StatelessWidget {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () {
-                      // TODO: Implement print QR
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('ฟีเจอร์พิมพ์ยังไม่พร้อมใช้งาน')),
-                      );
+                      _printQR(context, 'LOCATION:${order.orderId}', order.items);
                     },
                     icon: const Icon(Icons.print),
                     label: const Text('พิมพ์ QR'),

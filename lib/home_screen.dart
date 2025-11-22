@@ -13,6 +13,8 @@ import 'order_management_screen_new.dart';
 import 'driver_scanner_screen.dart';
 import 'utils/app_colors.dart';
 import 'chat_screen.dart';
+import 'widgets/product_video_player.dart';
+import 'package:video_player/video_player.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -506,11 +508,17 @@ class _HomeDashboard extends StatelessWidget {
   final Set<String>? homeProductIds;
 
   void _showProductGallery(BuildContext context, Map<String, dynamic> data) {
-    final List<String> imageUrls = (data['imageUrls'] as List?)
-            ?.whereType<String>()
-            .where((url) => url.trim().isNotEmpty)
-            .toList() ??
-        const [];
+    final List<String> allImages = (data['imageUrls'] as List?)
+        ?.whereType<String>()
+        .where((url) => url.trim().isNotEmpty)
+        .toList() ??
+      const [];
+    // Always show the selected imageUrl (from grid) as the first image
+    final selectedImageUrl = allImages.isNotEmpty ? allImages.first : null;
+    final List<String> imageUrls = selectedImageUrl != null
+      ? [selectedImageUrl, ...allImages.where((url) => url != selectedImageUrl)]
+      : allImages;
+    final videoUrl = data['videoUrl'] as String?;
     final name = (data['name'] ?? '').toString();
     final price = (data['price'] ?? '').toString();
     final stock = data['stock']?.toString() ?? '0';
@@ -525,6 +533,7 @@ class _HomeDashboard extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: _ProductGalleryContent(
           images: imageUrls,
+          videoUrl: videoUrl,
           name: name,
           price: price,
           stock: stock,
@@ -645,13 +654,32 @@ class _HomeDashboard extends StatelessWidget {
                         final data = doc.data() as Map<String, dynamic>;
                         final List imageUrls = data['imageUrls'] as List? ?? [];
                         final imageUrl = imageUrls.isNotEmpty ? imageUrls.first as String? : null;
+                        final videoUrl = data['videoUrl'] as String?;
                         final name = (data['name'] ?? '').toString();
                         final price = (data['price'] ?? '').toString();
                         final stock = data['stock']?.toString() ?? '0';
                         final description = (data['description'] ?? '').toString();
 
                         return GestureDetector(
-                          onTap: () => _showProductGallery(context, data),
+                          onTap: () {
+                            // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
+                            final List<String> allImages = (data['imageUrls'] as List?)
+                              ?.whereType<String>()
+                              .where((url) => url.trim().isNotEmpty)
+                              .toList() ?? const [];
+                            // กรอง videoUrl ออกจาก imageUrls
+                            final videoUrl = data['videoUrl'] as String?;
+                            final filteredImages = videoUrl != null
+                              ? allImages.where((url) => url != videoUrl).toList()
+                              : allImages;
+                            final selectedImageUrl = imageUrl;
+                            final List<String> galleryImages = selectedImageUrl != null
+                              ? [selectedImageUrl, ...filteredImages.where((url) => url != selectedImageUrl)]
+                              : filteredImages;
+                            final modalData = Map<String, dynamic>.from(data);
+                            modalData['imageUrls'] = galleryImages;
+                            _showProductGallery(context, modalData);
+                          },
                           child: Container(
                             decoration: BoxDecoration(
                               color: Colors.white,
@@ -666,23 +694,34 @@ class _HomeDashboard extends StatelessWidget {
                                 children: [
                                   Positioned.fill(
                                     child: imageUrl != null
-                                        ? CachedNetworkImage(
-                                            imageUrl: imageUrl,
-                                            fit: BoxFit.cover,
-                                            placeholder: (context, url) => Container(
-                                              color: Colors.grey[100],
-                                              alignment: Alignment.center,
-                                              child: const SizedBox(
-                                                width: 24,
-                                                height: 24,
-                                                child: CircularProgressIndicator(strokeWidth: 2),
+                                        ? Stack(
+                                            children: [
+                                              Positioned.fill(
+                                                child: CachedNetworkImage(
+                                                  imageUrl: imageUrl,
+                                                  fit: BoxFit.cover,
+                                                  placeholder: (context, url) => Container(
+                                                    color: Colors.grey[100],
+                                                    alignment: Alignment.center,
+                                                    child: const SizedBox(
+                                                      width: 24,
+                                                      height: 24,
+                                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                                    ),
+                                                  ),
+                                                  errorWidget: (context, url, error) => Container(
+                                                    color: Colors.grey[200],
+                                                    alignment: Alignment.center,
+                                                    child: const Icon(Icons.broken_image, size: 36, color: Colors.grey),
+                                                  ),
+                                                ),
                                               ),
-                                            ),
-                                            errorWidget: (context, url, error) => Container(
-                                              color: Colors.grey[200],
-                                              alignment: Alignment.center,
-                                              child: const Icon(Icons.broken_image, size: 36, color: Colors.grey),
-                                            ),
+                                              if (videoUrl != null && videoUrl.isNotEmpty)
+                                                Align(
+                                                  alignment: Alignment.center,
+                                                  child: Icon(Icons.play_circle_fill, size: 48, color: Colors.white70),
+                                                ),
+                                            ],
                                           )
                                         : Container(
                                             color: Colors.grey[200],
@@ -768,9 +807,12 @@ class _ProductGalleryContent extends StatefulWidget {
     required this.price,
     required this.stock,
     required this.description,
-  });
+    this.videoUrl,
+    Key? key,
+  }) : super(key: key);
 
   final List<String> images;
+  final String? videoUrl;
   final String name;
   final String price;
   final String stock;
@@ -781,18 +823,29 @@ class _ProductGalleryContent extends StatefulWidget {
 }
 
 class _ProductGalleryContentState extends State<_ProductGalleryContent> {
+
   late final PageController _pageController;
   int _currentIndex = 0;
+  VideoPlayerController? _preloadedVideoController;
+  Future<void>? _preloadVideoFuture;
 
   @override
   void initState() {
     super.initState();
     _pageController = PageController();
+    // Preload video controller if videoUrl exists
+    if (widget.videoUrl != null && widget.videoUrl!.isNotEmpty) {
+      _preloadedVideoController = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl!));
+      _preloadVideoFuture = _preloadedVideoController!.initialize();
+    }
   }
 
   @override
+  @override
+  @override
   void dispose() {
     _pageController.dispose();
+    _preloadedVideoController?.dispose();
     super.dispose();
   }
 
@@ -800,6 +853,8 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
   Widget build(BuildContext context) {
     final hasImages = widget.images.isNotEmpty;
     final theme = Theme.of(context);
+    final hasVideo = widget.videoUrl != null && widget.videoUrl!.isNotEmpty;
+    final totalPages = hasImages ? widget.images.length + (hasVideo ? 1 : 0) : (hasVideo ? 1 : 0);
 
     return SizedBox(
       width: MediaQuery.of(context).size.width * 0.85,
@@ -826,26 +881,48 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
           ),
           const SizedBox(height: 12),
           Expanded(
-            child: hasImages
+            child: totalPages > 0
                 ? PageView.builder(
                     controller: _pageController,
-                    itemCount: widget.images.length,
+                    itemCount: totalPages,
                     onPageChanged: (index) => setState(() => _currentIndex = index),
                     itemBuilder: (context, index) {
-                      final url = widget.images[index];
-                      return ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: CachedNetworkImage(
-                          imageUrl: url,
-                          fit: BoxFit.cover,
-                          placeholder: (context, _) => const Center(child: CircularProgressIndicator()),
-                          errorWidget: (context, _, __) => Container(
-                            color: Colors.grey[200],
-                            alignment: Alignment.center,
-                            child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+                      // Always show images first, video last
+                      if (hasImages && index < widget.images.length) {
+                        final url = widget.images[index];
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: CachedNetworkImage(
+                            imageUrl: url,
+                            fit: BoxFit.cover,
+                            placeholder: (context, _) => const Center(child: CircularProgressIndicator()),
+                            errorWidget: (context, _, __) => Container(
+                              color: Colors.grey[200],
+                              alignment: Alignment.center,
+                              child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+                            ),
                           ),
-                        ),
-                      );
+                        );
+                      } else if (hasVideo && index == totalPages - 1) {
+                        // Last page: show video
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: ProductVideoPlayer(
+                            videoUrl: widget.videoUrl!,
+                            preloadedController: _preloadedVideoController,
+                            preloadFuture: _preloadVideoFuture,
+                          ),
+                        );
+                      } else {
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: Colors.grey[200],
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Icon(Icons.image_not_supported, size: 64, color: Colors.grey),
+                        );
+                      }
                     },
                   )
                 : Container(
@@ -857,12 +934,12 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                     child: const Icon(Icons.image_not_supported, size: 64, color: Colors.grey),
                   ),
           ),
-          if (hasImages)
+          if (totalPages > 1)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(widget.images.length, (index) {
+                children: List.generate(totalPages, (index) {
                   final isActive = index == _currentIndex;
                   return AnimatedContainer(
                     duration: const Duration(milliseconds: 200),

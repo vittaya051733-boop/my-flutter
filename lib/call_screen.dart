@@ -30,6 +30,7 @@ class _CallScreenState extends State<CallScreen> {
   int? _remoteUid;
   bool _speakerOn = false;
   bool _micMuted = false;
+  bool _videoMuted = false;
   late final String _activeToken;
   late final String _activeChannelId;
   bool _incomingAccepted = false;
@@ -37,7 +38,7 @@ class _CallScreenState extends State<CallScreen> {
   // Agora App ID
   static const String appId = '37050f5308fd450ba070b53c01596c06';
   // ตัวอย่าง token/channel (ใช้เฉพาะกรณีไม่มีข้อมูลจริง)
-  static const String _sampleToken = '007eJxTYGBs0PGfuPCu6/wSIbNKyctefpeSNX1jdtd9NrllcU9/D68Cg7G5galBmqmxgUVaiompQVKigblBkqlxsoGhqaVZsoHZo48ymQ2BjAwfdbhYGRlYGRgZmBhAfAYGAOqgG1Y=';
+  static const String _sampleToken = '007eJxTYLBpXsPNP2n6WtbV7V/u3zl9zpC1hWGv6Zv4nZsNV5mK9qUqMBibG5gapJkaG1ikpZiYGiQlGpgbJJkaJxsYmlqaJRuYsXopZDYEMjKwn+tmZGRgZWBkYGIA8RkYADzNG2k=';
   static const String _sampleChannel = 'tam';
 
   @override
@@ -61,19 +62,25 @@ class _CallScreenState extends State<CallScreen> {
     _engine.registerEventHandler(
       RtcEngineEventHandler(
         onJoinChannelSuccess: (connection, elapsed) {
+          print('Agora: onJoinChannelSuccess channel=${connection.channelId} uid=${connection.localUid}');
           setState(() {
             _joined = true;
           });
         },
         onUserJoined: (connection, remoteUid, elapsed) {
+          print('Agora: onUserJoined remoteUid=$remoteUid');
           setState(() {
             _remoteUid = remoteUid;
           });
         },
         onUserOffline: (connection, remoteUid, reason) {
+          print('Agora: onUserOffline remoteUid=$remoteUid reason=$reason');
           setState(() {
             _remoteUid = null;
           });
+        },
+        onError: (err, msg) {
+          print('Agora: onError code=$err msg=$msg');
         },
       ),
     );
@@ -265,10 +272,15 @@ class _CallScreenState extends State<CallScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   _CallActionButton(
-                    icon: Icons.videocam,
-                    label: 'วิดีโอ',
+                    icon: _videoMuted ? Icons.videocam_off : Icons.videocam,
+                    label: _videoMuted ? 'เปิดวิดีโอ' : 'ปิดวิดีโอ',
                     color: const Color(0xFF00B900),
-                    onTap: () {},
+                    onTap: () async {
+                      await _engine.muteLocalVideoStream(!_videoMuted);
+                      setState(() {
+                        _videoMuted = !_videoMuted;
+                      });
+                    },
                   ),
                   const SizedBox(width: 32),
                   _CallActionButton(
@@ -375,12 +387,12 @@ class _CallScreenState extends State<CallScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _CallActionButton(
-                    icon: Icons.call,
-                    label: 'เสียง',
-                    color: const Color(0xFF00B900),
-                    onTap: () {},
-                  ),
+                    _CallActionButton(
+                      icon: _speakerOn ? Icons.volume_up : Icons.volume_mute,
+                      label: _speakerOn ? 'ปิดลำโพง' : 'เปิดลำโพง',
+                      color: const Color(0xFF00B900),
+                      onTap: _toggleSpeaker,
+                    ),
                   const SizedBox(width: 32),
                   _CallActionButton(
                     icon: Icons.call_end,

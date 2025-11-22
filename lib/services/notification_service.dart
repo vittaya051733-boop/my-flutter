@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import '../models/user_profile.dart';
 import '../call_screen.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -129,6 +130,16 @@ class NotificationService {
     final notification = message.notification;
     final data = message.data;
 
+    // แจ้งเตือนข้อความแชตเข้า
+    if (data['type'] == 'chat') {
+      await _showLocalNotification(
+        title: data['senderName'] ?? 'ข้อความใหม่',
+        body: data['message'] ?? '',
+        payload: data['chatId'],
+      );
+      return;
+    }
+
     // แจ้งเตือนสายเข้า/วิดีโอคอลจริง
     if (data['type'] == 'call') {
       // สร้าง UserProfile จาก payload
@@ -242,6 +253,28 @@ class NotificationService {
       title: 'ทดสอบการแจ้งเตือน',
       body: 'นี่คือการแจ้งเตือนทดสอบจากระบบ',
     );
+  }
+
+  // ฟังก์ชันสำหรับโทรจริง (voice/video call)
+  // เรียก Cloud Function callUser
+  Future<void> callUser({
+    required String callerId,
+    required String callerName,
+    required String callerPhotoUrl,
+    required String calleeId,
+    required String calleeFCMToken,
+    required String callType, // 'voice' หรือ 'video'
+  }) async {
+    final callable = FirebaseFunctions.instanceFor().httpsCallable('callUser');
+    final result = await callable.call({
+      'callerId': callerId,
+      'callerName': callerName,
+      'callerPhotoUrl': callerPhotoUrl,
+      'calleeId': calleeId,
+      'calleeFCMToken': calleeFCMToken,
+      'callType': callType,
+    });
+    print('Call result: ${result.data}');
   }
 }
 

@@ -241,6 +241,53 @@ exports.calculateDeliveryTime = functions.https.onCall(async (data, context) => 
 });
 
 /**
+ * Callable Function: callUser
+ * ใช้สำหรับโทรจริง (voice/video call)
+ * รับข้อมูล caller/callee/callType, สร้าง Agora token/channel, ส่ง FCM payload type 'call'
+ */
+exports.callUser = functions.https.onCall(async (data, context) => {
+  // ข้อมูลที่รับมา
+  const callerId = data.callerId;
+  const callerName = data.callerName;
+  const callerPhotoUrl = data.callerPhotoUrl || '';
+  const calleeId = data.calleeId;
+  const calleeFCMToken = data.calleeFCMToken;
+  const callType = data.callType || 'voice'; // 'voice' หรือ 'video'
+
+  // สร้าง channelId (เช่น ใช้ callerId+timestamp)
+  const channelId = `call_${callerId}_${Date.now()}`;
+
+  // TODO: สร้าง Agora token จริง (mock ไว้ก่อน)
+  const agoraToken = '007eJxTYLBpXsPNP2n6WtbV7V/u3zl9zpC1hWGv6Zv4nZsNV5mK9qUqMBibG5gapJkaG1ikpZiYGiQlGpgbJJkaJxsYmlqaJRuYsXopZDYEMjKwn+tmZGRgZWBkYGIA8RkYADzNG2k=';
+
+  // ส่ง FCM payload type 'call' ไปยัง callee
+  const message = {
+    notification: {
+      title: `สาย${callType === 'video' ? 'วิดีโอคอล' : 'เสียง'}จาก ${callerName}`,
+      body: 'แตะเพื่อรับสาย',
+    },
+    data: {
+      type: 'call',
+      callerId,
+      callerName,
+      callerPhotoUrl,
+      channelId,
+      callType,
+      token: agoraToken,
+      click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    },
+    token: calleeFCMToken,
+  };
+
+  try {
+    await admin.messaging().send(message);
+    return { success: true, channelId, token: agoraToken };
+  } catch (error) {
+    console.error('Error sending call notification:', error);
+    return { success: false, error: error.message };
+  }
+});
+/**
  * คำนวณระยะทางด้วย Haversine formula (meters)
  */
 function calculateDistance(lat1, lon1, lat2, lon2) {

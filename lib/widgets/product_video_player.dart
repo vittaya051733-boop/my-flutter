@@ -4,8 +4,17 @@ import 'package:video_player/video_player.dart';
 import 'package:chewie/chewie.dart';
 
 class ProductVideoPlayer extends StatefulWidget {
+
   final String videoUrl;
-  const ProductVideoPlayer({super.key, required this.videoUrl});
+  final VideoPlayerController? preloadedController;
+  final Future<void>? preloadFuture;
+
+  const ProductVideoPlayer({
+    super.key,
+    required this.videoUrl,
+    this.preloadedController,
+    this.preloadFuture,
+  });
 
   @override
   State<ProductVideoPlayer> createState() => _ProductVideoPlayerState();
@@ -19,7 +28,12 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   @override
   void initState() {
     super.initState();
-    _initializeController();
+    if (widget.preloadedController != null && widget.preloadFuture != null) {
+      _controller = widget.preloadedController!;
+      _initializeVideoPlayerFuture = widget.preloadFuture!;
+    } else {
+      _initializeController();
+    }
   }
 
   @override
@@ -31,7 +45,12 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
       _chewieController?.dispose();
       _controller.dispose();
       // Initialize the new controller
-      _initializeController();
+      if (widget.preloadedController != null && widget.preloadFuture != null) {
+        _controller = widget.preloadedController!;
+        _initializeVideoPlayerFuture = widget.preloadFuture!;
+      } else {
+        _initializeController();
+      }
     }
   }
 
@@ -74,7 +93,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
           // Create the Chewie controller only after initialization is complete
           _chewieController ??= ChewieController(
             videoPlayerController: _controller,
-            autoPlay: false,
+            autoPlay: true,
             looping: false,
             aspectRatio: _controller.value.aspectRatio > 0 ? _controller.value.aspectRatio : 16 / 9,
           );

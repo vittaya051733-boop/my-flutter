@@ -37,6 +37,7 @@ class AddProductScreenState extends State<AddProductScreen> {
   String? _existingVideoUrl;
 
   bool _isSaving = false;
+  double? _uploadProgress;
 
   static const int _maxImageCount = 10;
   static const Duration _maxVideoDuration = Duration(minutes: 5);
@@ -176,18 +177,26 @@ class AddProductScreenState extends State<AddProductScreen> {
       final ref = FirebaseStorage.instance
           .ref()
           .child('product_images')
-          .child(user.uid) // Organize images by user
+          .child(user.uid)
           .child(fileName);
 
       final uploadTask = ref.putFile(File(image.path));
+      uploadTask.snapshotEvents.listen((event) {
+        if (event.totalBytes > 0) {
+          setState(() {
+            _uploadProgress = event.bytesTransferred / event.totalBytes;
+          });
+        }
+      });
       final snapshot = await uploadTask.whenComplete(() => {});
+      setState(() { _uploadProgress = null; });
       final downloadUrl = await snapshot.ref.getDownloadURL();
       return downloadUrl;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดรูป: $e')));
       }
-      // Rethrow to stop the save process
+      setState(() { _uploadProgress = null; });
       return null;
     }
   }
@@ -205,12 +214,21 @@ class AddProductScreenState extends State<AddProductScreen> {
           .child(fileName);
 
       final uploadTask = ref.putFile(File(video.path));
+      uploadTask.snapshotEvents.listen((event) {
+        if (event.totalBytes > 0) {
+          setState(() {
+            _uploadProgress = event.bytesTransferred / event.totalBytes;
+          });
+        }
+      });
       final snapshot = await uploadTask.whenComplete(() => {});
+      setState(() { _uploadProgress = null; });
       return await snapshot.ref.getDownloadURL();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดวิดีโอ: $e')));
       }
+      setState(() { _uploadProgress = null; });
       return null;
     }
   }
@@ -335,6 +353,18 @@ class AddProductScreenState extends State<AddProductScreen> {
             const Text('รูปภาพและวิดีโอ', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             _buildMediaSection(),
+            if (_uploadProgress != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LinearProgressIndicator(value: _uploadProgress),
+                    const SizedBox(height: 8),
+                    Text('กำลังอัปโหลด: ${(100 * _uploadProgress!).toStringAsFixed(0)}%'),
+                  ],
+                ),
+              ),
             const SizedBox(height: 32),
 
             const Text('รายละเอียดสินค้า', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),

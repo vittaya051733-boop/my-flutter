@@ -87,40 +87,38 @@ class _LoginScreenState extends State<LoginScreen> {
       _isSocialLoading = true;
       _socialLoadingKey = 'google';
     });
+
     try {
-      final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
-      if (googleUser == null) {
-        if (mounted) {
-          setState(() {
-            _isSocialLoading = false;
-            _socialLoadingKey = null;
-          });
-        }
-        return;
+      final googleSignIn = GoogleSignIn.instance;
+      await googleSignIn.initialize();
+      if (!googleSignIn.supportsAuthenticate()) {
+        throw Exception('แพลตฟอร์มนี้ไม่รองรับ Google Sign-In');
       }
-      final googleAuth = await googleUser.authentication;
-      final credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
-        idToken: googleAuth.idToken,
-      );
+
+      final googleUser = await googleSignIn.authenticate();
+      final googleAuth = googleUser.authentication;
+      final idToken = googleAuth.idToken;
+      if (idToken == null || idToken.isEmpty) {
+        throw FirebaseAuthException(code: 'missing-id-token', message: 'ไม่พบ Google ID token');
+      }
+
+      final credential = GoogleAuthProvider.credential(idToken: idToken);
       await FirebaseAuth.instance.signInWithCredential(credential);
-      
-      // แสดง Captcha หลังล็อกอินสำเร็จ
-      if (!mounted) return; // use_build_context_synchronously
-      setState(() {
-        _isSocialLoading = false;
-        _socialLoadingKey = null;
-      });
+
+      if (!mounted) return;
       await _handlePostLogin();
-    } on FirebaseAuthException catch (e) { // use_build_context_synchronously
-      debugPrint('Google sign-in failed: ${e.code}');
-      if (mounted) {
-        setState(() {
-          _isSocialLoading = false;
-          _socialLoadingKey = null;
-        });
+    } on GoogleSignInException catch (e) {
+      if (e.code != GoogleSignInExceptionCode.canceled) {
+        debugPrint('Google sign-in failed: ${e.code} ${e.description ?? ''}');
+        _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${e.code.name})');
       }
-    } catch (_) {
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase sign-in failed: ${e.code}');
+      _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${e.code})');
+    } catch (e) {
+      debugPrint('Unexpected Google sign-in error: $e');
+      _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้');
+    } finally {
       if (mounted) {
         setState(() {
           _isSocialLoading = false;
