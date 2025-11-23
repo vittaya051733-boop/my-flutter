@@ -3,9 +3,10 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import '../models/user_profile.dart';
 import '../call_screen.dart';
-import 'package:cloud_functions/cloud_functions.dart';
+
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -149,21 +150,24 @@ class NotificationService {
         photoUrl: data['callerPhotoUrl'],
       );
       // แสดง in-app dialog (ถ้า context พร้อม)
-      final navigator = _getNavigatorKey();
-      if (navigator?.currentState != null) {
-        navigator!.currentState!.push(MaterialPageRoute(
-          builder: (_) => CallScreen(
-            channelName: data['channelId'] ?? '',
-            isVideo: data['callType'] == 'video',
-            targetProfile: profile,
-            isIncoming: true,
-            tokenOverride: data['token'],
-          ),
-        ));
+      final navigatorKey = _getNavigatorKey();
+      if (navigatorKey?.currentState?.context != null) {
+        showDialog(
+            context: navigatorKey!.currentState!.context,
+            barrierDismissible: false,
+            builder: (context) {
+              return CallScreen(
+                channelName: data['channelId'] ?? '',
+                isVideo: data['callType'] == 'video',
+                targetProfile: profile,
+                isIncoming: true,
+                tokenOverride: data['token'],
+              );
+            });
         return;
       }
       // ถ้า context ยังไม่พร้อม ให้แสดง local notification ปกติ
-      await _showLocalNotification(
+      await _showCallNotification(
         title: 'สายเข้า',
         body: '${data['callerName'] ?? 'มีสายเข้า'} (${data['callType'] == 'video' ? 'วิดีโอคอล' : 'เสียง'})',
       );
@@ -180,11 +184,12 @@ class NotificationService {
   }
 
   /// ดึง navigatorKey จาก MyApp (ต้องตั้ง navigatorKey ใน MaterialApp)
+  // หมายเหตุ: วิธีนี้อาจไม่เสถียร ควรใช้ DI หรือ Service Locator ในแอปขนาดใหญ่
   GlobalKey<NavigatorState>? _getNavigatorKey() {
     try {
       final app = WidgetsBinding.instance.renderViewElement?.widget;
-      if (app is MaterialApp && app.navigatorKey is GlobalKey<NavigatorState>) {
-        return app.navigatorKey as GlobalKey<NavigatorState>;
+      if (app is MaterialApp) {
+        return app.navigatorKey;
       }
     } catch (_) {}
     return null;
@@ -224,6 +229,39 @@ class NotificationService {
       notificationDetails,
       payload: payload,
     );
+  }
+
+  /// แสดง local notification สำหรับสายเข้าโดยเฉพาะ
+  Future<void> _showCallNotification({
+    required String title,
+    required String body,
+    String? payload,
+  }) async {
+    const androidDetails = AndroidNotificationDetails(
+      'call_channel', // ID ใหม่สำหรับสายเข้า
+      'การแจ้งเตือนสายเรียกเข้า',
+      channelDescription: 'แจ้งเตือนเมื่อมีสายเรียกเข้า',
+      importance: Importance.max,
+      priority: Priority.max,
+      enableVibration: true,
+      playSound: true,
+      sound: RawResourceAndroidNotificationSound('ringtone'), // ต้องมีไฟล์ ringtone.mp3 ใน res/raw
+      fullScreenIntent: true, // ทำให้แสดงผลเต็มจอ
+    );
+
+    const iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+      sound: 'ringtone.aiff', // ต้องมีไฟล์ ringtone.aiff ใน project
+    );
+
+    const notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+    );
+
+    await _localNotifications.show(0, title, body, notificationDetails, payload: payload);
   }
 
   /// จัดการเมื่อกด notification
@@ -275,6 +313,30 @@ class NotificationService {
       'callType': callType,
     });
     print('Call result: ${result.data}');
+  }
+
+  /// เริ่มการโทรโดยเรียก Cloud Function เพื่อสร้าง token และส่ง notification
+  Future<Map<String, dynamic>> initiateCall({
+    required UserProfile caller,
+    required UserProfile callee,
+    required bool isVideo,
+  }) async {
+    try {
+        // initiateCall is deployed in us-central1, so use the same region to avoid NOT_FOUND
+        final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('initiateCall');
+      final result = await callable.call(<String, dynamic>{
+        'calleeId': callee.uid,
+        'isVideo': isVideo,
+        // ส่งข้อมูลผู้โทรไปด้วยเผื่อ Cloud Function ต้องการใช้
+        'callerData': caller.toFirestore()..['uid'] = caller.uid,
+      });
+      // Cloud function ควรจะคืนค่า channelId และ token กลับมา
+      return Map<String, dynamic>.from(result.data);
+    } on FirebaseFunctionsException catch (e) {
+      debugPrint('Error initiating call: ${e.code} - ${e.message}');
+      rethrow;
+    }
   }
 }
 

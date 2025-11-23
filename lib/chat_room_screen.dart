@@ -10,6 +10,7 @@ import 'models/chat_message.dart';
 import 'models/user_profile.dart';
 import 'services/chat_service.dart';
 import 'services/friend_service.dart';
+import 'services/notification_service.dart';
 import 'call_screen.dart';
 
 class ChatRoomScreen extends StatefulWidget {
@@ -25,6 +26,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ChatService _chatService = ChatService();
   final FriendService _friendService = FriendService();
+  final NotificationService _notificationService = NotificationService();
   final ImagePicker _imagePicker = ImagePicker();
 
   UserProfile? _currentProfile;
@@ -91,12 +93,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           IconButton(
             tooltip: 'โทรด้วยเสียง',
             icon: const Icon(Icons.call_outlined),
-            onPressed: _startVoiceCall,
+            onPressed: () => _startCall(isVideo: false),
           ),
           IconButton(
             tooltip: 'วิดีโอคอล',
             icon: const Icon(Icons.videocam_outlined),
-            onPressed: _startVideoCall,
+            onPressed: () => _startCall(isVideo: true),
           ),
         ],
       ),
@@ -252,14 +254,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final file = await _imagePicker.pickImage(source: source, imageQuality: 85);
     if (file == null) return;
     await _uploadFile(File(file.path), profile,
-        type: 'image', contentType: file.mimeType, fileName: file.name);
+        type: 'image', contentType: null, fileName: file.name);
   }
 
   Future<void> _pickVideo(UserProfile profile) async {
     final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
     if (file == null) return;
     await _uploadFile(File(file.path), profile,
-        type: 'video', contentType: file.mimeType, fileName: file.name);
+        type: 'video', contentType: null, fileName: file.name);
   }
 
   Future<void> _pickFile(UserProfile profile) async {
@@ -303,33 +305,47 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     }
   }
 
-  void _startVoiceCall() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => CallScreen(
-          channelName: _chatId,
-          isVideo: false,
-          targetProfile: widget.friendProfile,
-        ),
-      ),
-    );
-  }
+  Future<void> _startCall({required bool isVideo}) async {
+    final caller = _currentProfile;
+    if (caller == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่สามารถเริ่มการโทรได้: ไม่พบข้อมูลผู้ใช้ปัจจุบัน')),
+      );
+      return;
+    }
 
-  void _startVideoCall() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => CallScreen(
-          channelName: _chatId,
-          isVideo: true,
-          targetProfile: widget.friendProfile,
+    try {
+      // 1. เรียก Cloud Function ผ่าน NotificationService เพื่อสร้าง token และส่ง notification
+      final callData = await _notificationService.initiateCall(
+        caller: caller,
+        callee: widget.friendProfile,
+        isVideo: isVideo,
+      );
+
+      if (!mounted) return;
+
+      // 2. นำทางไปยังหน้าจอการโทร พร้อมข้อมูลที่ได้จาก Cloud Function
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => CallScreen(
+            channelName: callData['channelId'] as String? ?? _chatId, // ใช้ channelId จาก function
+            isVideo: isVideo,
+            targetProfile: widget.friendProfile,
+            tokenOverride: callData['token'] as String?, // ใช้ token จาก function
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('เกิดข้อผิดพลาดในการเริ่มการโทร: $e')),
+        );
+      }
+    }
   }
 }
-
+ 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({required this.message, required this.isMine});
 
@@ -432,6 +448,8 @@ class _MessageBubble extends StatelessWidget {
   Future<void> _openUrl(String? url) async {
     if (url == null) return;
     final uri = Uri.parse(url);
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
   }
 }

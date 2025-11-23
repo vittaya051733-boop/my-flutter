@@ -84,3 +84,8 @@ flutter_launcher_icons:
 
 dependency_overrides:
   sqflite_android: 2.4.1
+[flutter_native_splash:
+  color: "#ffffff"
+  image: assets/file_000000008fc872089268acc9b04e5bcf.png
+  android: true
+  ios: true]

@@ -276,14 +276,17 @@ class _AuthWrapperState extends State<AuthWrapper> {
   @override
   Widget build(BuildContext context) {
     // แสดงหน้าจอ Loading ขณะกำลังตรวจสอบและนำทาง
-    return const Scaffold(
+    return Scaffold(
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('กำลังตรวจสอบข้อมูล...'),
+            // โลโก้ (เปลี่ยนชื่อไฟล์ตาม asset ที่มี)
+            Image.asset('assets/logo.png', width: 120, height: 120),
+            const SizedBox(height: 24),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            const Text('กำลังตรวจสอบข้อมูล...'),
           ],
         ),
       ),

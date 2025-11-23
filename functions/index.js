@@ -1,8 +1,69 @@
+// ...existing code...
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
+// แจ้งเตือนข้อความแชตใหม่ (Firestore Trigger)
+exports.notifyNewChatMessage = functions.firestore
+  .document('chats/{chatId}/messages/{messageId}')
+  .onCreate(async (snap, context) => {
+    const message = snap.data();
+    if (!message) return;
+
+    // ดึงข้อมูลผู้รับ (เช่น receiverId)
+    const receiverId = message.receiverId;
+    if (!receiverId) return;
+
+    // ดึง FCM token ของผู้รับ
+    const userDoc = await admin.firestore().collection('users').doc(receiverId).get();
+    const fcmToken = userDoc.exists ? userDoc.data().fcmToken : null;
+    if (!fcmToken) {
+      console.warn(`[notifyNewChatMessage] No FCM token for user ${receiverId}`);
+      return;
+    }
+
+    // สร้างข้อความแจ้งเตือน
+    const payload = {
+      notification: {
+        title: message.senderName || 'ข้อความใหม่',
+        body: message.text || 'คุณได้รับข้อความใหม่',
+      },
+      data: {
+        chatId: context.params.chatId,
+        senderId: message.senderId || '',
+        type: 'chat',
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+      token: fcmToken,
+    };
+
+    try {
+      await admin.messaging().send(payload);
+      console.log(`[notifyNewChatMessage] Sent to ${receiverId}`);
+    } catch (error) {
+      console.error('[notifyNewChatMessage] Error:', error);
+    }
+  });
+// ...existing code...
+const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 admin.initializeApp();
 
 const db = admin.firestore();
+const FieldValue = admin.firestore.FieldValue;
+
+const agoraConfig = functions.config().agora || {};
+const AGORA_APP_ID = agoraConfig.app_id || process.env.AGORA_APP_ID;
+const AGORA_APP_CERTIFICATE = agoraConfig.app_certificate || process.env.AGORA_APP_CERTIFICATE;
+const AGORA_TOKEN_TTL = parseInt(
+  agoraConfig.token_ttl_seconds || process.env.AGORA_TOKEN_TTL_SECONDS || '3600',
+  10
+);
+
+const SHOP_COLLECTIONS = [
+  'market_registrations',
+  'shop_registrations',
+  'restaurant_registrations',
+  'pharmacy_registrations',
+  'other_registrations',
+];
 
 /**
  * Cloud Function สำหรับตรวจสอบเวลาเตรียมออเดอร์และส่งการแจ้งเตือน
@@ -257,8 +318,7 @@ exports.callUser = functions.https.onCall(async (data, context) => {
   // สร้าง channelId (เช่น ใช้ callerId+timestamp)
   const channelId = `call_${callerId}_${Date.now()}`;
 
-  // TODO: สร้าง Agora token จริง (mock ไว้ก่อน)
-  const agoraToken = '007eJxTYLBpXsPNP2n6WtbV7V/u3zl9zpC1hWGv6Zv4nZsNV5mK9qUqMBibG5gapJkaG1ikpZiYGiQlGpgbJJkaJxsYmlqaJRuYsXopZDYEMjKwn+tmZGRgZWBkYGIA8RkYADzNG2k=';
+  const agoraToken = await buildAgoraToken(channelId);
 
   // ส่ง FCM payload type 'call' ไปยัง callee
   const message = {
@@ -303,4 +363,165 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
   return R * c;
+}
+
+// เพิ่มฟังก์ชัน initiateCall สำหรับฟีเจอร์โทร
+exports.initiateCall = functions.https.onCall(async (data, context) => {
+  const { calleeId, isVideo, callerData } = data;
+  const callerId = callerData?.uid;
+  // ตรวจสอบ calleeId และพยายามสร้าง profile หากยังไม่มีใน users
+  console.log('[initiateCall] incoming request', { calleeId, callerId, isVideo });
+  let calleeProfile = await getOrCreateUserProfile(calleeId);
+  if (!calleeProfile && callerId) {
+    console.log('[initiateCall] users doc missing, trying friends cache');
+    calleeProfile = await getProfileFromFriendDoc(callerId, calleeId);
+  }
+  if (!calleeProfile) {
+    console.error('[initiateCall] callee not found', { calleeId, callerId });
+    throw new functions.https.HttpsError('not-found', 'Callee not found');
+  }
+  // สร้าง channelId และ token (ตัวอย่าง)
+  const channelId = `call_${calleeId}_${Date.now()}`;
+  const token = await buildAgoraToken(channelId);
+  // ส่งข้อมูลกลับ
+  return {
+    channelId,
+    token,
+    calleeProfile: {
+      displayName: calleeProfile.displayName || 'ผู้ใช้',
+      photoUrl: calleeProfile.photoUrl || null,
+      phoneNumber: calleeProfile.phoneNumber || null,
+    },
+  };
+});
+
+async function buildAgoraToken(channelId, uid = 0) {
+  if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Agora credentials are not configured. Set functions config agora.app_id and agora.app_certificate.'
+    );
+  }
+
+  const privilegeExpiredTs = Math.floor(Date.now() / 1000) + AGORA_TOKEN_TTL;
+  try {
+    return RtcTokenBuilder.buildTokenWithUid(
+      AGORA_APP_ID,
+      AGORA_APP_CERTIFICATE,
+      channelId,
+      uid,
+      RtcRole.PUBLISHER,
+      privilegeExpiredTs
+    );
+  } catch (error) {
+    console.error('[agora] Failed to build token', { channelId, error });
+    throw new functions.https.HttpsError('internal', 'Unable to create Agora token');
+  }
+}
+
+async function getOrCreateUserProfile(uid) {
+  const userRef = db.collection('users').doc(uid);
+  const existing = await userRef.get();
+  if (existing.exists) {
+    const data = existing.data();
+    console.log('[initiateCall] found user doc', { uid, source: data?.sourceCollection || 'users' });
+    return data;
+  }
+
+  for (const collection of SHOP_COLLECTIONS) {
+    const doc = await db.collection(collection).doc(uid).get();
+    if (!doc.exists) continue;
+    const normalized = buildProfileFromShopData(doc.data(), collection);
+    await userRef.set(
+      {
+        ...normalized,
+        updatedAt: FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+        sourceCollection: collection,
+      },
+      { merge: true }
+    );
+    console.log('[initiateCall] synced profile from shop collection', { uid, collection });
+    return normalized;
+  }
+
+  console.warn('[initiateCall] no profile found in users or shop collections', { uid });
+  return null;
+}
+
+function buildProfileFromShopData(data = {}, fallbackCollection) {
+  return {
+    displayName: readDisplayName(data, 'ผู้ใช้ใหม่'),
+    photoUrl: readPhotoUrl(data),
+    serviceType: data.serviceType || fallbackCollection,
+    isOfficial: !!data.isOfficialAccount,
+    profileCompleted: !!data.isProfileCompleted,
+    phoneNumber: normalizePhone(data.phone || data.phoneNumber || ''),
+  };
+}
+
+function readDisplayName(data, fallback) {
+  const candidates = [data.displayName, data.shopName, data.name];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'string' && candidate.trim().length) {
+      return candidate.trim();
+    }
+  }
+  return fallback;
+}
+
+function readPhotoUrl(data) {
+  const candidates = [
+    data.shopImageUrl,
+    data.imageUrl,
+    data.logoUrl,
+    data.profileImageUrl,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'string' && candidate.trim().length) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+function normalizePhone(raw = '') {
+  let clean = raw.replace(/[^0-9+]/g, '');
+  if (!clean) return '';
+  if (clean.startsWith('00')) {
+    clean = `+${clean.substring(2)}`;
+  }
+  if (clean.startsWith('0') && clean.length === 10) {
+    return `+66${clean.substring(1)}`;
+  }
+  if (!clean.startsWith('+') && clean.length >= 9) {
+    return `+${clean}`;
+  }
+  return clean;
+}
+
+async function getProfileFromFriendDoc(ownerId, friendId) {
+  try {
+    const doc = await db
+      .collection('users')
+      .doc(ownerId)
+      .collection('friends')
+      .doc(friendId)
+      .get();
+    if (!doc.exists) return null;
+    const data = doc.data() || {};
+    await db.collection('users').doc(friendId).set(
+      {
+        ...data,
+        uid: friendId,
+        updatedAt: FieldValue.serverTimestamp(),
+        source: 'friends-cache',
+      },
+      { merge: true }
+    );
+    return data;
+  } catch (error) {
+    console.error('Error getting friend doc profile', error);
+    return null;
+  }
 }
