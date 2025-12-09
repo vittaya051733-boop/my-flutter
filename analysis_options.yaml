@@ -12,6 +12,8 @@ include: package:flutter_lints/flutter.yaml
 analyzer:
   exclude:
     - local_packages/file_saver/example/**
+    - local_packages/better_player/example/**
+    - local_packages/better_player/test/**
   errors:
     unnecessary_brace_in_string_interps: ignore
     deprecated_member_use: ignore

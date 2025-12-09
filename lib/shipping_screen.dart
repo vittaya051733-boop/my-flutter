@@ -135,6 +135,12 @@ class _ShippingScreenState extends State<ShippingScreen> {
             },
             onSelected: (value) async {
               if (!_isConnected) {
+                if (_devices.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('ยังไม่มีเครื่องปริ้นที่จับคู่ไว้')),
+                  );
+                  return;
+                }
                 final device = _devices.firstWhere(
                   (d) => d.address == value,
                   orElse: () => _devices.first,

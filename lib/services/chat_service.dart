@@ -6,12 +6,13 @@ import 'package:path/path.dart' as p;
 
 import '../models/chat_message.dart';
 import '../models/user_profile.dart';
+import '../storage_helper.dart';
 
 class ChatService {
   ChatService();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseStorage _storage = FirebaseStorage.instance;
+  final FirebaseStorage _storage = StorageHelper.instance;
 
   String chatIdFor(String uidA, String uidB) {
     final sorted = [uidA, uidB]..sort();
@@ -103,6 +104,48 @@ class ChatService {
     );
   }
 
+  Future<void> logCallEvent({
+    required UserProfile initiator,
+    required UserProfile target,
+    required bool isVideo,
+    required bool answered,
+    Duration? duration,
+    bool declined = false,
+  }) async {
+    final chatId = chatIdFor(initiator.uid, target.uid);
+    final chatDoc = _firestore.collection('chats').doc(chatId);
+    await _ensureChatDocument(chatDoc, sender: initiator, target: target);
+
+    final String statusText;
+    if (declined) {
+      statusText = 'ยกเลิกสาย';
+    } else if (!answered) {
+      statusText = 'ไม่ได้รับสาย';
+    } else {
+      statusText = 'สนทนา ${_formatDuration(duration)}';
+    }
+    final base = isVideo ? 'วิดีโอคอล' : 'โทรด้วยเสียง';
+    final description = '$base • $statusText';
+    final messageRef = chatDoc.collection('messages').doc();
+    await messageRef.set({
+      'senderId': initiator.uid,
+      'type': 'call',
+      'callType': isVideo ? 'video' : 'voice',
+      'direction': 'outgoing',
+      'callStatus': answered ? 'answered' : (declined ? 'declined' : 'missed'),
+      if (duration != null && answered) 'callDuration': duration.inSeconds,
+      'text': description,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    await _updateChatSummary(
+      chatDoc,
+      lastMessage: description,
+      lastMessageType: 'call',
+      sender: initiator,
+    );
+  }
+
   Future<void> purgeExpiredMessages(String chatId) async {
     final now = Timestamp.fromDate(DateTime.now());
     final ref = _firestore
@@ -177,8 +220,17 @@ class ChatService {
         return 'ส่งวิดีโอ';
       case 'file':
         return 'ส่งไฟล์: $fileName';
+      case 'call':
+        return fileName;
       default:
         return fileName;
     }
+  }
+
+  String _formatDuration(Duration? duration) {
+    if (duration == null) return '00:00';
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
 }

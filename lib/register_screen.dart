@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart'; // เพิ่ม import ที่ขาดไป
@@ -6,7 +8,9 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'register_shop_next.dart';
 import 'contract_screen.dart';
+import 'services/notification_service.dart';
 import 'utils/app_colors.dart';
+import 'utils/phone_login_helper.dart';
 
 class Debouncer {
   final int milliseconds;
@@ -33,6 +37,16 @@ class RegisterScreen extends StatefulWidget {
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
+  static const String _androidServerClientId = String.fromEnvironment(
+    'GOOGLE_ANDROID_SERVER_CLIENT_ID',
+    defaultValue: '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
+  );
+
+  static const String _iosClientId = String.fromEnvironment(
+    'GOOGLE_IOS_CLIENT_ID',
+    defaultValue: '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
+  );
+
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _confirmController = TextEditingController();
@@ -71,17 +85,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   // Updated to handle Thai numbers specifically and assume others are either
   // already formatted with a country code or need to be handled by the user.
-  String _formatPhoneNumber(String phone) {
-    String cleanPhone = phone.replaceAll(' ', '').replaceAll('-', '');
-    // Only format as Thai number if it starts with 0 and has 10 digits total.
-    if (cleanPhone.startsWith('0') && cleanPhone.length == 10) {
-      return '+66${cleanPhone.substring(1)}';
-    }
-    // If it already starts with '+', assume it's correctly formatted.
-    // For other local formats (like Japan's 090...), we pass them as is,
-    // relying on the user to input the country code for non-Thai numbers.
-    return cleanPhone; // e.g., +14155552671
-  }
+  String _formatPhoneNumber(String phone) => PhoneLoginHelper.normalize(phone);
 
   String? _serviceTypeNormalized;
   static const Set<String> _allowedServiceTypes = {
@@ -226,6 +230,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
             'serviceType': _serviceTypeNormalized,
             'status': 'pending_acceptance',
           });
+        }
+
+        try {
+          await NotificationService().saveUserFcmToken(user.uid);
+        } catch (e) {
+          debugPrint('Failed to sync FCM token on registration: $e');
         }
 
         if (user.emailVerified) {
@@ -427,8 +437,18 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _socialLoadingKey = 'google';
     });
     try {
+      if (Platform.isAndroid && _androidServerClientId.isEmpty) {
+        throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_ANDROID_SERVER_CLIENT_ID');
+      }
+      if (Platform.isIOS && _iosClientId.isEmpty) {
+        throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
+      }
+      debugPrint('GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId');
       final googleSignIn = GoogleSignIn.instance;
-      await googleSignIn.initialize();
+      await googleSignIn.initialize(
+        serverClientId: Platform.isAndroid ? _androidServerClientId : null,
+        clientId: Platform.isIOS ? _iosClientId : null,
+      );
       if (!googleSignIn.supportsAuthenticate()) {
         throw Exception('แพลตฟอร์มนี้ไม่รองรับ Google Sign-In');
       }
@@ -450,6 +470,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
         _showSnack('Google เข้าสู่ระบบล้มเหลว (${e.code.name})');
         debugPrint('Google sign-in error: ${e.code} ${e.description ?? ''}');
       }
+    } on StateError catch (e) {
+      _showSnack('ตั้งค่า Google Sign-In ไม่ครบ: ${e.message}');
+      debugPrint('Google sign-in configuration error: ${e.message}');
     } on FirebaseAuthException catch (e) {
       _showSnack(e.message ?? 'Google เข้าสู่ระบบล้มเหลว');
       debugPrint('Firebase sign-in failed: ${e.code}');

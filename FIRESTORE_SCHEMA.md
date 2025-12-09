@@ -89,3 +89,32 @@ orders/{orderId}/timeline/
 3. orders: driverId (ascending), status (ascending), createdAt (descending)
 4. orders: status (ascending), preparingStartTime (ascending)
 ```
+
+## Security Rules (สำคัญ)
+
+อัปเดต Firestore Rules ใน Firebase Console ให้เปิดสิทธิ์ตามการใช้งานจริง มิฉะนั้นแอปจะเจอ `permission-denied` ทันทีที่เปิดขึ้นมา
+
+```text
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ข้อมูลอัปเดตแอปฯ ต้องอ่านได้ก่อนล็อกอิน
+    match /app_updates/{docId} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.token.admin == true;
+    }
+
+    // ข้อมูลสัญญา/ลงทะเบียนร้านค้า - ให้เจ้าของอ่าน/เขียนได้เองเท่านั้น
+    match /contracts/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /{collectionName}/{userId} where
+        collectionName in ['market_registrations', 'shop_registrations', 'restaurant_registrations', 'pharmacy_registrations'] {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
+
+> หมายเหตุ: ถ้าใช้งาน Cloud Function หรือ Admin SDK อื่นๆ ให้ปรับเงื่อนไข `allow write` ให้เหมาะสม เช่น เช็ค custom claims `admin` ตามตัวอย่างด้านบน

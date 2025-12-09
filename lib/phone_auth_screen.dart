@@ -3,8 +3,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'dart:async'; // Import Timer
 import 'navigation_helper.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-
+import 'services/notification_service.dart';
 import 'utils/app_colors.dart';
+import 'utils/phone_login_helper.dart';
 
 class PhoneAuthScreen extends StatefulWidget {
   const PhoneAuthScreen({super.key});
@@ -76,56 +77,25 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
 
 
   Future<void> _sendOtp() async {
-    final phoneNumber = _phoneController.text.trim();
-    // Firebase requires the E.164 format, which must start with a '+'.
+    final phoneNumber = PhoneLoginHelper.normalize(_phoneController.text.trim());
     if (!phoneNumber.startsWith('+')) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text(
-                  'รูปแบบเบอร์โทรไม่ถูกต้อง ต้องขึ้นต้นด้วย + ตามด้วยรหัสประเทศ (เช่น +66... หรือ +81...)'),
-              backgroundColor: Colors.red),
+            content: Text('รูปแบบเบอร์โทรไม่ถูกต้อง ต้องขึ้นต้นด้วย + ตามด้วยรหัสประเทศ (เช่น +66..., +81...)'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
       return;
     }
+    _phoneController.text = phoneNumber;
 
     setState(() {
       _isLoading = true;
     });
 
     try {
-      // Check Firestore for user existence
-      final userQuery = await FirebaseFirestore.instance
-          .collection('users')
-          .where('phoneNumber', isEqualTo: phoneNumber)
-          .limit(1)
-          .get();
-
-      if (userQuery.docs.isNotEmpty) {
-        // User exists, log in directly (no OTP required)
-        // Use Firebase Auth to sign in with phone number (custom logic, e.g. link to password or direct navigation)
-        setState(() {
-          _isLoading = false;
-        });
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('เข้าสู่ระบบด้วยเบอร์โทรสำเร็จ (ไม่ต้อง OTP)'),
-              backgroundColor: Colors.green,
-            ),
-          );
-          // Navigate to home or user status
-          final user = FirebaseAuth.instance.currentUser;
-          if (user != null) {
-            await NavigationHelper.navigateBasedOnUserStatus(context, user);
-          } else {
-            Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
-          }
-        }
-        return;
-      }
-
       // User does not exist, proceed with OTP registration
       await _auth.verifyPhoneNumber(
         phoneNumber: phoneNumber,
@@ -231,11 +201,48 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       UserCredential userCredential = await _auth.signInWithCredential(credential);
       
       if (userCredential.user != null) {
-        // If a password was provided during registration, update the user's password now.
-        if (_passwordForRegistration != null && _passwordForRegistration!.isNotEmpty) {
-          await userCredential.user!.updatePassword(_passwordForRegistration!);
-          // Clear the password from memory
+        final normalizedPhone = PhoneLoginHelper.normalize(_phoneController.text.trim());
+        final bool hasPassword = _passwordForRegistration != null && _passwordForRegistration!.isNotEmpty;
+        final firebaseUser = userCredential.user!;
+
+        if (hasPassword) {
+          final pseudoEmail = PhoneLoginHelper.pseudoEmail(normalizedPhone);
+          final emailCredential = EmailAuthProvider.credential(
+            email: pseudoEmail,
+            password: _passwordForRegistration!,
+          );
+          try {
+            await firebaseUser.linkWithCredential(emailCredential);
+          } on FirebaseAuthException catch (e) {
+            if (e.code == 'provider-already-linked') {
+              await firebaseUser.updatePassword(_passwordForRegistration!);
+            } else {
+              rethrow;
+            }
+          }
+
+          await FirebaseFirestore.instance.collection('users').doc(firebaseUser.uid).set(
+            {
+              'loginEmail': pseudoEmail,
+              'loginProvider': 'phone',
+            },
+            SetOptions(merge: true),
+          );
           _passwordForRegistration = null;
+        }
+
+        await FirebaseFirestore.instance.collection('users').doc(firebaseUser.uid).set(
+          {
+            'phoneNumber': normalizedPhone,
+            'phoneVerifiedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+
+        try {
+          await NotificationService().saveUserFcmToken(firebaseUser.uid);
+        } catch (e) {
+          debugPrint('Failed to sync FCM token after phone auth: $e');
         }
 
         if (mounted) { // mounted check

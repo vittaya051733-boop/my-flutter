@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'models/order_model.dart';
+import 'models/shop_operations_settings.dart';
 import 'utils/app_colors.dart';
 import 'test_order_helper.dart';
 import 'order_qr_screen.dart';
+import 'services/shop_operations_service.dart';
 
 class OrderManagementScreen extends StatefulWidget {
   const OrderManagementScreen({super.key});
@@ -16,6 +18,9 @@ class OrderManagementScreen extends StatefulWidget {
 
 class _OrderManagementScreenState extends State<OrderManagementScreen> {
   String? _shopId;
+  ShopOperationsSettings _operationsSettings = ShopOperationsSettings.defaults();
+  StreamSubscription<ShopOperationsSettings>? _operationsSubscription;
+  final Set<String> _autoAcceptingOrders = <String>{};
 
   @override
   void initState() {
@@ -26,6 +31,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 
   @override
   void dispose() {
+    _operationsSubscription?.cancel();
     super.dispose();
   }
 
@@ -35,7 +41,16 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       setState(() {
         _shopId = user.uid;
       });
+      _listenOperationsSettings(user.uid);
     }
+  }
+
+  void _listenOperationsSettings(String shopId) {
+    _operationsSubscription?.cancel();
+    _operationsSubscription = ShopOperationsService.streamSettings(shopId).listen((settings) {
+      if (!mounted) return;
+      setState(() => _operationsSettings = settings);
+    });
   }
 
   Future<void> _createTestOrder() async {
@@ -141,10 +156,21 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
               .toList()
             ..sort((a, b) => b.createdAt.compareTo(a.createdAt)); // เรียงใน Dart แทน
 
+          _maybeAutoAcceptPendingOrders(orders);
+
+          final hasPauseBanner = _operationsSettings.pauseNewOrders;
+          final itemCount = orders.length + (hasPauseBanner ? 1 : 0);
+
           return ListView.builder(
             padding: const EdgeInsets.all(16),
-            itemCount: orders.length,
+            itemCount: itemCount,
             itemBuilder: (context, index) {
+              if (hasPauseBanner) {
+                if (index == 0) {
+                  return _buildPauseBanner();
+                }
+                return _buildOrderCard(orders[index - 1]);
+              }
               return _buildOrderCard(orders[index]);
             },
           );
@@ -176,6 +202,61 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildPauseBanner() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.pause_circle_filled, color: Colors.orange, size: 28),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  'ร้านหยุดรับออเดอร์อยู่',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 4),
+                Text('เปิดรับออเดอร์อีกครั้งได้ที่เมนูตั้งค่า > การดำเนินงานร้าน'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _maybeAutoAcceptPendingOrders(List<DetailedOrder> orders) {
+    if (!_operationsSettings.autoAcceptOrders || _operationsSettings.pauseNewOrders) {
+      return;
+    }
+    for (final order in orders) {
+      if (order.status != 'pending' || _autoAcceptingOrders.contains(order.orderId)) continue;
+      _autoAcceptingOrders.add(order.orderId);
+      _acceptOrder(order, silent: true).then((_) {
+        if (!mounted) return;
+        final shortId = order.orderId.length > 6 ? order.orderId.substring(0, 6) : order.orderId;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('รับออเดอร์ #$shortId อัตโนมัติแล้ว'),
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }).catchError((error) {
+        debugPrint('Auto accept failed for ${order.orderId}: $error');
+      }).whenComplete(() => _autoAcceptingOrders.remove(order.orderId));
+    }
   }
 
   Widget _buildOrderHeader(DetailedOrder order) {
@@ -493,7 +574,7 @@ extension on _OrderManagementScreenState {
     }
   }
 
-  Future<void> _acceptOrder(DetailedOrder order) async {
+  Future<void> _acceptOrder(DetailedOrder order, {bool silent = false}) async {
     try {
       final now = DateTime.now();
       final updatedOrder = order.copyWith(
@@ -512,7 +593,7 @@ extension on _OrderManagementScreenState {
           .doc(order.orderId)
           .update(updatedOrder.toMap());
 
-      if (mounted) {
+      if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('รับออเดอร์เรียบร้อยแล้ว! เริ่มจับเวลา 10 นาที'),

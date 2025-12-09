@@ -22,10 +22,7 @@ import 'navigation_helper.dart';
 import 'utils/app_colors.dart';
 import 'services/notification_service.dart';
 import 'widgets/app_update_gate.dart';
-
-// เพิ่ม: สวิตช์บังคับใช้ App Check Debug ผ่าน --dart-define=APP_CHECK_DEBUG=true
-const bool kAppCheckForceDebug =
-    bool.fromEnvironment('APP_CHECK_DEBUG', defaultValue: false);
+import 'utils/feature_flags.dart';
 
 void main() {
   runZonedGuarded(() async {
@@ -144,6 +141,7 @@ class ErrorApp extends StatelessWidget {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
   static const String appFontFamily = 'Prompt';
 
   @override
@@ -151,13 +149,13 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Van Merchant',
       debugShowCheckedModeBanner: false,
+      navigatorKey: navigatorKey,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(
           seedColor: AppColors.accent,
           brightness: Brightness.light,
         ),
-        // Set the global font family once (cheaper than applying a TextTheme each build)
         fontFamily: appFontFamily,
         appBarTheme: AppBarTheme(
           backgroundColor: AppColors.accent,
@@ -223,28 +221,29 @@ class MyApp extends StatelessWidget {
         },
         '/home': (context) => const HomeScreen(),
       },
-      home: AppUpdateGate(
-        allowSkipForMandatory: true,
-        child: StreamBuilder<User?>(
-        // กลืน error ของสตรีม Auth เพื่อให้ไม่ทำให้แอปเด้ง
-        stream: FirebaseAuth.instance.authStateChanges().handleError((e, stackTrace) {
-          // Log the error for debugging purposes, but don't crash the app.
-          debugPrint('Error in authStateChanges stream: $e');
-          // การคืนค่า null จะทำให้ StreamBuilder เข้าเงื่อนไข snapshot.hasData == false
-          // และแสดง WelcomeScreen ซึ่งปลอดภัยกว่าการปล่อยให้แอปแครช
-        }, test: (e) => true), // ดักจับ error ทุกประเภท
-        builder: (context, snapshot) {
-          // ถ้าเกิด error จาก Firebase (เช่น App Check invalid) ให้ไปหน้า Login ชั่วคราว
-          if (snapshot.hasError) {
-            return const WelcomeScreen();
-          }
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
-          }
-          return snapshot.hasData ? const AuthWrapper() : const WelcomeScreen();
-        },
-        ),
-      ),
+      home: kDisableAppUpdateGate
+          ? _buildAuthTree()
+          : AppUpdateGate(
+              allowSkipForMandatory: true,
+              child: _buildAuthTree(),
+            ),
+    );
+  }
+
+  Widget _buildAuthTree() {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges().handleError((e, stackTrace) {
+        debugPrint('Error in authStateChanges stream: $e');
+      }, test: (e) => true),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return const WelcomeScreen();
+        }
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        return snapshot.hasData ? const AuthWrapper() : const WelcomeScreen();
+      },
     );
   }
 }
@@ -282,7 +281,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             // โลโก้ (เปลี่ยนชื่อไฟล์ตาม asset ที่มี)
-            Image.asset('assets/logo.png', width: 120, height: 120),
+            Image.asset('assets/file_000000008fc872089268acc9b04e5bcf.png', width: 120, height: 120),
             const SizedBox(height: 24),
             const CircularProgressIndicator(),
             const SizedBox(height: 16),

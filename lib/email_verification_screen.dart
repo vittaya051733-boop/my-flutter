@@ -209,6 +209,11 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               TextButton(
                 onPressed: () async {
                   await FirebaseAuth.instance.signOut();
+                  if (!context.mounted) return;
+                  Navigator.of(context).pushNamedAndRemoveUntil(
+                    '/welcome',
+                    (route) => false,
+                  );
                 },
                 child: const Text('ออกจากระบบ'),
               ),

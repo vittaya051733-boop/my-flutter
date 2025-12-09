@@ -4,6 +4,7 @@ import 'add_product_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/product_model.dart';
 import 'utils/app_colors.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 class ShopManagementScreen extends StatefulWidget {
   final Set<String>? initialHomeProductIds;
@@ -57,7 +58,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   }
 
   Future<void> _fetchProducts() async {
-    if (_isLoading) return;
+    if (_isLoading || (!_hasMore && !_isFirstLoad)) return;
 
     setState(() {
       _isLoading = true;
@@ -282,6 +283,9 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         final product = _products[index];
         final isDeleting = product.id != null && _deletingProductIds.contains(product.id!);
         final isHome = product.id != null && _homeProductIds.contains(product.id!);
+        final previewUrl = product.thumbnailUrls.isNotEmpty
+          ? product.thumbnailUrls.first
+          : (product.imageUrls.isNotEmpty ? product.imageUrls.first : null);
         return InkWell(
           onTap: isDeleting ? null : () => _navigateToAddProduct(context, product: product),
           child: Container(
@@ -301,13 +305,24 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: product.imageUrls.isNotEmpty
-                      ? Image.network(
-                          product.imageUrls.first,
+                  child: previewUrl != null
+                      ? CachedNetworkImage(
+                          imageUrl: previewUrl,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: double.infinity,
-                          errorBuilder: (context, error, stackTrace) => Container(
+                          memCacheWidth: 500, // Optimize memory usage
+                          maxWidthDiskCache: 800, // Optimize disk storage
+                          placeholder: (context, url) => Container(
+                            color: Colors.grey[100],
+                            alignment: Alignment.center,
+                            child: const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                          errorWidget: (context, url, error) => Container(
                             color: Colors.grey[200],
                             alignment: Alignment.center,
                             child: const Icon(Icons.broken_image, size: 32, color: Colors.grey),

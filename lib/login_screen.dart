@@ -1,11 +1,14 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'navigation_helper.dart';
-
 import 'utils/app_colors.dart';
+import 'utils/phone_login_helper.dart';
 
 class LoginScreen extends StatefulWidget {
   final String? serviceType;
@@ -16,6 +19,16 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  static const String _androidServerClientId = String.fromEnvironment(
+    'GOOGLE_ANDROID_SERVER_CLIENT_ID',
+    defaultValue: '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
+  );
+
+  static const String _iosClientId = String.fromEnvironment(
+    'GOOGLE_IOS_CLIENT_ID',
+    defaultValue: '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
+  );
+
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _isLoading = false;
@@ -42,9 +55,46 @@ class _LoginScreenState extends State<LoginScreen> {
     // เช็คว่าเป็นเบอร์โทรหรือไม่
     final isPhone = RegExp(r'^\+?[0-9]{9,}$').hasMatch(input);
     if (isPhone) {
-      if (!mounted) return;
-      Navigator.of(context).pushNamed('/phone_auth', arguments: {'phone': input});
-      return;
+      setState(() => _isLoading = true);
+      try {
+        final normalizedPhone = PhoneLoginHelper.normalize(input);
+        final existingUser = await FirebaseFirestore.instance
+            .collection('users')
+            .where('phoneNumber', isEqualTo: normalizedPhone)
+            .limit(1)
+            .get();
+
+        final loginEmail = existingUser.docs.isNotEmpty
+            ? (existingUser.docs.first.data()['loginEmail'] as String?)
+            : null;
+
+        if (loginEmail != null && loginEmail.isNotEmpty) {
+          await FirebaseAuth.instance.signInWithEmailAndPassword(
+            email: loginEmail,
+            password: password,
+          );
+          if (!mounted) return;
+          setState(() => _isLoading = false);
+          await _handlePostLogin();
+          return;
+        }
+
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        Navigator.of(context).pushNamed(
+          '/phone_auth',
+          arguments: {
+            'phone': normalizedPhone,
+            'password': password,
+          },
+        );
+        return;
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        _showSnack('เกิดข้อผิดพลาดในการเข้าสู่ระบบด้วยเบอร์โทร: $e');
+        return;
+      }
     }
 
     // ไม่ต้องเช็คว่า user exists หรือยัง ให้ลองล็อกอินเลย
@@ -89,8 +139,18 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
+      if (Platform.isAndroid && _androidServerClientId.isEmpty) {
+        throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_ANDROID_SERVER_CLIENT_ID');
+      }
+      if (Platform.isIOS && _iosClientId.isEmpty) {
+        throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
+      }
+      debugPrint('GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId');
       final googleSignIn = GoogleSignIn.instance;
-      await googleSignIn.initialize();
+      await googleSignIn.initialize(
+        serverClientId: Platform.isAndroid ? _androidServerClientId : null,
+        clientId: Platform.isIOS ? _iosClientId : null,
+      );
       if (!googleSignIn.supportsAuthenticate()) {
         throw Exception('แพลตฟอร์มนี้ไม่รองรับ Google Sign-In');
       }
@@ -112,6 +172,9 @@ class _LoginScreenState extends State<LoginScreen> {
         debugPrint('Google sign-in failed: ${e.code} ${e.description ?? ''}');
         _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${e.code.name})');
       }
+    } on StateError catch (e) {
+      debugPrint('Google sign-in configuration error: ${e.message}');
+      _showSnack('ตั้งค่า Google Sign-In ไม่ครบ: ${e.message}');
     } on FirebaseAuthException catch (e) {
       debugPrint('Firebase sign-in failed: ${e.code}');
       _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${e.code})');

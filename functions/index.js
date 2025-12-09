@@ -306,7 +306,9 @@ exports.calculateDeliveryTime = functions.https.onCall(async (data, context) => 
  * ใช้สำหรับโทรจริง (voice/video call)
  * รับข้อมูล caller/callee/callType, สร้าง Agora token/channel, ส่ง FCM payload type 'call'
  */
-exports.callUser = functions.https.onCall(async (data, context) => {
+const singaporeRegion = 'asia-southeast1';
+
+exports.callUser = functions.region(singaporeRegion).https.onCall(async (data, context) => {
   // ข้อมูลที่รับมา
   const callerId = data.callerId;
   const callerName = data.callerName;
@@ -366,24 +368,67 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 // เพิ่มฟังก์ชัน initiateCall สำหรับฟีเจอร์โทร
-exports.initiateCall = functions.https.onCall(async (data, context) => {
-  const { calleeId, isVideo, callerData } = data;
-  const callerId = callerData?.uid;
-  // ตรวจสอบ calleeId และพยายามสร้าง profile หากยังไม่มีใน users
-  console.log('[initiateCall] incoming request', { calleeId, callerId, isVideo });
+exports.initiateCall = functions.region(singaporeRegion).https.onCall(async (data, context) => {
+  const { calleeId, callerId, callerName, callerPhotoUrl, isVideo, callType, callerData } = data;
+  if (!calleeId) {
+    throw new functions.https.HttpsError('invalid-argument', 'calleeId is required');
+  }
+  if (!callerId && !callerData?.uid) {
+    throw new functions.https.HttpsError('invalid-argument', 'callerId is required');
+  }
+
+  const resolvedCallerId = callerId || callerData?.uid;
+  const resolvedCallType = callType || (isVideo ? 'video' : 'voice');
+  const resolvedCallerName = callerName || callerData?.displayName || 'ผู้โทร';
+  const resolvedCallerPhoto = callerPhotoUrl || callerData?.photoUrl || '';
+
+  console.log('[initiateCall] incoming request', {
+    calleeId,
+    callerId: resolvedCallerId,
+    callType: resolvedCallType,
+  });
+
   let calleeProfile = await getOrCreateUserProfile(calleeId);
-  if (!calleeProfile && callerId) {
+  if (!calleeProfile && resolvedCallerId) {
     console.log('[initiateCall] users doc missing, trying friends cache');
-    calleeProfile = await getProfileFromFriendDoc(callerId, calleeId);
+    calleeProfile = await getProfileFromFriendDoc(resolvedCallerId, calleeId);
   }
   if (!calleeProfile) {
-    console.error('[initiateCall] callee not found', { calleeId, callerId });
+    console.error('[initiateCall] callee not found', { calleeId, callerId: resolvedCallerId });
     throw new functions.https.HttpsError('not-found', 'Callee not found');
   }
-  // สร้าง channelId และ token (ตัวอย่าง)
+
+  const calleeUserDoc = await db.collection('users').doc(calleeId).get();
+  const fcmToken = calleeUserDoc.exists ? calleeUserDoc.data().fcmToken : null;
+  if (!fcmToken) {
+    throw new functions.https.HttpsError('failed-precondition', 'Callee has no FCM token');
+  }
+
   const channelId = `call_${calleeId}_${Date.now()}`;
   const token = await buildAgoraToken(channelId);
-  // ส่งข้อมูลกลับ
+
+  const message = {
+    notification: {
+      title: `สาย${resolvedCallType === 'video' ? 'วิดีโอคอล' : 'เสียง'}จาก ${resolvedCallerName}`,
+      body: 'แตะเพื่อรับสาย',
+    },
+    data: {
+      type: 'call',
+      callerId: resolvedCallerId,
+      callerName: resolvedCallerName,
+      callerPhotoUrl: resolvedCallerPhoto,
+      channelId,
+      callType: resolvedCallType,
+      isVideo: String(!!isVideo),
+      token,
+      click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    },
+    token: fcmToken,
+  };
+
+  await admin.messaging().send(message);
+  console.log('[initiateCall] sent call notification');
+
   return {
     channelId,
     token,

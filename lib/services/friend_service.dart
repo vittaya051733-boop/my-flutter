@@ -2,11 +2,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../models/user_profile.dart';
+import '../utils/shop_profile_resolver.dart';
 
 class FriendService {
   FriendService();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  static const Duration _cacheTtl = Duration(minutes: 5);
+  static const int _perCollectionSearchLimit = 40;
+  static const int _perCollectionSuggestionLimit = 25;
+  final Map<String, _ProfileCacheEntry> _searchCache = <String, _ProfileCacheEntry>{};
+  final Map<String, _ProfileCacheEntry> _suggestionCache = <String, _ProfileCacheEntry>{};
 
   static const List<String> _shopCollections = <String>[
     'market_registrations',
@@ -116,52 +122,286 @@ class FriendService {
     return null;
   }
 
+  Future<List<UserProfile>> searchProfilesByName(String keyword, {int limit = 20}) async {
+    final normalized = keyword.trim().toLowerCase();
+    if (normalized.isEmpty) return const <UserProfile>[];
+    final cached = _readCache(_searchCache, normalized);
+    if (cached != null) {
+      return cached.length <= limit ? cached : cached.sublist(0, limit);
+    }
+
+    final futures = _shopCollections
+        .map(
+          (collection) => _firestore
+              .collection(collection)
+              .limit(_perCollectionSearchLimit)
+              .get(),
+        )
+        .toList(growable: false);
+
+    final snapshots = await Future.wait(futures);
+    final results = <UserProfile>[];
+    final seen = <String>{};
+
+    for (var i = 0; i < snapshots.length; i++) {
+      final snapshot = snapshots[i];
+      final collection = _shopCollections[i];
+      for (final doc in snapshot.docs) {
+        if (seen.contains(doc.id)) continue;
+        final data = doc.data();
+        final name = _readDisplayName(data, fallback: '').trim();
+        if (name.isEmpty) continue;
+        if (!name.toLowerCase().contains(normalized)) continue;
+
+        seen.add(doc.id);
+        results.add(
+          UserProfile(
+            uid: doc.id,
+            displayName: name,
+            phoneNumber:
+                _normalizePhone((data['phone'] ?? data['phoneNumber'] ?? '') as String),
+            photoUrl: _readPhotoUrl(data),
+            serviceType: (data['serviceType'] as String?) ?? collection,
+            isOfficial: (data['isOfficialAccount'] as bool?) ?? false,
+            profileCompleted: (data['isProfileCompleted'] as bool?) ?? false,
+          ),
+        );
+        if (results.length >= limit) {
+          _searchCache[normalized] = _ProfileCacheEntry(results);
+          return results;
+        }
+      }
+    }
+
+    _searchCache[normalized] = _ProfileCacheEntry(results);
+    return results;
+  }
+
   Future<List<UserProfile>> fetchSuggestedProfiles({
     required String ownerId,
+    String? ownerEmail,
     int limit = 12,
   }) async {
+    final cacheKey = '$ownerId::$limit';
+    final cached = _readCache(_suggestionCache, cacheKey);
+    if (cached != null) {
+      return cached.length <= limit ? cached : cached.sublist(0, limit);
+    }
+
     final exclude = <String>{ownerId};
     final existingFriends = await _firestore
         .collection('users')
         .doc(ownerId)
         .collection('friends')
+        .limit(200)
         .get();
     for (final doc in existingFriends.docs) {
       exclude.add(doc.id);
     }
 
-    final perCollectionLimit = (limit * 2).clamp(6, 30);
     final suggestions = <UserProfile>[];
     final seen = <String>{};
+    final lowerOwnerEmail = ownerEmail?.toLowerCase().trim();
+    final ownerServiceType = await _getOwnerServiceType(ownerId);
+    final baseCollections = await _preferredCollectionsForOwner(
+      ownerId,
+      ownerServiceType: ownerServiceType,
+    );
+    final preferredCollection = baseCollections.length == 1 ? baseCollections.first : null;
+    final collectionsToQuery = <String>[
+      ...baseCollections,
+      ..._shopCollections.where((c) => !baseCollections.contains(c)),
+    ];
 
-    for (final collection in _shopCollections) {
-      final snapshot = await _firestore
-          .collection(collection)
-          .where('isProfileCompleted', isEqualTo: true)
-          .limit(perCollectionLimit)
-          .get();
+    final limitedCollections = collectionsToQuery.take(4).toList(growable: false);
+    final futures = limitedCollections
+        .map(
+          (collection) => _firestore
+              .collection(collection)
+              .limit(_perCollectionSuggestionLimit)
+              .get(),
+        )
+        .toList(growable: false);
+    final snapshots = await Future.wait(futures);
 
+    for (var i = 0; i < snapshots.length; i++) {
+      final snapshot = snapshots[i];
+      final collection = limitedCollections[i];
       for (final doc in snapshot.docs) {
-        if (exclude.contains(doc.id) || seen.contains(doc.id)) continue;
         final data = doc.data();
+        final shopOwnerId = (data['ownerId'] as String?) ?? doc.id;
+        if (shopOwnerId.isEmpty) continue;
+        if (exclude.contains(shopOwnerId) || seen.contains(shopOwnerId)) continue;
+
+        final email = (data['email'] as String?)?.toLowerCase().trim();
+        if (lowerOwnerEmail != null && email != null && email == lowerOwnerEmail) {
+          continue;
+        }
+
+        final photoUrl = _readPhotoUrl(data);
+        if (photoUrl == null || photoUrl.isEmpty) {
+          continue;
+        }
+
         final profile = UserProfile(
-          uid: doc.id,
+          uid: shopOwnerId,
           displayName: _readDisplayName(data, fallback: 'ร้านค้า'),
           phoneNumber: _normalizePhone((data['phone'] ?? data['phoneNumber'] ?? '') as String),
-          photoUrl: _readPhotoUrl(data),
-          serviceType: (data['serviceType'] as String?) ?? collection,
+          photoUrl: photoUrl,
+          serviceType: (data['serviceType'] as String?) ?? _serviceTypeFromCollection(collection),
           isOfficial: (data['isOfficialAccount'] as bool?) ?? false,
           profileCompleted: (data['isProfileCompleted'] as bool?) ?? true,
         );
         suggestions.add(profile);
-        seen.add(doc.id);
+        seen.add(shopOwnerId);
+        exclude.add(shopOwnerId);
         if (suggestions.length >= limit) break;
       }
-
       if (suggestions.length >= limit) break;
     }
 
+    if (suggestions.length < limit) {
+      final fallbackLimit = ((limit - suggestions.length) * 3).clamp(12, 60).toInt();
+      final userSnapshot = await _firestore
+          .collection('users')
+          .orderBy('updatedAt', descending: true)
+          .limit(fallbackLimit)
+          .get();
+
+      final candidates = <UserProfile>[];
+      for (final doc in userSnapshot.docs) {
+        if (exclude.contains(doc.id) || seen.contains(doc.id)) continue;
+        final data = doc.data();
+        final completed = (data['profileCompleted'] as bool?) ?? false;
+        if (!completed) continue;
+        final photoUrl = (data['photoUrl'] as String?)?.trim();
+        if (photoUrl == null || photoUrl.isEmpty) continue;
+        candidates.add(UserProfile.fromSnapshot(doc));
+      }
+
+      String? matchingCollection = preferredCollection;
+      matchingCollection ??= _collectionFromServiceType(ownerServiceType);
+
+      void takeCandidates({required bool sameServiceOnly}) {
+        for (final profile in candidates) {
+          if (suggestions.length >= limit) break;
+          if (exclude.contains(profile.uid) || seen.contains(profile.uid)) continue;
+
+          if (sameServiceOnly) {
+            if (matchingCollection == null) continue;
+            final profileCollection = _collectionFromServiceType(profile.serviceType);
+            if (profileCollection == null || profileCollection != matchingCollection) {
+              continue;
+            }
+          }
+
+          suggestions.add(profile);
+          seen.add(profile.uid);
+          exclude.add(profile.uid);
+        }
+      }
+
+      takeCandidates(sameServiceOnly: true);
+      takeCandidates(sameServiceOnly: false);
+    }
+
+    _suggestionCache[cacheKey] = _ProfileCacheEntry(suggestions);
     return suggestions;
+  }
+
+  List<UserProfile>? _readCache(
+    Map<String, _ProfileCacheEntry> cache,
+    String key,
+  ) {
+    final entry = cache[key];
+    if (entry == null) {
+      return null;
+    }
+
+    if (DateTime.now().difference(entry.insertedAt) > _cacheTtl) {
+      cache.remove(key);
+      return null;
+    }
+    return entry.data;
+  }
+
+  Future<List<String>> _preferredCollectionsForOwner(
+    String ownerId, {
+    String? ownerServiceType,
+  }) async {
+    String? serviceType = ownerServiceType;
+    if (serviceType == null || serviceType.isEmpty) {
+      serviceType = await _getOwnerServiceType(ownerId);
+    }
+
+    final collection = _collectionFromServiceType(serviceType);
+    if (collection != null) {
+      return <String>[collection];
+    }
+    return _shopCollections;
+  }
+
+  Future<String?> _getOwnerServiceType(String ownerId) async {
+    try {
+      final userDoc = await _firestore.collection('users').doc(ownerId).get();
+      final serviceType = (userDoc.data()?['serviceType'] as String?)?.trim();
+      if (serviceType != null && serviceType.isNotEmpty) {
+        return serviceType;
+      }
+    } catch (_) {}
+
+    try {
+      final contractDoc = await _firestore.collection('contracts').doc(ownerId).get();
+      final serviceType = (contractDoc.data()?['serviceType'] as String?)?.trim();
+      if (serviceType != null && serviceType.isNotEmpty) {
+        return serviceType;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  String? _collectionFromServiceType(String? serviceType) {
+    if (serviceType == null || serviceType.isEmpty) return null;
+    switch (serviceType) {
+      case 'ตลาด':
+      case 'market':
+      case 'market_registrations':
+        return 'market_registrations';
+      case 'ร้านค้า':
+      case 'shop':
+      case 'shop_registrations':
+        return 'shop_registrations';
+      case 'ร้านอาหาร':
+      case 'restaurant':
+      case 'restaurant_registrations':
+        return 'restaurant_registrations';
+      case 'ร้านขายยา':
+      case 'pharmacy':
+      case 'pharmacy_registrations':
+        return 'pharmacy_registrations';
+      case 'อื่นๆ':
+      case 'other':
+      case 'other_registrations':
+        return 'other_registrations';
+      default:
+        return null;
+    }
+  }
+
+  String _serviceTypeFromCollection(String collection) {
+    switch (collection) {
+      case 'market_registrations':
+        return 'ตลาด';
+      case 'shop_registrations':
+        return 'ร้านค้า';
+      case 'restaurant_registrations':
+        return 'ร้านอาหาร';
+      case 'pharmacy_registrations':
+        return 'ร้านขายยา';
+      default:
+        return 'อื่นๆ';
+    }
   }
 
   Future<void> addFriend({
@@ -226,32 +466,17 @@ class FriendService {
   }
 
   static String _readDisplayName(Map<String, dynamic>? data, {required String fallback}) {
-    if (data == null) return fallback;
-    final candidates = <String?>[
-      data['displayName'] as String?,
-      data['shopName'] as String?,
-      data['name'] as String?,
-    ];
-    for (final candidate in candidates) {
-      if (candidate != null && candidate.trim().isNotEmpty) {
-        return candidate.trim();
-      }
+    final resolved = ShopProfileResolver.resolveName(data);
+    if (resolved != null && resolved.trim().isNotEmpty) {
+      return resolved.trim();
     }
     return fallback;
   }
 
   static String? _readPhotoUrl(Map<String, dynamic>? data) {
-    if (data == null) return null;
-    final candidates = <String?>[
-      data['shopImageUrl'] as String?,
-      data['imageUrl'] as String?,
-      data['logoUrl'] as String?,
-      data['profileImageUrl'] as String?,
-    ];
-    for (final candidate in candidates) {
-      if (candidate != null && candidate.trim().isNotEmpty) {
-        return candidate.trim();
-      }
+    final resolved = ShopProfileResolver.resolveImageUrl(data);
+    if (resolved != null && resolved.trim().isNotEmpty) {
+      return resolved.trim();
     }
     return null;
   }
@@ -270,6 +495,15 @@ class FriendService {
     }
     return clean;
   }
+}
+
+class _ProfileCacheEntry {
+  _ProfileCacheEntry(List<UserProfile> items)
+      : data = List<UserProfile>.unmodifiable(items),
+        insertedAt = DateTime.now();
+
+  final List<UserProfile> data;
+  final DateTime insertedAt;
 }
 
 class FriendPreview {

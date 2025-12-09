@@ -1,4 +1,6 @@
 import com.android.build.gradle.BaseExtension
+import org.gradle.api.JavaVersion
+import org.jetbrains.kotlin.gradle.dsl.KotlinJvmOptions
 
 allprojects {
     repositories {
@@ -11,6 +13,14 @@ subprojects {
     afterEvaluate {
         project.extensions.findByType(BaseExtension::class.java)?.let {
             it.compileSdkVersion(36)
+            it.compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_17
+                targetCompatibility = JavaVersion.VERSION_17
+            }
+        }
+
+        (project.extensions.findByName("kotlinOptions") as? KotlinJvmOptions)?.apply {
+            jvmTarget = JavaVersion.VERSION_17.toString()
         }
     }
 }

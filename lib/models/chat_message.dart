@@ -13,6 +13,10 @@ class ChatMessage {
     this.mediaContentType,
     this.createdAt,
     this.expiresAt,
+    this.callType,
+    this.callDirection,
+    this.callStatus,
+    this.callDurationSeconds,
   });
 
   final String id;
@@ -25,6 +29,10 @@ class ChatMessage {
   final String? mediaContentType;
   final DateTime? createdAt;
   final DateTime? expiresAt;
+  final String? callType;
+  final String? callDirection;
+  final String? callStatus;
+  final int? callDurationSeconds;
 
   factory ChatMessage.fromSnapshot(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data() ?? const <String, dynamic>{};
@@ -41,6 +49,10 @@ class ChatMessage {
       mediaContentType: data['mediaContentType'] as String?,
       createdAt: createdTs?.toDate(),
       expiresAt: expiresTs?.toDate(),
+      callType: data['callType'] as String?,
+      callDirection: data['direction'] as String?,
+      callStatus: data['callStatus'] as String?,
+      callDurationSeconds: (data['callDuration'] as num?)?.toInt(),
     );
   }
 }

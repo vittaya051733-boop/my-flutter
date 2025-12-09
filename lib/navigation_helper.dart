@@ -20,7 +20,11 @@ class NavigationHelper {
         return;
       }
 
-      if (!user.emailVerified && context.mounted) {
+      final bool hasEmail = user.email?.isNotEmpty ?? false;
+      final bool requiresEmailVerification = hasEmail &&
+          user.providerData.any((info) => info.providerId == 'password');
+
+      if (requiresEmailVerification && !user.emailVerified && context.mounted) {
         _navigate(
           context,
           '/email-verification',

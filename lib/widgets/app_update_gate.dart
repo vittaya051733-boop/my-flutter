@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:ota_update/ota_update.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/app_update_service.dart';
@@ -16,11 +18,13 @@ class AppUpdateGate extends StatefulWidget {
     required this.child,
     this.service = const AppUpdateService(),
     this.allowSkipForMandatory = false,
+    this.showCheckingOverlay = false,
   });
 
   final Widget child;
   final AppUpdateService service;
   final bool allowSkipForMandatory;
+  final bool showCheckingOverlay;
 
   @override
   State<AppUpdateGate> createState() => _AppUpdateGateState();
@@ -42,7 +46,10 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
   @override
   void initState() {
     super.initState();
-    _initializeAndCheck();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_initializeAndCheck());
+    });
   }
 
   @override
@@ -52,44 +59,47 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
   }
 
   Future<void> _initializeAndCheck() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (!mounted) return;
-      setState(() {
-        _prefs = prefs;
-        _skippedVersionCode = prefs.getInt(_kSkippedVersionKey);
-      });
-    } catch (e) {
-      debugPrint('Failed to init SharedPreferences: $e');
-    }
-    await _kickOffCheck();
-  }
-
-  Future<void> _kickOffCheck() async {
     if (_checking || kIsWeb) {
       return;
     }
     setState(() => _checking = true);
     try {
-      final update = await widget.service.getUpdateForCurrentBuild();
-      if (!mounted) return;
-      setState(() {
-        _checking = false;
-      });
-      if (update != null) {
-        await _resetSkipIfNeeded(update);
-        final skipped = _skippedVersionCode;
-        final shouldSkipOptional =
-            skipped != null && skipped == update.latestVersionCode && !update.isMandatory;
-        if (shouldSkipOptional) {
-          return;
-        }
-        _showUpdateDialog(update);
+      final prefs = await SharedPreferences.getInstance();
+      if (mounted) {
+        setState(() {
+          _prefs = prefs;
+          _skippedVersionCode = prefs.getInt(_kSkippedVersionKey);
+        });
       }
+      await _kickOffCheck();
+    } catch (e) {
+      debugPrint('AppUpdateGate init failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _checking = false);
+      }
+    }
+  }
+
+  Future<void> _kickOffCheck() async {
+    if (kIsWeb) {
+      return;
+    }
+    try {
+      final update = await widget.service.getUpdateForCurrentBuild();
+      if (!mounted || update == null) {
+        return;
+      }
+      await _resetSkipIfNeeded(update);
+      final skipped = _skippedVersionCode;
+      final shouldSkipOptional =
+          skipped != null && skipped == update.latestVersionCode && !update.isMandatory;
+      if (shouldSkipOptional) {
+        return;
+      }
+      _showUpdateDialog(update);
     } catch (e) {
       debugPrint('App update check failed: $e');
-      if (!mounted) return;
-      setState(() => _checking = false);
     }
   }
 
@@ -180,6 +190,15 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
   }
 
   Future<void> _startDownload(AppUpdateInfo info) async {
+    final permissionsGranted = await _ensureOtaPermissions();
+    if (!permissionsGranted) {
+      _handleOtaError(
+        OtaStatus.PERMISSION_NOT_GRANTED_ERROR,
+        'กรุณาอนุญาตการติดตั้งจากแหล่งอื่นและการเขียนไฟล์ก่อนเริ่มอัปเดต',
+      );
+      return;
+    }
+
     setState(() {
       _isInstalling = true;
       _errorMessage = null;
@@ -243,6 +262,23 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
     }
   }
 
+  Future<bool> _ensureOtaPermissions() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    final results = await <Permission>[
+      Permission.manageExternalStorage,
+      Permission.storage,
+      Permission.requestInstallPackages,
+    ].request();
+
+    final storageGranted =
+        (results[Permission.manageExternalStorage]?.isGranted ?? false) ||
+            (results[Permission.storage]?.isGranted ?? false);
+    final installerGranted = results[Permission.requestInstallPackages]?.isGranted ?? false;
+    return storageGranted && installerGranted;
+  }
+
   void _handleOtaError(OtaStatus? status, String? message) {
     debugPrint('OTA update error: $status -> $message');
     if (!mounted) return;
@@ -261,9 +297,43 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
     }
   }
 
+  bool get _showOverlay => _checking && !_dialogVisible && !_isInstalling;
+  bool get _shouldRenderOverlay => widget.showCheckingOverlay && _showOverlay;
+
   @override
   Widget build(BuildContext context) {
-    return widget.child;
+    final overlay = _shouldRenderOverlay
+        ? Container(
+            key: const ValueKey('app-update-overlay'),
+            color: Colors.black54,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: const [
+                SizedBox(width: 32, height: 32, child: CircularProgressIndicator()),
+                SizedBox(height: 12),
+                Text(
+                  'กำลังตรวจสอบอัปเดต...',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ],
+            ),
+          )
+        : const SizedBox.shrink();
+
+    return Stack(
+      children: [
+        widget.child,
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: !_shouldRenderOverlay,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: overlay,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _resetSkipIfNeeded(AppUpdateInfo info) async {

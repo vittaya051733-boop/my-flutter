@@ -4,27 +4,33 @@ class Product {
   final String? id; // Add ID field
   final String name;
   final String description;
+  final String? toppings;
   final double price;
   final int stock;
   final List<String> imageUrls;
+  final List<String> thumbnailUrls;
   final List<String> colors;
   final List<String> sizes;
   final String unit;
   final double? weight;
   final String? videoUrl;
+  final String? videoThumbnailUrl;
 
   Product({
     this.id, // Add to constructor
     required this.name,
     required this.description,
+    this.toppings,
     required this.price,
     required this.stock,
     required this.imageUrls,
+    required this.thumbnailUrls,
     required this.colors,
     required this.sizes,
     required this.unit,
     this.weight,
     this.videoUrl,
+    this.videoThumbnailUrl,
   });
 
   // Method to convert a Product instance to a map.
@@ -32,14 +38,17 @@ class Product {
     return {
       'name': name,
       'description': description,
+      'toppings': toppings,
       'price': price,
       'stock': stock,
       'imageUrls': imageUrls,
+      'thumbnailUrls': thumbnailUrls,
       'colors': colors,
       'sizes': sizes,
       'unit': unit,
       'weight': weight,
       'videoUrl': videoUrl,
+      'videoThumbnailUrl': videoThumbnailUrl,
       'createdAt': FieldValue.serverTimestamp(), // Automatically add a timestamp
     };
   }
@@ -58,14 +67,19 @@ class Product {
       id: doc.id, // Assign document ID
       name: map['name'] ?? '',
       description: map['description'] ?? '',
+      toppings: map['toppings'] as String?,
       price: (map['price'] as num?)?.toDouble() ?? 0.0,
       stock: (map['stock'] as num?)?.toInt() ?? 0,
       imageUrls: List<String>.from(map['imageUrls'] ?? []),
+      thumbnailUrls: List<String>.from(
+        (map['thumbnailUrls'] ?? map['imageUrls']) ?? [],
+      ),
       colors: List<String>.from(map['colors'] ?? []),
       sizes: List<String>.from(map['sizes'] ?? []),
       unit: map['unit'] ?? '',
       weight: parsedWeight,
       videoUrl: map['videoUrl'] as String?,
+      videoThumbnailUrl: map['videoThumbnailUrl'] as String?,
     );
   }
 }

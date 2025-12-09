@@ -1,4 +1,6 @@
-﻿import 'package:cloud_firestore/cloud_firestore.dart';
+﻿import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +16,9 @@ import 'driver_scanner_screen.dart';
 import 'utils/app_colors.dart';
 import 'chat_screen.dart';
 import 'widgets/product_video_player.dart';
-import 'package:video_player/video_player.dart';
+import 'services/product_cache_service.dart';
+import 'services/video_prefetch_service.dart';
+import 'utils/shop_profile_resolver.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -49,8 +53,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   String? _shopImageUrl;
   String? _shopName;
   Set<String> _homeProductIds = <String>{};
+  Future<List<CachedProduct>>? _homeProductsFuture;
+  List<CachedProduct> _localCachedProducts = const [];
   bool _isShopOpen = true;
   DocumentReference<Map<String, dynamic>>? _shopDocRef;
+  String? _currentUserId;
+  int _unreadChatCount = 0;
 
   @override
   void initState() {
@@ -59,6 +67,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _pages[0] = _buildPage(0);
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
+    _listenUnreadChats();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -74,28 +83,35 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
-      final collectionsToCheck = await _collectionsToCheck(user);
+      _currentUserId = user.uid;
+      _hydrateCachedProducts(user.uid);
 
-      for (final collectionName in collectionsToCheck) {
+      final collectionsToCheck = await _collectionsToCheck(user);
+      if (collectionsToCheck.isEmpty) return;
+
+      final futures = collectionsToCheck.map((collectionName) async {
         final docRef = FirebaseFirestore.instance.collection(collectionName).doc(user.uid);
         final snapshot = await docRef.get();
+        return MapEntry(docRef, snapshot);
+      }).toList();
+
+      final results = await Future.wait(futures);
+      for (final entry in results) {
+        final snapshot = entry.value;
         if (!snapshot.exists) continue;
         final data = snapshot.data();
         if (data == null) continue;
 
-        final String? imageUrl = _readImageUrl(data);
-        final String? name = _readShopName(data);
+        final String? imageUrl = ShopProfileResolver.resolveImageUrl(data);
+        final String? name = ShopProfileResolver.resolveName(data);
         final bool isOpen = data['isOpen'] as bool? ?? true;
         final Set<String> homeIds = ((data['homeProductIds'] as List?) ?? const [])
             .whereType<String>()
             .toSet();
 
         if (!mounted) return;
-        if (imageUrl != null && imageUrl.isNotEmpty) {
-          await precacheImage(CachedNetworkImageProvider(imageUrl), context);
-        }
         setState(() {
-          _shopDocRef = docRef;
+          _shopDocRef = entry.key;
           if (imageUrl != null && imageUrl.isNotEmpty) {
             _shopImageUrl = imageUrl;
           }
@@ -106,11 +122,117 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           _homeProductIds = homeIds;
           _pages[0] = _buildPage(0);
         });
+        _updateHomeProductsCache();
+
+        if (imageUrl != null && imageUrl.isNotEmpty) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              precacheImage(CachedNetworkImageProvider(imageUrl), context);
+            }
+          });
+        }
         break;
       }
     } catch (e) {
       debugPrint('Failed to load shop details: $e');
     }
+  }
+
+  void _listenUnreadChats() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    FirebaseFirestore.instance
+        .collection('chatRooms')
+        .where('participants', arrayContains: user.uid)
+        .snapshots()
+        .listen((snapshot) {
+      int totalUnread = 0;
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final unreadMap = data['unreadCounts'] as Map<String, dynamic>?;
+        if (unreadMap != null) {
+          final userCount = unreadMap[user.uid];
+          if (userCount is int) {
+            totalUnread += userCount;
+          } else if (userCount is num) {
+            totalUnread += userCount.toInt();
+          }
+        }
+      }
+      if (mounted) {
+        setState(() => _unreadChatCount = totalUnread);
+      }
+    });
+  }
+
+  Future<void> _hydrateCachedProducts(String userId) async {
+    final cached = await ProductCacheService.instance.loadProducts(userId);
+    if (!mounted || cached.isEmpty) return;
+    setState(() {
+      _localCachedProducts = cached;
+      _pages[0] = _buildPage(0);
+    });
+  }
+
+  Future<List<CachedProduct>> _fetchHomeProducts(String userId, Set<String> ids) async {
+    if (ids.isEmpty) {
+      return const <CachedProduct>[];
+    }
+
+    final orderedIds = ids.toList();
+    final Map<String, int> ordering = {
+      for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i,
+    };
+    const int chunkSize = 10;
+    final productsCollection = FirebaseFirestore.instance.collection('products');
+    final futures = <Future<QuerySnapshot<Map<String, dynamic>>>>[];
+
+    for (var start = 0; start < orderedIds.length; start += chunkSize) {
+      final end = (start + chunkSize) > orderedIds.length ? orderedIds.length : start + chunkSize;
+      futures.add(
+        productsCollection
+          .where(FieldPath.documentId, whereIn: orderedIds.sublist(start, end))
+          .get(),
+      );
+    }
+
+    final snapshots = await Future.wait(futures);
+    final docs = snapshots.expand((snap) => snap.docs).toList();
+    docs.sort((a, b) {
+      final orderA = ordering[a.id] ?? 0;
+      final orderB = ordering[b.id] ?? 0;
+      return orderA.compareTo(orderB);
+    });
+    final products = docs
+        .map((doc) => CachedProduct(id: doc.id, data: doc.data()))
+        .toList(growable: false);
+    await ProductCacheService.instance.saveProducts(userId, products);
+    if (mounted) {
+      setState(() {
+        _localCachedProducts = products;
+        _pages[0] = _buildPage(0);
+      });
+    }
+    return products;
+  }
+
+  void _updateHomeProductsCache() {
+    final userId = _currentUserId;
+    if (!mounted) return;
+    if (userId == null || _homeProductIds.isEmpty) {
+      if (userId != null && _homeProductIds.isEmpty) {
+        unawaited(ProductCacheService.instance.clear(userId));
+      }
+      setState(() {
+        _homeProductsFuture = null;
+        _localCachedProducts = const [];
+      });
+      return;
+    }
+    setState(() {
+      _homeProductsFuture = _fetchHomeProducts(userId, _homeProductIds);
+      _pages[0] = _buildPage(0);
+    });
   }
 
   Future<List<String>> _collectionsToCheck(User user) async {
@@ -141,28 +263,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
 
     return collections;
-  }
-
-  String? _readImageUrl(Map<String, dynamic> data) {
-    const keys = ['shopImageUrl', 'imageUrl', 'logoUrl', 'profileImageUrl'];
-    for (final key in keys) {
-      final value = data[key];
-      if (value is String && value.trim().isNotEmpty) {
-        return value.trim();
-      }
-    }
-    return null;
-  }
-
-  String? _readShopName(Map<String, dynamic> data) {
-    const keys = ['shopName', 'name', 'displayName'];
-    for (final key in keys) {
-      final value = data[key];
-      if (value is String && value.trim().isNotEmpty) {
-        return value.trim();
-      }
-    }
-    return null;
   }
 
   String _collectionForServiceType(String serviceType) {
@@ -245,6 +345,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           shopImageUrl: _shopImageUrl,
           shopName: _shopName,
           homeProductIds: _homeProductIds,
+          homeProductsFuture: _homeProductsFuture,
+          cachedProducts: _localCachedProducts,
           isShopOpen: _isShopOpen,
           onToggleShopStatus: (value) async {
             setState(() {
@@ -273,6 +375,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               _homeProductIds = ids;
               _pages[0] = _buildPage(0); // สร้างหน้าโฮมขึ้นมาใหม่
             });
+            _updateHomeProductsCache();
             _saveHomeProductIds(ids);
           },
         );
@@ -342,7 +445,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             _buildNavButton(icon: Icons.delivery_dining, index: 4),
                             _buildNavButton(icon: Icons.wallet, index: 5),
                             _buildNavButton(icon: Icons.notifications_outlined, index: 6),
-                            _buildNavButton(icon: Icons.chat_bubble_outline, index: 7),
+                            _buildNavButton(
+                              icon: Icons.chat_bubble_outline,
+                              index: 7,
+                              badgeCount: _unreadChatCount,
+                            ),
                             _buildNavButton(icon: Icons.settings_outlined, index: 8),
                           ],
                         ),
@@ -397,10 +504,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Widget _buildNavButton({
     required IconData icon,
     required int index,
+    int badgeCount = 0,
   }) {
     final bool isSelected = _currentIndex == index;
-  final Color circleColor = isSelected ? AppColors.accentLight : const Color(0xFFE6E6E6);
-  final Color iconColor = isSelected ? AppColors.accent : AppColors.neutralIcon;
+    final Color circleColor = isSelected ? AppColors.accentLight : const Color(0xFFE6E6E6);
+    final Color iconColor = isSelected ? AppColors.accent : AppColors.neutralIcon;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -419,32 +527,66 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           mainAxisSize: MainAxisSize.min,
           children: [
             Stack(
+              clipBehavior: Clip.none,
               children: [
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
-                  width: isSelected ? 60 : 54,
-                  height: isSelected ? 60 : 54,
+                  width: 62,
+                  height: 62,
                   decoration: BoxDecoration(
                     color: circleColor,
                     shape: BoxShape.circle,
+                    boxShadow: isSelected
+                        ? [
+                            BoxShadow(
+                              color: AppColors.accent.withOpacity(0.3),
+                              blurRadius: 12,
+                              offset: const Offset(0, 6),
+                            ),
+                          ]
+                        : null,
                   ),
-                  alignment: Alignment.center,
-                  child: Icon(icon, color: iconColor, size: 22),
+                  child: Icon(icon, color: iconColor, size: 28),
                 ),
                 if (index == 6 && _notificationCount > 0)
                   Positioned(
-                    right: 6,
-                    top: 6,
+                    right: -6,
+                    top: -6,
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: Colors.red,
+                        color: Colors.orange.shade700,
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: Colors.white, width: 2),
                       ),
                       child: Text(
                         _notificationCount.toString(),
-                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (badgeCount > 0)
+                  Positioned(
+                    right: -4,
+                    top: -4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: Text(
+                        badgeCount > 99 ? '99+' : badgeCount.toString(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
                   ),
@@ -495,9 +637,11 @@ class _HomeDashboard extends StatelessWidget {
     required this.onProfileTap,
     required this.isShopOpen,
     required this.onToggleShopStatus,
+    required this.cachedProducts,
     this.shopImageUrl,
     this.shopName,
     this.homeProductIds,
+    this.homeProductsFuture,
   });
 
   final VoidCallback onProfileTap;
@@ -506,13 +650,12 @@ class _HomeDashboard extends StatelessWidget {
   final String? shopImageUrl;
   final String? shopName;
   final Set<String>? homeProductIds;
+  final Future<List<CachedProduct>>? homeProductsFuture;
+  final List<CachedProduct> cachedProducts;
+
 
   void _showProductGallery(BuildContext context, Map<String, dynamic> data) {
-    final List<String> allImages = (data['imageUrls'] as List?)
-        ?.whereType<String>()
-        .where((url) => url.trim().isNotEmpty)
-        .toList() ??
-      const [];
+    final List<String> allImages = _extractImages(data, preferThumbnails: false);
     // Always show the selected imageUrl (from grid) as the first image
     final selectedImageUrl = allImages.isNotEmpty ? allImages.first : null;
     final List<String> imageUrls = selectedImageUrl != null
@@ -523,6 +666,7 @@ class _HomeDashboard extends StatelessWidget {
     final price = (data['price'] ?? '').toString();
     final stock = data['stock']?.toString() ?? '0';
     final description = (data['description'] ?? '').toString();
+    final videoThumbnailUrl = (data['videoThumbnailUrl'] ?? '').toString().trim();
 
     showDialog(
       context: context,
@@ -534,6 +678,7 @@ class _HomeDashboard extends StatelessWidget {
         child: _ProductGalleryContent(
           images: imageUrls,
           videoUrl: videoUrl,
+          videoThumbnailUrl: videoThumbnailUrl.isNotEmpty ? videoThumbnailUrl : null,
           name: name,
           price: price,
           stock: stock,
@@ -543,6 +688,63 @@ class _HomeDashboard extends StatelessWidget {
     );
   }
 
+  List<String> _extractImages(Map<String, dynamic> data, {bool preferThumbnails = false}) {
+    List<String> readList(String key) => (data[key] as List?)
+            ?.whereType<String>()
+            .where((url) => url.trim().isNotEmpty)
+            .toList() ??
+        const [];
+
+    final thumbnails = readList('thumbnailUrls');
+    final originals = readList('imageUrls');
+
+    if (preferThumbnails && thumbnails.isNotEmpty) {
+      return thumbnails;
+    }
+    if (!preferThumbnails && originals.isNotEmpty) {
+      return originals;
+    }
+    return thumbnails.isNotEmpty ? thumbnails : originals;
+  }
+
+  void _prefetchProductVideos(List<CachedProduct> docs, int selectedIndex) {
+    if (selectedIndex < 0 || selectedIndex >= docs.length) {
+      return;
+    }
+
+    final Set<String> urls = <String>{};
+    final String? current = (docs[selectedIndex].data['videoUrl'] as String?)?.trim();
+    if (current != null && current.isNotEmpty) {
+      urls.add(current);
+    }
+
+    int offset = 1;
+    int neighborCount = 0;
+    while (neighborCount < 5 && (selectedIndex - offset >= 0 || selectedIndex + offset < docs.length)) {
+      final prevIndex = selectedIndex - offset;
+      if (prevIndex >= 0) {
+        final prevUrl = (docs[prevIndex].data['videoUrl'] as String?)?.trim();
+        if (prevUrl != null && prevUrl.isNotEmpty && urls.add(prevUrl)) {
+          neighborCount++;
+        }
+      }
+
+      final nextIndex = selectedIndex + offset;
+      if (nextIndex < docs.length) {
+        final nextUrl = (docs[nextIndex].data['videoUrl'] as String?)?.trim();
+        if (nextUrl != null && nextUrl.isNotEmpty && urls.add(nextUrl)) {
+          neighborCount++;
+        }
+      }
+
+      offset++;
+    }
+
+    if (urls.isNotEmpty) {
+      VideoPrefetchService.instance.preloadVideos(urls);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ImageProvider? avatarImage = (shopImageUrl != null && shopImageUrl!.isNotEmpty)
@@ -550,7 +752,7 @@ class _HomeDashboard extends StatelessWidget {
         : null;
     final String displayName = (shopName != null && shopName!.isNotEmpty)
         ? shopName!
-        : '??????????';
+        : '-';
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -632,29 +834,42 @@ class _HomeDashboard extends StatelessWidget {
             )
           : homeProductIds == null || homeProductIds!.isEmpty
               ? const Center(child: Text('ยังไม่มีสินค้าที่เลือกแสดงบนหน้าโฮม', style: TextStyle(fontSize: 18)))
-              : FutureBuilder<QuerySnapshot>(
-                  future: FirebaseFirestore.instance
-                      .collection('products')
-                      .where(FieldPath.documentId, whereIn: homeProductIds!.toList())
-                      .get(),
+              : FutureBuilder<List<CachedProduct>>(
+                  future: homeProductsFuture,
                   builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
+                    final List<CachedProduct> docs = snapshot.data ?? cachedProducts;
+                    final bool showLoading =
+                        snapshot.connectionState == ConnectionState.waiting && docs.isEmpty;
+
+                    if (showLoading) {
                       return const Center(child: CircularProgressIndicator());
                     }
-                    if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+
+                    if (snapshot.hasError && docs.isEmpty) {
+                      return Center(
+                        child: Text(
+                          'เกิดข้อผิดพลาดในการโหลดสินค้า: ${snapshot.error}',
+                          textAlign: TextAlign.center,
+                        ),
+                      );
+                    }
+
+                    if (docs.isEmpty) {
                       return const Center(child: Text('ไม่พบสินค้าที่เลือก', style: TextStyle(fontSize: 18)));
                     }
-                    final docs = snapshot.data!.docs;
-                    return GridView.count(
-                      crossAxisCount: 2,
+                    return GridView.builder(
                       padding: const EdgeInsets.all(16),
-                      mainAxisSpacing: 16,
-                      crossAxisSpacing: 16,
-                      children: docs.map((doc) {
-                        final data = doc.data() as Map<String, dynamic>;
-                        final List imageUrls = data['imageUrls'] as List? ?? [];
-                        final imageUrl = imageUrls.isNotEmpty ? imageUrls.first as String? : null;
-                        final videoUrl = data['videoUrl'] as String?;
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        mainAxisSpacing: 16,
+                        crossAxisSpacing: 16,
+                      ),
+                      itemCount: docs.length,
+                      itemBuilder: (context, index) {
+                        final doc = docs[index];
+                        final data = doc.data;
+                        final List<String> thumbnailImages = _extractImages(data, preferThumbnails: true);
+                        final String? imageUrl = thumbnailImages.isNotEmpty ? thumbnailImages.first : null;
                         final name = (data['name'] ?? '').toString();
                         final price = (data['price'] ?? '').toString();
                         final stock = data['stock']?.toString() ?? '0';
@@ -662,16 +877,14 @@ class _HomeDashboard extends StatelessWidget {
 
                         return GestureDetector(
                           onTap: () {
+                            _prefetchProductVideos(docs, index);
                             // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
-                            final List<String> allImages = (data['imageUrls'] as List?)
-                              ?.whereType<String>()
-                              .where((url) => url.trim().isNotEmpty)
-                              .toList() ?? const [];
+                            final List<String> allImages = _extractImages(data, preferThumbnails: false);
                             // กรอง videoUrl ออกจาก imageUrls
                             final videoUrl = data['videoUrl'] as String?;
                             final filteredImages = videoUrl != null
-                              ? allImages.where((url) => url != videoUrl).toList()
-                              : allImages;
+                                ? allImages.where((url) => url != videoUrl).toList()
+                                : allImages;
                             final selectedImageUrl = imageUrl;
                             final List<String> galleryImages = selectedImageUrl != null
                               ? [selectedImageUrl, ...filteredImages.where((url) => url != selectedImageUrl)]
@@ -700,6 +913,8 @@ class _HomeDashboard extends StatelessWidget {
                                                 child: CachedNetworkImage(
                                                   imageUrl: imageUrl,
                                                   fit: BoxFit.cover,
+                                                  memCacheWidth: 500, // Optimize memory usage
+                                                  maxWidthDiskCache: 800, // Optimize disk storage
                                                   placeholder: (context, url) => Container(
                                                     color: Colors.grey[100],
                                                     alignment: Alignment.center,
@@ -716,11 +931,6 @@ class _HomeDashboard extends StatelessWidget {
                                                   ),
                                                 ),
                                               ),
-                                              if (videoUrl != null && videoUrl.isNotEmpty)
-                                                Align(
-                                                  alignment: Alignment.center,
-                                                  child: Icon(Icons.play_circle_fill, size: 48, color: Colors.white70),
-                                                ),
                                             ],
                                           )
                                         : Container(
@@ -792,7 +1002,7 @@ class _HomeDashboard extends StatelessWidget {
                             ),
                           ),
                         );
-                      }).toList(),
+                      },
                     );
                   },
                 ),
@@ -808,11 +1018,13 @@ class _ProductGalleryContent extends StatefulWidget {
     required this.stock,
     required this.description,
     this.videoUrl,
+    this.videoThumbnailUrl,
     Key? key,
   }) : super(key: key);
 
   final List<String> images;
   final String? videoUrl;
+  final String? videoThumbnailUrl;
   final String name;
   final String price;
   final String stock;
@@ -826,26 +1038,19 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
 
   late final PageController _pageController;
   int _currentIndex = 0;
-  VideoPlayerController? _preloadedVideoController;
-  Future<void>? _preloadVideoFuture;
 
   @override
   void initState() {
     super.initState();
     _pageController = PageController();
-    // Preload video controller if videoUrl exists
     if (widget.videoUrl != null && widget.videoUrl!.isNotEmpty) {
-      _preloadedVideoController = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl!));
-      _preloadVideoFuture = _preloadedVideoController!.initialize();
+      VideoPrefetchService.instance.preloadVideo(widget.videoUrl!);
     }
   }
 
   @override
-  @override
-  @override
   void dispose() {
     _pageController.dispose();
-    _preloadedVideoController?.dispose();
     super.dispose();
   }
 
@@ -895,6 +1100,8 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                           child: CachedNetworkImage(
                             imageUrl: url,
                             fit: BoxFit.cover,
+                            memCacheWidth: 800, // Optimize memory usage
+                            maxWidthDiskCache: 1000, // Optimize disk storage
                             placeholder: (context, _) => const Center(child: CircularProgressIndicator()),
                             errorWidget: (context, _, __) => Container(
                               color: Colors.grey[200],
@@ -909,8 +1116,7 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                           borderRadius: BorderRadius.circular(12),
                           child: ProductVideoPlayer(
                             videoUrl: widget.videoUrl!,
-                            preloadedController: _preloadedVideoController,
-                            preloadFuture: _preloadVideoFuture,
+                            thumbnailUrl: widget.videoThumbnailUrl,
                           ),
                         );
                       } else {

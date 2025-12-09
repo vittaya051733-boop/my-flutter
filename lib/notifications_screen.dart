@@ -56,11 +56,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       body: _currentUser == null
           ? const Center(child: Text('กรุณาเข้าสู่ระบบเพื่อดูการแจ้งเตือน'))
           : StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
+                stream: FirebaseFirestore.instance
                   .collection('orders')
                   .where('shopOwnerId', isEqualTo: _currentUser!.uid)
                   .where('status', isEqualTo: 'pending')
-                  .orderBy('timestamp', descending: true)
                   .snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
@@ -82,7 +81,13 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   );
                 }
 
-                final orders = snapshot.data!.docs;
+                final orders = snapshot.data!.docs.toList();
+                // Sort newest first on the client to avoid an extra Firestore composite index.
+                orders.sort((a, b) {
+                  final aTime = (a['timestamp'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+                  final bTime = (b['timestamp'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+                  return bTime.compareTo(aTime);
+                });
 
                 return ListView.builder(
                   padding: const EdgeInsets.all(8.0),

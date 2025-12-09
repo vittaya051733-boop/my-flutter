@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'storage_helper.dart';
 
 class EditProfileScreen extends StatefulWidget {
   const EditProfileScreen({super.key});
@@ -14,7 +14,7 @@ class EditProfileScreen extends StatefulWidget {
 class _EditProfileScreenState extends State<EditProfileScreen> {
   final _displayNameController = TextEditingController();
   final _auth = FirebaseAuth.instance;
-  final _storage = FirebaseStorage.instance;
+  final _storage = StorageHelper.instance;
   final _picker = ImagePicker();
 
   User? _user;

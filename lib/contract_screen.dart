@@ -8,11 +8,14 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:signature/signature.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:path/path.dart' as p;
 import './shop_registration_screen.dart';
 import 'package:file_saver/file_saver.dart'; // เพิ่ม
 import 'package:image/image.dart' as img; // เพิ่มบรรทัดนี้
 import 'register_shop_next.dart'; // เพิ่ม import สำหรับ RegisterShopNextScreen ด้านบนไฟล์
 import 'utils/app_colors.dart';
+import 'storage_helper.dart';
 
 class ContractScreen extends StatefulWidget {
   final String? serviceType;
@@ -21,6 +24,18 @@ class ContractScreen extends StatefulWidget {
 
   @override
   State<ContractScreen> createState() => _ContractScreenState();
+}
+
+class _CompressedImageResult {
+  const _CompressedImageResult({
+    required this.bytes,
+    required this.extension,
+    required this.mimeType,
+  });
+
+  final Uint8List bytes;
+  final String extension;
+  final String mimeType;
 }
 
 class _ContractScreenState extends State<ContractScreen> {
@@ -259,7 +274,7 @@ class _ContractScreenState extends State<ContractScreen> {
       // อัปโหลดลายเซ็นเป็น WebP
       if (!mounted) return;
       if (mounted) {
-        _showSnackBar('กำลังอัปโหลดลายเซ็น (WebP)...', Colors.blue);
+        _showSnackBar('กำลังอัปโหลดลายเซ็น...', Colors.blue);
       }
       final signatureBytes = await _signatureController.toPngBytes();
       if (signatureBytes != null) {
@@ -276,9 +291,9 @@ class _ContractScreenState extends State<ContractScreen> {
       final contractText = '${_contractTextController.text}\n\nลายมือชื่อ (ฝั่งร้านค้า): [ลงลายมือชื่อในระบบ]\nวันที่ $_currentDay/$_currentMonthNumber/$_currentYear';
       final contractBytes = utf8.encode(contractText);
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final contractFileName =
-          'contracts/${freshUser.uid}_${_resolvedServiceType ?? 'unknown'}_$timestamp.txt';
-      final contractStorageRef = FirebaseStorage.instance.ref().child(contractFileName);
+        final contractFileName =
+          'contracts/${freshUser.uid}/agreements/${_resolvedServiceType ?? 'unknown'}_$timestamp.txt';
+      final contractStorageRef = StorageHelper.instance.ref().child(contractFileName);
       final contractUploadTask = contractStorageRef.putData(
         Uint8List.fromList(contractBytes),
         SettableMetadata(
@@ -334,20 +349,38 @@ class _ContractScreenState extends State<ContractScreen> {
         }
       }
 
-      // บันทึกรูปบัตรประชาชนลงเครื่องผู้ใช้ (PNG)
+      // บันทึกรูปบัตรประชาชนลงเครื่องผู้ใช้ (พยายาม WebP ถ้าไม่ได้ fallback เป็น JPG)
       if (_selectedIdCardFrontImage != null) {
         try {
+          final frontResult = await _compressWithWebpFallback(
+            await _selectedIdCardFrontImage!.readAsBytes(),
+            originalExtension: p.extension(_selectedIdCardFrontImage!.path),
+          );
           await FileSaver.instance.saveFile(
-              name: 'id_card_front_${freshUser.uid}_$timestamp',
-              bytes: await _selectedIdCardFrontImage!.readAsBytes(),
-              fileExtension: 'png',
-              mimeType: MimeType.png);
+            name: 'id_card_front_${freshUser.uid}_$timestamp',
+            bytes: frontResult.bytes,
+            fileExtension: frontResult.extension,
+            mimeType: _fileSaverMimeForExtension(frontResult.extension),
+          );
         } catch (e) {
           _showErrorDialog('ไม่สามารถบันทึกรูปบัตรประชาชน (หน้า) ลงเครื่องได้: $e');
         }
       }
       if (_selectedIdCardBackImage != null) {
-        // ... (โค้ดบันทึกบัตรด้านหลังจะถูกเพิ่มในขั้นตอนถัดไป)
+        try {
+          final backResult = await _compressWithWebpFallback(
+            await _selectedIdCardBackImage!.readAsBytes(),
+            originalExtension: p.extension(_selectedIdCardBackImage!.path),
+          );
+          await FileSaver.instance.saveFile(
+            name: 'id_card_back_${freshUser.uid}_$timestamp',
+            bytes: backResult.bytes,
+            fileExtension: backResult.extension,
+            mimeType: _fileSaverMimeForExtension(backResult.extension),
+          );
+        } catch (e) {
+          _showErrorDialog('ไม่สามารถบันทึกรูปบัตรประชาชน (หลัง) ลงเครื่องได้: $e');
+        }
       }
 
       // Navigate to the next step
@@ -384,7 +417,103 @@ class _ContractScreenState extends State<ContractScreen> {
     }
   }
 
-  // ฟังก์ชันอัปโหลดรูปภาพเป็น WebP
+  Future<_CompressedImageResult> _compressWithWebpFallback(
+    Uint8List originalBytes, {
+    String? originalExtension,
+  }) async {
+    Future<_CompressedImageResult?> tryFlutterCompress(
+      CompressFormat format,
+      String extension,
+      String mimeType,
+      int quality,
+    ) async {
+      try {
+        final result = await FlutterImageCompress.compressWithList(
+          originalBytes,
+          format: format,
+          quality: quality,
+        );
+        if (result.isNotEmpty) {
+          return _CompressedImageResult(
+            bytes: Uint8List.fromList(result),
+            extension: extension,
+            mimeType: mimeType,
+          );
+        }
+      } catch (e) {
+        debugPrint('⚠️ Compression to $extension failed: $e');
+      }
+      return null;
+    }
+
+    final webpResult = await tryFlutterCompress(CompressFormat.webp, 'webp', 'image/webp', 85);
+    if (webpResult != null) return webpResult;
+
+    final jpegResult = await tryFlutterCompress(CompressFormat.jpeg, 'jpg', 'image/jpeg', 90);
+    if (jpegResult != null) return jpegResult;
+
+    final decoded = img.decodeImage(originalBytes);
+    if (decoded != null) {
+      final jpegBytes = Uint8List.fromList(img.encodeJpg(decoded, quality: 90));
+      return _CompressedImageResult(
+        bytes: jpegBytes,
+        extension: 'jpg',
+        mimeType: 'image/jpeg',
+      );
+    }
+
+    final sanitizedExt = originalExtension?.replaceAll('.', '').toLowerCase();
+    return _CompressedImageResult(
+      bytes: originalBytes,
+      extension: sanitizedExt?.isNotEmpty == true ? sanitizedExt! : 'png',
+      mimeType: _guessMimeType(sanitizedExt),
+    );
+  }
+
+  String _guessMimeType(String? extension) {
+    switch (extension) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      case 'bmp':
+        return 'image/bmp';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'png':
+      default:
+        return 'image/png';
+    }
+  }
+
+  MimeType _fileSaverMimeForExtension(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'jpg':
+      case 'jpeg':
+        return MimeType.jpeg;
+      case 'webp':
+        return MimeType.webp;
+      case 'gif':
+        return MimeType.gif;
+      case 'bmp':
+        return MimeType.bmp;
+      case 'heic':
+        return MimeType.heic;
+      case 'heif':
+        return MimeType.heif;
+      case 'png':
+        return MimeType.png;
+      default:
+        return MimeType.other;
+    }
+  }
+
+  // ฟังก์ชันอัปโหลดรูปภาพ (พยายาม WebP ถ้าเป็นไปได้)
   /// อัปโหลดไฟล์แบบไม่ดึง URL กลับมา (สำหรับบัตรประชาชน)
   Future<void> _uploadImageOnly(File file, String path) async {
     try {
@@ -396,23 +525,21 @@ class _ContractScreenState extends State<ContractScreen> {
       }
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = '$path/${user.uid}_$timestamp.png';
-
-      final bytes = await file.readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
-      final pngBytes = img.encodePng(decoded);
-
-      final storage = FirebaseStorage.instanceFor(
-        bucket: 'vanmarket-50d9d.firebasestorage.app',
+      final originalBytes = await file.readAsBytes();
+      final compressed = await _compressWithWebpFallback(
+        originalBytes,
+        originalExtension: p.extension(file.path),
       );
+      final fileName = 'contracts/${user.uid}/$path/$timestamp.${compressed.extension}';
+
+      final storage = StorageHelper.instance;
       final storageRef = storage.ref().child(fileName);
       print('📤 กำลังอัปโหลดไฟล์: $fileName');
       print('📍 Bucket: ${storage.bucket}');
 
       await storageRef.putData(
-        Uint8List.fromList(pngBytes),
-        SettableMetadata(contentType: 'image/png'),
+        compressed.bytes,
+        SettableMetadata(contentType: compressed.mimeType),
       );
 
       print('✅ อัปโหลดสำเร็จ (ไม่ดึง URL)');
@@ -432,21 +559,19 @@ class _ContractScreenState extends State<ContractScreen> {
       }
 
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = '$path/${user.uid}_$timestamp.png';
-
-      final bytes = await file.readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
-      final pngBytes = img.encodePng(decoded);
-
-      final storage = FirebaseStorage.instanceFor(
-        bucket: 'vanmarket-50d9d.firebasestorage.app',
+      final originalBytes = await file.readAsBytes();
+      final compressed = await _compressWithWebpFallback(
+        originalBytes,
+        originalExtension: p.extension(file.path),
       );
+      final fileName = 'contracts/${user.uid}/$path/$timestamp.${compressed.extension}';
+
+      final storage = StorageHelper.instance;
       final storageRef = storage.ref().child(fileName);
       print('📤 กำลังอัปโหลดไฟล์: $fileName');
       final uploadTask = await storageRef.putData(
-        Uint8List.fromList(pngBytes),
-        SettableMetadata(contentType: 'image/png'),
+        compressed.bytes,
+        SettableMetadata(contentType: compressed.mimeType),
       );
       final downloadUrl = await uploadTask.ref.getDownloadURL();
       print('✅ อัปโหลดสำเร็จ: $downloadUrl');

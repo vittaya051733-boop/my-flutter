@@ -4,17 +4,21 @@ import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 
+/// Default [FirebaseOptions] for use with your Firebase apps.
+///
+/// Example:
+/// ```dart
+/// import 'firebase_options.dart';
+/// // ...
+/// await Firebase.initializeApp(
+///   options: DefaultFirebaseOptions.currentPlatform,
+/// );
+/// ```
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
-      // It's crucial to have valid web configurations if you plan to run on web.
-      // Since they are empty, we throw an error to avoid silent failures.
-      throw UnsupportedError(
-        'DefaultFirebaseOptions have not been configured for web - '
-        'run `flutterfire configure` to generate them.',
-      );
+      return web;
     }
-    // This switch statement is now robust for supported platforms.
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
         return android;
@@ -26,32 +30,40 @@ class DefaultFirebaseOptions {
           'run `flutterfire configure` to generate them.',
         );
       case TargetPlatform.windows:
-        // Fallback to Android options for Windows.
         return android;
       case TargetPlatform.linux:
-        // Fallback to Android options for Linux.
         return android;
-      case TargetPlatform.fuchsia:
-        throw UnsupportedError('DefaultFirebaseOptions are not supported for Fuchsia.');
+      default:
+        throw UnsupportedError(
+          'DefaultFirebaseOptions are not supported for this platform.',
+        );
     }
   }
 
-  static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyAIKueErj1mUOBDCjPZD9tEyM7Kf7iNfwI',
-    appId: '1:331553349621:android:c3e96655b1063283430abc',
-    messagingSenderId: '331553349621',
-    projectId: 'vanmarket-50d9d',
-    storageBucket: 'vanmarket-50d9d.firebasestorage.app',
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyB6Q5DE_VkpqO3qTn3bqPBawQjxzGEngxY',
+    appId: '1:802503541368:web:652e4356653d7cbcf6a38d',
+    messagingSenderId: '802503541368',
+    projectId: 'van-merchant',
+    authDomain: 'van-merchant.firebaseapp.com',
+    storageBucket: 'van-merchant.firebasestorage.app',
+    measurementId: 'G-WNMT2HGLVF',
   );
 
-  // WARNING: These are copied from Android for build purposes.
-  // You should re-run `flutterfire configure` to get correct iOS values.
+  static const FirebaseOptions android = FirebaseOptions(
+    apiKey: 'AIzaSyCuGZF0-EUBTuARrToDWQM5pNBMNDg2yYU',
+    appId: '1:802503541368:android:c8333c4310663e19f6a38d',
+    messagingSenderId: '802503541368',
+    projectId: 'van-merchant',
+    storageBucket: 'van-merchant.firebasestorage.app',
+  );
+
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyAIKueErj1mUOBDCjPZD9tEyM7Kf7iNfwI', // Using Android API Key as a fallback
-    appId: '1:331553349621:ios:YOUR_IOS_APP_ID_SUFFIX', // Placeholder - MUST be replaced
-    messagingSenderId: '331553349621',
-    projectId: 'vanmarket-50d9d',
-    storageBucket: 'vanmarket-50d9d.firebasestorage.app', // Corrected bucket name
-    iosBundleId: 'com.example.myapp', // Placeholder - MUST match your Xcode bundle ID
+    apiKey: 'AIzaSyCuGZF0-EUBTuARrToDWQM5pNBMNDg2yYU',
+    appId: '1:802503541368:ios:ea92f5b881a6c472f6a38d',
+    messagingSenderId: '802503541368',
+    projectId: 'van-merchant',
+    storageBucket: 'van-merchant.firebasestorage.app',
+    iosBundleId: 'van-merchan',
   );
 }

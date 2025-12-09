@@ -280,6 +280,11 @@ class _Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final String name = profile.displayName.trim();
+    final String initial = name.isNotEmpty
+        ? name.characters.first.toUpperCase()
+        : '?';
+
     return CircleAvatar(
       radius: 30,
       backgroundImage:
@@ -287,7 +292,7 @@ class _Avatar extends StatelessWidget {
       backgroundColor: const Color(0xFFE0E0E0),
       child: profile.photoUrl == null
           ? Text(
-              profile.displayName.characters.first.toUpperCase(),
+              initial,
               style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 24),
             )
           : null,
