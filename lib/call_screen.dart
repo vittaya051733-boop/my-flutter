@@ -1,7 +1,13 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'models/user_profile.dart';
+import 'widgets/cached_app_image.dart';
 
 class CallScreen extends StatefulWidget {
   final String channelName;
@@ -25,41 +31,93 @@ class CallScreen extends StatefulWidget {
 }
 
 class _CallScreenState extends State<CallScreen> {
-  late RtcEngine _engine;
+  RtcEngine? _engine;
   bool _joined = false;
   int? _remoteUid;
   bool _speakerOn = false;
   bool _micMuted = false;
-  bool _videoMuted = false;
+  bool _videoMuted = true;
   late final String _activeToken;
   late final String _activeChannelId;
   bool _incomingAccepted = false;
+  bool _remoteConnected = false;
+  DateTime? _callStart;
+  bool _resultSent = false;
+  Timer? _durationTimer;
+
+  AudioPlayer? _ringbackPlayer;
+  String? _fatalError;
 
   // Agora App ID
   static const String appId = '37050f5308fd450ba070b53c01596c06';
-  // ตัวอย่าง token/channel (ใช้เฉพาะกรณีไม่มีข้อมูลจริง)
-  static const String _sampleToken = '007eJxTYLBpXsPNP2n6WtbV7V/u3zl9zpC1hWGv6Zv4nZsNV5mK9qUqMBibG5gapJkaG1ikpZiYGiQlGpgbJJkaJxsYmlqaJRuYsXopZDYEMjKwn+tmZGRgZWBkYGIA8RkYADzNG2k=';
-  static const String _sampleChannel = 'tam';
 
   @override
   void initState() {
     super.initState();
-    // ใช้ token และ channel จริงจาก backend/FCM ถ้ามี
-    _activeToken = (widget.tokenOverride != null && widget.tokenOverride!.trim().isNotEmpty)
-        ? widget.tokenOverride!.trim()
-        : _sampleToken;
-    _activeChannelId = (widget.channelOverride != null && widget.channelOverride!.trim().isNotEmpty)
-        ? widget.channelOverride!.trim()
-        : (widget.channelName.isNotEmpty ? widget.channelName : _sampleChannel);
+    // เปิดกล้องเฉพาะเมื่อผู้ใช้กดอนุญาตเอง
+    _videoMuted = widget.isVideo;
+    _activeToken = widget.tokenOverride?.trim() ?? '';
+    final overrideChannel = widget.channelOverride?.trim();
+    _activeChannelId = (overrideChannel != null && overrideChannel.isNotEmpty)
+        ? overrideChannel
+        : widget.channelName.trim();
+
+    if (_activeToken.isEmpty || _activeChannelId.isEmpty) {
+      _fatalError = 'ไม่พบข้อมูลการโทรจากเซิร์ฟเวอร์ กรุณาลองใหม่อีกครั้ง';
+      return;
+    }
+
     if (!widget.isIncoming) {
-      _initAgora();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startOutgoingCall();
+      });
+    } else {
+      // ฝั่งผู้รับเล่นเสียงเรียกเข้าจากไฟล์ K-pop
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _startRingtone('k-pop-ringtone-no-copyright-357142.mp3');
+      });
     }
   }
 
+  Future<void> _startOutgoingCall() async {
+    if (!await _ensurePermissions()) return;
+    await _initAgora();
+    if (!mounted || _fatalError != null) return;
+    _startRingtone('topping-pop-sound-245150.mp3');
+  }
+
+  Future<bool> _ensurePermissions() async {
+    final micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      _showPermissionError('ไมโครโฟน');
+      return false;
+    }
+    if (widget.isVideo) {
+      final cameraStatus = await Permission.camera.request();
+      if (!cameraStatus.isGranted) {
+        _showPermissionError('กล้อง');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _showPermissionError(String permissionName) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('ต้องอนุญาต$permissionNameก่อนจึงจะใช้การโทรได้')),
+    );
+  }
+
   Future<void> _initAgora() async {
-    _engine = createAgoraRtcEngine();
-    await _engine.initialize(RtcEngineContext(appId: appId));
-    _engine.registerEventHandler(
+    if (_engine != null) return;
+    try {
+      final engine = createAgoraRtcEngine();
+      await engine.initialize(RtcEngineContext(
+        appId: appId,
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+      ));
+      engine.registerEventHandler(
       RtcEngineEventHandler(
         onJoinChannelSuccess: (connection, elapsed) {
           print('Agora: onJoinChannelSuccess channel=${connection.channelId} uid=${connection.localUid}');
@@ -68,64 +126,155 @@ class _CallScreenState extends State<CallScreen> {
           });
         },
         onUserJoined: (connection, remoteUid, elapsed) {
-          print('Agora: onUserJoined remoteUid=$remoteUid');
+          if (connection.channelId != _activeChannelId) return;
+          print('Agora: onUserJoined remoteUid=$remoteUid in channel ${connection.channelId}');
           setState(() {
             _remoteUid = remoteUid;
+            _remoteConnected = true;
+            _callStart = DateTime.now();
           });
+          _startDurationTicker();
+          _stopRingback(); // หยุดเสียงรอสายเมื่ออีกฝ่ายรับสาย
         },
         onUserOffline: (connection, remoteUid, reason) {
           print('Agora: onUserOffline remoteUid=$remoteUid reason=$reason');
+          if (!mounted) return;
           setState(() {
             _remoteUid = null;
+            _remoteConnected = false;
           });
+          _stopDurationTicker();
+          _endCall();
         },
         onError: (err, msg) {
           print('Agora: onError code=$err msg=$msg');
         },
       ),
     );
-    if (widget.isVideo) {
-      await _engine.enableVideo();
-    } else {
-      await _engine.enableAudio();
+      if (widget.isVideo) {
+        await engine.enableVideo();
+        if (_videoMuted) {
+          await engine.enableLocalVideo(false);
+          await engine.muteLocalVideoStream(true);
+        }
+      } else {
+        await engine.enableAudio();
+      }
+      await engine.joinChannel(
+        token: _activeToken,
+        channelId: _activeChannelId,
+        uid: 0,
+        options: ChannelMediaOptions(
+          publishCameraTrack: widget.isVideo && !_videoMuted,
+          publishMicrophoneTrack: true,
+        ),
+      );
+      setState(() {
+        _engine = engine;
+      });
+    } catch (error) {
+      print('Agora init error: $error');
+      if (!mounted) return;
+      setState(() {
+        _fatalError = 'ไม่สามารถเชื่อมต่อบริการโทรได้ ($error)';
+      });
     }
-    await _engine.joinChannel(
-      token: _activeToken,
-      channelId: _activeChannelId,
-      uid: 0,
-      options: const ChannelMediaOptions(),
-    );
+  }
+
+  void _startRingtone(String assetName) {
+    _ringbackPlayer?.stop();
+    _ringbackPlayer?.dispose();
+    _ringbackPlayer = AudioPlayer();
+    _ringbackPlayer!.setReleaseMode(ReleaseMode.loop);
+    _ringbackPlayer!.play(AssetSource(assetName));
+  }
+
+  void _stopRingback() {
+    _ringbackPlayer?.stop();
+    _ringbackPlayer?.dispose();
+    _ringbackPlayer = null;
   }
 
   void _toggleSpeaker() {
-    _engine.setEnableSpeakerphone(!_speakerOn);
+    final engine = _engine;
+    if (engine == null) return;
+    engine.setEnableSpeakerphone(!_speakerOn);
     setState(() => _speakerOn = !_speakerOn);
   }
 
   void _toggleMute() {
-    _engine.muteLocalAudioStream(!_micMuted);
+    final engine = _engine;
+    if (engine == null) return;
+    engine.muteLocalAudioStream(!_micMuted);
     setState(() => _micMuted = !_micMuted);
   }
 
   @override
   void dispose() {
-    _engine.leaveChannel();
-    _engine.release();
+    _stopRingback();
+    _stopDurationTicker();
+    _engine?.leaveChannel();
+    _engine?.release();
+    _endCall();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_fatalError != null) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF1F252B),
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.white, size: 72),
+                  const SizedBox(height: 16),
+                  Text(
+                    _fatalError!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white, fontSize: 18),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: () => _endCall(declined: true),
+                    child: const Text('ปิด'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     if (widget.isIncoming && !_incomingAccepted) {
       return Scaffold(
         backgroundColor: widget.isVideo ? Colors.black : const Color(0xFFF5F5F7),
         body: _buildIncomingContent(),
       );
     }
-    return Scaffold(
-      backgroundColor: widget.isVideo ? Colors.black : const Color(0xFFF5F5F7),
-      body: widget.isVideo ? _buildVideoContent() : _buildVoiceContent(),
+    return WillPopScope(
+      onWillPop: () async {
+        _endCall();
+        return false;
+      },
+      child: Scaffold(
+        backgroundColor: widget.isVideo ? Colors.black : const Color(0xFFF5F5F7),
+        body: widget.isVideo ? _buildVideoContent() : _buildVoiceContent(),
+      ),
     );
+  }
+
+  Future<void> _acceptIncomingCall() async {
+    if (!await _ensurePermissions()) return;
+    setState(() {
+      _incomingAccepted = true;
+    });
+    _stopRingback();
+    await _initAgora();
   }
 
   Widget _buildIncomingContent() {
@@ -161,7 +310,7 @@ class _CallScreenState extends State<CallScreen> {
               decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white10),
               child: ClipOval(
                 child: widget.targetProfile.photoUrl != null
-                    ? Image.network(widget.targetProfile.photoUrl!, fit: BoxFit.cover)
+                  ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
                     : Center(
                         child: Text(
                           widget.targetProfile.displayName.characters.first.toUpperCase(),
@@ -179,21 +328,14 @@ class _CallScreenState extends State<CallScreen> {
                     icon: Icons.call,
                     label: 'รับสาย',
                     color: const Color(0xFF00B900),
-                    onTap: () {
-                      setState(() {
-                        _incomingAccepted = true;
-                      });
-                      _initAgora();
-                    },
+                    onTap: _acceptIncomingCall,
                   ),
                   const SizedBox(width: 32),
                   _CallActionButton(
                     icon: Icons.call_end,
                     label: 'ไม่รับ',
                     color: Colors.redAccent,
-                    onTap: () {
-                      Navigator.of(context).pop();
-                    },
+                    onTap: () => _endCall(declined: true),
                   ),
                 ],
               ),
@@ -205,11 +347,8 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget _buildVideoContent() {
-    final statusText = !_joined
-        ? 'กำลังเชื่อมต่อ...'
-        : _remoteUid == null
-            ? 'กำลังโทรหา (วิดีโอ)'
-            : 'กำลังสนทนากับ';
+    final durationText = _activeDurationText;
+    final statusText = _statusText(isVideo: true);
 
     return Container(
       width: double.infinity,
@@ -240,21 +379,19 @@ class _CallScreenState extends State<CallScreen> {
             ),
           ),
           // Controls
-          _buildCallControls(statusText),
+          _buildCallControls(statusText, durationText),
         ],
       ),
     );
   }
 
   Widget _buildVoiceContent() {
-    final statusText = !_joined
-        ? 'กำลังเชื่อมต่อ...'
-        : _remoteUid == null
-            ? 'กำลังโทรหา'
-            : 'กำลังสนทนากับ';
+    final statusText = _statusText(isVideo: false);
+    final durationText = _activeDurationText;
 
     return _buildCallUI(
       statusText: statusText,
+      durationText: durationText,
       centerContent: _buildCallingStatus(),
       bottomControls: _buildVoiceCallButtons(),
     );
@@ -262,6 +399,7 @@ class _CallScreenState extends State<CallScreen> {
 
   Widget _buildCallUI({
     required String statusText,
+    String? durationText,
     required Widget centerContent,
     required Widget bottomControls,
   }) {
@@ -283,6 +421,20 @@ class _CallScreenState extends State<CallScreen> {
               child: Column(
                 children: [
                   Text(statusText, style: const TextStyle(color: Colors.white70, fontSize: 16)),
+                  if (durationText != null) ...[
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(48),
+                      ),
+                      child: Text(
+                        durationText,
+                        style: const TextStyle(color: Colors.white, fontSize: 16, fontFeatures: [FontFeature.tabularFigures()]),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Text(
                     widget.targetProfile.displayName,
@@ -312,7 +464,7 @@ class _CallScreenState extends State<CallScreen> {
           decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white10),
           child: ClipOval(
             child: widget.targetProfile.photoUrl != null
-                ? Image.network(widget.targetProfile.photoUrl!, fit: BoxFit.cover)
+              ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
                 : Center(
                     child: Text(
                       widget.targetProfile.displayName.characters.first.toUpperCase(),
@@ -327,19 +479,21 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  Widget _buildCallControls(String statusText) {
+  Widget _buildCallControls(String statusText, String? durationText) {
     return _buildCallUI(
       statusText: statusText,
+      durationText: durationText,
       centerContent: const SizedBox.shrink(), // Center is covered by video
       bottomControls: _buildVideoCallButtons(),
     );
   }
   
   Widget get localVideoView {
-    if (_joined && !_videoMuted) {
+    final engine = _engine;
+    if (_joined && !_videoMuted && engine != null) {
       return AgoraVideoView(
         controller: VideoViewController(
-          rtcEngine: _engine,
+          rtcEngine: engine,
           canvas: const VideoCanvas(uid: 0),
         ),
       );
@@ -348,17 +502,29 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget get remoteVideoView {
-    if (_remoteUid != null) {
+    final engine = _engine;
+    if (_remoteUid != null && engine != null) {
       return AgoraVideoView(
-        controller: VideoViewController.remote(rtcEngine: _engine, canvas: VideoCanvas(uid: _remoteUid), connection: RtcConnection(channelId: _activeChannelId)),
+        controller: VideoViewController.remote(
+          rtcEngine: engine,
+          canvas: VideoCanvas(uid: _remoteUid!),
+          connection: RtcConnection(channelId: _activeChannelId),
+        ),
       );
     }
     return Container(color: Colors.grey[900], child: Center(child: Text('กำลังรอคู่สนทนา...', style: TextStyle(color: Colors.white))));
   }
 
   void _toggleVideo() {
-    _engine.muteLocalVideoStream(!_videoMuted);
-    setState(() => _videoMuted = !_videoMuted);
+    final engine = _engine;
+    if (engine == null) return;
+    final nextMuted = !_videoMuted;
+    engine.enableLocalVideo(!nextMuted);
+    engine.muteLocalVideoStream(nextMuted);
+    engine.updateChannelMediaOptions(
+      ChannelMediaOptions(publishCameraTrack: !nextMuted),
+    );
+    setState(() => _videoMuted = nextMuted);
   }
 
   Widget _buildVideoCallButtons() {
@@ -376,7 +542,7 @@ class _CallScreenState extends State<CallScreen> {
           icon: Icons.call_end,
           label: 'วางสาย',
           color: Colors.redAccent,
-          onTap: () => Navigator.of(context).pop(),
+          onTap: _endCall,
         ),
         const SizedBox(width: 24),
         _CallActionButton(
@@ -404,7 +570,7 @@ class _CallScreenState extends State<CallScreen> {
           icon: Icons.call_end,
           label: 'วางสาย',
           color: Colors.redAccent,
-          onTap: () => Navigator.of(context).pop(),
+          onTap: _endCall,
         ),
         const SizedBox(width: 24),
         _CallActionButton(
@@ -416,6 +582,68 @@ class _CallScreenState extends State<CallScreen> {
       ],
     );
   }
+
+  Duration? get _callDuration {
+    final start = _callStart;
+    if (start == null) return null;
+    return DateTime.now().difference(start);
+  }
+
+  String? get _activeDurationText {
+    if (!_remoteConnected) return null;
+    final duration = _callDuration;
+    if (duration == null) return null;
+    return _formatDuration(duration);
+  }
+
+  String _statusText({required bool isVideo}) {
+    if (!_joined) return 'กำลังเชื่อมต่อ...';
+    if (!_remoteConnected) {
+      return isVideo ? 'กำลังโทรหา (วิดีโอ)' : 'กำลังโทรหา';
+    }
+    return 'กำลังสนทนากับ';
+  }
+
+  String _formatDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (hours > 0) {
+      final hoursStr = hours.toString().padLeft(2, '0');
+      return '$hoursStr:$minutes:$seconds';
+    }
+    return '$minutes:$seconds';
+  }
+
+  void _startDurationTicker() {
+    if (_durationTimer != null || _callStart == null) return;
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  void _stopDurationTicker() {
+    _durationTimer?.cancel();
+    _durationTimer = null;
+  }
+
+  Future<void> _endCall({bool declined = false}) async {
+    if (_resultSent) return;
+    final duration = _callDuration;
+    final answered = _remoteConnected && _remoteUid != null;
+    final result = {
+      'answered': answered,
+      if (duration != null && answered) 'durationMillis': duration.inMilliseconds,
+      'isVideo': widget.isVideo,
+      if (declined) 'declined': true,
+    };
+    _resultSent = true;
+    _stopDurationTicker();
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop(result);
+    }
+  }
 }
 
 class _CallActionButton extends StatelessWidget {
@@ -424,13 +652,11 @@ class _CallActionButton extends StatelessWidget {
     required this.label,
     required this.color,
     required this.onTap,
-    this.iconColor = Colors.white,
   });
 
   final IconData icon;
   final String label;
   final Color color;
-  final Color iconColor;
   final VoidCallback onTap;
 
   @override
@@ -448,7 +674,7 @@ class _CallActionButton extends StatelessWidget {
               shape: BoxShape.circle,
               boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4))],
             ),
-            child: Icon(icon, color: iconColor, size: 30),
+            child: Icon(icon, color: Colors.white, size: 30),
           ),
         ),
         const SizedBox(height: 12),

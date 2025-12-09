@@ -1,13 +1,48 @@
 ﻿import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'widgets/cached_app_image.dart';
 import 'widgets/product_video_player.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:video_compress/video_compress.dart';
 
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import '../models/product_model.dart'; // Import the model
 import 'utils/app_colors.dart';
+import 'storage_helper.dart';
+import 'services/product_cache_service.dart';
+import 'services/media_cache_service.dart';
+
+class _ProductImageUploadResult {
+  final String originalUrl;
+  final String thumbnailUrl;
+  final String? originalLocalPath;
+  final String? thumbnailLocalPath;
+
+  const _ProductImageUploadResult({
+    required this.originalUrl,
+    required this.thumbnailUrl,
+    this.originalLocalPath,
+    this.thumbnailLocalPath,
+  });
+}
+
+class _ProductVideoUploadResult {
+  final String videoUrl;
+  final String? thumbnailUrl;
+  final String? localVideoPath;
+  final String? localThumbnailPath;
+
+  const _ProductVideoUploadResult({
+    required this.videoUrl,
+    this.thumbnailUrl,
+    this.localVideoPath,
+    this.localThumbnailPath,
+  });
+}
 
 class AddProductScreen extends StatefulWidget {
   final Product? productToEdit;
@@ -32,15 +67,22 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   final ImagePicker _picker = ImagePicker();
   List<String> _existingImageUrls = [];
+  List<String> _existingThumbnailUrls = [];
   final List<XFile> _newImageFiles = [];
   XFile? _videoFile;
   String? _existingVideoUrl;
+  String? _existingVideoThumbnailUrl;
+  final Map<String, String> _localMediaPaths = {};
+  final Set<String> _cacheLookupInProgress = {};
 
   bool _isSaving = false;
   double? _uploadProgress;
+  String? _uploadStatusText;
 
   static const int _maxImageCount = 10;
   static const Duration _maxVideoDuration = Duration(minutes: 5);
+  static const int _imageCompressionSkipThresholdBytes = 600 * 1024; // 600 KB
+  static const int _videoCompressionSkipThresholdBytes = 15 * 1024 * 1024; // 15 MB
 
   int get _currentImageCount => _existingImageUrls.length + _newImageFiles.length;
 
@@ -53,7 +95,12 @@ class AddProductScreenState extends State<AddProductScreen> {
     if (widget.productToEdit != null) {
       final p = widget.productToEdit!;
       _nameController.text = p.name;
-      _descriptionController.text = p.description;
+          _productDescriptionController.text = p.description;
+          final existingToppings = p.toppings?.trim();
+          // Fall back to the old description value if this product was created before toppings existed.
+        _descriptionController.text = (existingToppings != null && existingToppings.isNotEmpty)
+          ? existingToppings
+          : p.description;
       _priceController.text = p.price.toString();
       _stockController.text = p.stock.toString();
       _colorsController.text = p.colors.join(', ');
@@ -65,8 +112,13 @@ class AddProductScreenState extends State<AddProductScreen> {
       }
       _selectedUnit = _units.contains(p.unit) ? p.unit : 'อื่นๆ';
       if (_selectedUnit == 'อื่นๆ') _otherUnitController.text = p.unit;
-      _existingImageUrls = p.imageUrls;
+        _existingImageUrls = List<String>.from(p.imageUrls);
+        _existingThumbnailUrls = p.thumbnailUrls.isNotEmpty
+          ? List<String>.from(p.thumbnailUrls)
+          : List<String>.from(p.imageUrls);
       _existingVideoUrl = p.videoUrl;
+      _existingVideoThumbnailUrl = p.videoThumbnailUrl;
+      _prefetchExistingMedia();
     }
   }
 
@@ -154,7 +206,16 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   void _removeExistingImageAt(int index) {
-    setState(() => _existingImageUrls.removeAt(index));
+    setState(() {
+      if (index >= 0 && index < _existingImageUrls.length) {
+        _localMediaPaths.remove(_existingImageUrls[index]);
+        _existingImageUrls.removeAt(index);
+      }
+      if (index >= 0 && index < _existingThumbnailUrls.length) {
+        _localMediaPaths.remove(_existingThumbnailUrls[index]);
+        _existingThumbnailUrls.removeAt(index);
+      }
+    });
   }
 
   void _removeNewImageAt(int index) {
@@ -163,73 +224,271 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   void _removeVideo() {
     setState(() {
+      if (_existingVideoUrl != null) {
+        _localMediaPaths.remove(_existingVideoUrl);
+      }
+      if (_existingVideoThumbnailUrl != null) {
+        _localMediaPaths.remove(_existingVideoThumbnailUrl);
+      }
       _videoFile = null;
       _existingVideoUrl = null;
+      _existingVideoThumbnailUrl = null;
     });
   }
 
-  Future<String?> _uploadImageToFirebase(XFile image) async {
+  void _prefetchExistingMedia() {
+    for (final url in _existingImageUrls) {
+      _tryWarmLocalCache(url);
+    }
+    for (final thumb in _existingThumbnailUrls) {
+      _tryWarmLocalCache(thumb);
+    }
+    if (_existingVideoUrl != null) {
+      _tryWarmLocalCache(_existingVideoUrl!);
+    }
+    if (_existingVideoThumbnailUrl != null) {
+      _tryWarmLocalCache(_existingVideoThumbnailUrl!);
+    }
+  }
+
+  Future<File> _compressImageFile(File sourceFile, {required bool forThumbnail}) async {
+    final suffix = forThumbnail ? 'thumb' : 'full';
+    final targetPath = '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix.webp';
+
+    try {
+      final compressed = await FlutterImageCompress.compressAndGetFile(
+        sourceFile.path,
+        targetPath,
+        format: CompressFormat.webp,
+        minWidth: forThumbnail ? 600 : 1600,
+        minHeight: forThumbnail ? 600 : 1600,
+        quality: forThumbnail ? 60 : 82,
+      );
+      if (compressed != null) {
+        final compressedFile = File(compressed.path);
+        final originalLength = await sourceFile.length();
+        final compressedLength = await compressedFile.length();
+        if (compressedLength < originalLength || forThumbnail) {
+          return compressedFile;
+        }
+      }
+    } catch (e, stack) {
+      debugPrint('Image compression failed ($suffix): $e');
+      debugPrint('$stack');
+    }
+
+    return sourceFile;
+  }
+
+  Future<File> _writeBytesToTempFile(Uint8List data, {required String suffix}) async {
+    final tempPath = '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix';
+    final file = File(tempPath);
+    await file.writeAsBytes(data, flush: true);
+    return file;
+  }
+
+  Future<String> _uploadFileWithOptionalProgress(
+    Reference ref,
+    File file, {
+    bool trackProgress = false,
+  }) async {
+    final uploadTask = ref.putFile(file);
+    if (trackProgress) {
+      uploadTask.snapshotEvents.listen((event) {
+        if (event.totalBytes > 0) {
+          setState(() {
+            _uploadProgress = event.bytesTransferred / event.totalBytes;
+          });
+        }
+      });
+    }
+
+    final snapshot = await uploadTask.whenComplete(() => {});
+
+    if (trackProgress) {
+      setState(() {
+        _uploadProgress = null;
+      });
+    }
+
+    return snapshot.ref.getDownloadURL();
+  }
+
+  Future<_ProductImageUploadResult?> _uploadImageToFirebase(XFile image) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception("User not logged in");
 
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${image.name}';
-      final ref = FirebaseStorage.instance
+      final sanitizedBase = image.name.split('.').first.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}_$sanitizedBase.webp';
+
+      final sourceFile = File(image.path);
+      final sourceSize = await sourceFile.length();
+      final shouldCompressOriginal = sourceSize > _imageCompressionSkipThresholdBytes;
+
+      File originalUploadFile = sourceFile;
+      if (shouldCompressOriginal) {
+        originalUploadFile = await _compressImageFile(sourceFile, forThumbnail: false);
+      }
+
+      final thumbnailBase = shouldCompressOriginal ? originalUploadFile : sourceFile;
+      final compressedThumbnail = await _compressImageFile(thumbnailBase, forThumbnail: true);
+
+      final baseRef = StorageHelper.instance
           .ref()
           .child('product_images')
-          .child(user.uid)
-          .child(fileName);
+          .child(user.uid);
 
-      final uploadTask = ref.putFile(File(image.path));
-      uploadTask.snapshotEvents.listen((event) {
-        if (event.totalBytes > 0) {
-          setState(() {
-            _uploadProgress = event.bytesTransferred / event.totalBytes;
-          });
+      final originalUrl = await _uploadFileWithOptionalProgress(
+        baseRef.child(fileName),
+        originalUploadFile,
+        trackProgress: true,
+      );
+      final thumbnailUrl = await _uploadFileWithOptionalProgress(
+        baseRef.child('thumbnails').child(fileName),
+        compressedThumbnail,
+      );
+
+      final cachedOriginal = await MediaCacheService.instance.cacheUploadedFile(
+        source: originalUploadFile,
+        url: originalUrl,
+        bucket: MediaCacheBucket.image,
+      );
+      final cachedThumbnail = await MediaCacheService.instance.cacheUploadedFile(
+        source: compressedThumbnail,
+        url: thumbnailUrl,
+        bucket: MediaCacheBucket.thumbnail,
+      );
+
+      try {
+        if (originalUploadFile.path != sourceFile.path && await originalUploadFile.exists()) {
+          await originalUploadFile.delete();
         }
-      });
-      final snapshot = await uploadTask.whenComplete(() => {});
-      setState(() { _uploadProgress = null; });
-      final downloadUrl = await snapshot.ref.getDownloadURL();
-      return downloadUrl;
+        if (compressedThumbnail.path != sourceFile.path && await compressedThumbnail.exists()) {
+          await compressedThumbnail.delete();
+        }
+      } catch (cleanupError) {
+        debugPrint('Failed to delete temp files: $cleanupError');
+      }
+
+      return _ProductImageUploadResult(
+        originalUrl: originalUrl,
+        thumbnailUrl: thumbnailUrl,
+        originalLocalPath: cachedOriginal?.path,
+        thumbnailLocalPath: cachedThumbnail?.path,
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดรูป: $e')));
       }
-      setState(() { _uploadProgress = null; });
+      setState(() {
+        _uploadProgress = null;
+      });
       return null;
     }
   }
 
-  Future<String?> _uploadVideoToFirebase(XFile video) async {
+  Future<_ProductVideoUploadResult?> _uploadVideoToFirebase(XFile video) async {
+    File? compressedFile;
+    File? rawThumbFile;
+    File? compressedThumbFile;
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception('User not logged in');
 
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${video.name}';
-      final ref = FirebaseStorage.instance
-          .ref()
-          .child('product_videos')
-          .child(user.uid)
-          .child(fileName);
+      final sanitizedBase = video.name.split('.').first.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final videoFileName = '${timestamp}_$sanitizedBase.mp4';
+      final refBase = StorageHelper.instance.ref().child('product_videos').child(user.uid);
 
-      final uploadTask = ref.putFile(File(video.path));
-      uploadTask.snapshotEvents.listen((event) {
-        if (event.totalBytes > 0) {
-          setState(() {
-            _uploadProgress = event.bytesTransferred / event.totalBytes;
-          });
+      final originalFile = File(video.path);
+      final originalSize = await originalFile.length();
+      File fileToUpload = originalFile;
+
+      if (originalSize > _videoCompressionSkipThresholdBytes) {
+        await VideoCompress.setLogLevel(0);
+        final mediaInfo = await VideoCompress.compressVideo(
+          video.path,
+          quality: VideoQuality.LowQuality,
+          includeAudio: true,
+          deleteOrigin: false,
+        );
+
+        if (mediaInfo?.path != null) {
+          compressedFile = File(mediaInfo!.path!);
+          fileToUpload = compressedFile;
         }
-      });
-      final snapshot = await uploadTask.whenComplete(() => {});
-      setState(() { _uploadProgress = null; });
-      return await snapshot.ref.getDownloadURL();
+      }
+
+      final videoUrl = await _uploadFileWithOptionalProgress(
+        refBase.child(videoFileName),
+        fileToUpload,
+        trackProgress: true,
+      );
+
+      String? thumbnailUrl;
+      File? cachedVideoFile;
+      File? cachedVideoThumb;
+      try {
+        final thumbBytes = await VideoCompress.getByteThumbnail(
+          fileToUpload.path,
+          quality: 70,
+          position: -1,
+        );
+        if (thumbBytes != null) {
+          rawThumbFile = await _writeBytesToTempFile(thumbBytes, suffix: 'video_thumb.jpg');
+          compressedThumbFile = await _compressImageFile(rawThumbFile, forThumbnail: true);
+          final thumbName = '${timestamp}_${sanitizedBase}_thumb.webp';
+          thumbnailUrl = await _uploadFileWithOptionalProgress(
+            refBase.child('thumbnails').child(thumbName),
+            compressedThumbFile,
+          );
+        }
+      } catch (thumbError, stack) {
+        debugPrint('Video thumbnail generation failed: $thumbError');
+        debugPrint('$stack');
+      }
+
+      cachedVideoFile = await MediaCacheService.instance.cacheUploadedFile(
+        source: fileToUpload,
+        url: videoUrl,
+        bucket: MediaCacheBucket.video,
+      );
+      if (thumbnailUrl != null && compressedThumbFile != null) {
+        cachedVideoThumb = await MediaCacheService.instance.cacheUploadedFile(
+          source: compressedThumbFile,
+          url: thumbnailUrl,
+          bucket: MediaCacheBucket.videoThumbnail,
+        );
+      }
+
+      return _ProductVideoUploadResult(
+        videoUrl: videoUrl,
+        thumbnailUrl: thumbnailUrl,
+        localVideoPath: cachedVideoFile?.path,
+        localThumbnailPath: cachedVideoThumb?.path,
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดวิดีโอ: $e')));
       }
       setState(() { _uploadProgress = null; });
       return null;
+    } finally {
+      try {
+        if (compressedFile != null && await compressedFile.exists()) {
+          await compressedFile.delete();
+        }
+        if (rawThumbFile != null && await rawThumbFile.exists()) {
+          await rawThumbFile.delete();
+        }
+        if (compressedThumbFile != null && await compressedThumbFile.exists()) {
+          await compressedThumbFile.delete();
+        }
+        await VideoCompress.deleteAllCache();
+      } catch (cleanupError) {
+        debugPrint('Video temp cleanup failed: $cleanupError');
+      }
     }
   }
 
@@ -271,41 +530,96 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     try {
       final List<String> imageUrls = List<String>.from(_existingImageUrls);
+      final List<String> thumbnailUrls = List<String>.from(_existingThumbnailUrls);
       if (_newImageFiles.isNotEmpty) {
-        final uploads = await Future.wait(_newImageFiles.map(_uploadImageToFirebase));
-        if (uploads.any((url) => url == null)) {
-          throw Exception('การอัปโหลดรูปภาพบางรายการล้มเหลว');
+        for (var index = 0; index < _newImageFiles.length; index++) {
+          if (mounted) {
+            setState(() {
+              _uploadStatusText = 'รูป ${index + 1}/${_newImageFiles.length}';
+            });
+          }
+          final result = await _uploadImageToFirebase(_newImageFiles[index]);
+          if (result == null) {
+            throw Exception('การอัปโหลดรูปภาพบางรายการล้มเหลว');
+          }
+          imageUrls.add(result.originalUrl);
+          thumbnailUrls.add(result.thumbnailUrl);
+          if (result.originalLocalPath != null) {
+            _localMediaPaths[result.originalUrl] = result.originalLocalPath!;
+          }
+          if (result.thumbnailLocalPath != null) {
+            _localMediaPaths[result.thumbnailUrl] = result.thumbnailLocalPath!;
+          }
         }
-        imageUrls.addAll(uploads.whereType<String>());
+      }
+      if (mounted) {
+        setState(() => _uploadStatusText = null);
       }
 
       if (imageUrls.length > _maxImageCount) {
         imageUrls.removeRange(_maxImageCount, imageUrls.length);
-      }
-
-      String? videoUrl = _existingVideoUrl;
-      if (_videoFile != null) {
-        final uploadedVideo = await _uploadVideoToFirebase(_videoFile!);
-        if (uploadedVideo != null) {
-          videoUrl = uploadedVideo;
-        } else {
-          throw Exception('การอัปโหลดวิดีโอล้มเหลว');
+        if (thumbnailUrls.length > _maxImageCount) {
+          thumbnailUrls.removeRange(_maxImageCount, thumbnailUrls.length);
         }
       }
 
-      final productData = {
+      // Ensure thumbnail list mirrors images for legacy data edge cases.
+      while (thumbnailUrls.length < imageUrls.length) {
+        thumbnailUrls.add(imageUrls[thumbnailUrls.length]);
+      }
+      if (thumbnailUrls.length > imageUrls.length) {
+        thumbnailUrls.removeRange(imageUrls.length, thumbnailUrls.length);
+      }
+
+      String? videoUrl = _existingVideoUrl;
+      String? videoThumbnailUrl = _existingVideoThumbnailUrl;
+      if (_videoFile != null) {
+        if (mounted) {
+          setState(() {
+            _uploadStatusText = 'กำลังอัปโหลดวิดีโอ';
+          });
+        }
+        final uploadedVideo = await _uploadVideoToFirebase(_videoFile!);
+        if (uploadedVideo != null) {
+          videoUrl = uploadedVideo.videoUrl;
+          videoThumbnailUrl = uploadedVideo.thumbnailUrl;
+          if (uploadedVideo.localVideoPath != null) {
+            _localMediaPaths[uploadedVideo.videoUrl] = uploadedVideo.localVideoPath!;
+          }
+          if (uploadedVideo.localThumbnailPath != null && uploadedVideo.thumbnailUrl != null) {
+            _localMediaPaths[uploadedVideo.thumbnailUrl!] = uploadedVideo.localThumbnailPath!;
+          }
+        } else {
+          throw Exception('การอัปโหลดวิดีโอล้มเหลว');
+        }
+        if (mounted) {
+          setState(() => _uploadStatusText = null);
+        }
+      }
+
+      final productDescription = _productDescriptionController.text.trim();
+      final toppingsText = _descriptionController.text.trim();
+
+      final productData = <String, dynamic>{
         'name': _nameController.text,
-        'description': _descriptionController.text,
+        'description': productDescription.isNotEmpty ? productDescription : toppingsText,
         'price': double.tryParse(_priceController.text) ?? 0.0,
         'stock': int.tryParse(_stockController.text) ?? 0,
         'imageUrls': imageUrls,
+        'thumbnailUrls': thumbnailUrls,
         'colors': _colorsController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
-        'sizes': _sizesController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
-  'weight': weightValue,
+          'sizes': _sizesController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
+          'weight': weightValue,
         'unit': _selectedUnit == 'อื่นๆ' ? _otherUnitController.text : _selectedUnit ?? '',
         'ownerUid': user.uid,
         'updatedAt': FieldValue.serverTimestamp(),
       };
+
+      if (toppingsText.isNotEmpty) {
+        productData['toppings'] = toppingsText;
+      } else if (widget.productToEdit != null) {
+        productData['toppings'] = FieldValue.delete();
+      }
 
       if (videoUrl != null) {
         productData['videoUrl'] = videoUrl;
@@ -313,11 +627,33 @@ class AddProductScreenState extends State<AddProductScreen> {
         productData['videoUrl'] = FieldValue.delete();
       }
 
+      if (videoThumbnailUrl != null) {
+        productData['videoThumbnailUrl'] = videoThumbnailUrl;
+      } else if (widget.productToEdit != null && widget.productToEdit!.videoThumbnailUrl != null) {
+        productData['videoThumbnailUrl'] = FieldValue.delete();
+      }
+
+      final productsRef = FirebaseFirestore.instance.collection('products');
+      DocumentReference<Map<String, dynamic>> docRef;
       if (widget.productToEdit == null) {
         productData['createdAt'] = FieldValue.serverTimestamp();
-        await FirebaseFirestore.instance.collection('products').add(productData);
+        docRef = await productsRef.add(productData);
       } else {
-        await FirebaseFirestore.instance.collection('products').doc(widget.productToEdit!.id).update(productData);
+        final targetId = widget.productToEdit!.id;
+        if (targetId == null || targetId.isEmpty) {
+          throw Exception('ไม่สามารถระบุรหัสสินค้าที่ต้องการแก้ไขได้');
+        }
+        docRef = productsRef.doc(targetId);
+        await docRef.update(productData);
+      }
+
+      final latestSnapshot = await docRef.get();
+      final latestData = latestSnapshot.data();
+      if (latestData != null) {
+        await ProductCacheService.instance.saveProducts(
+          user.uid,
+          [CachedProduct(id: docRef.id, data: latestData)],
+        );
       }
 
       if (mounted) {
@@ -330,7 +666,11 @@ class AddProductScreenState extends State<AddProductScreen> {
       }
     } finally {
       if (mounted) {
-        setState(() { _isSaving = false; });
+        setState(() {
+          _isSaving = false;
+          _uploadProgress = null;
+          _uploadStatusText = null;
+        });
       }
     }
   }
@@ -353,7 +693,7 @@ class AddProductScreenState extends State<AddProductScreen> {
             const Text('รูปภาพและวิดีโอ', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             _buildMediaSection(),
-            if (_uploadProgress != null)
+            if (_uploadProgress != null || _uploadStatusText != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Column(
@@ -361,7 +701,11 @@ class AddProductScreenState extends State<AddProductScreen> {
                   children: [
                     LinearProgressIndicator(value: _uploadProgress),
                     const SizedBox(height: 8),
-                    Text('กำลังอัปโหลด: ${(100 * _uploadProgress!).toStringAsFixed(0)}%'),
+                    Text(
+                      _uploadProgress != null
+                          ? '${_uploadStatusText ?? 'กำลังอัปโหลด'}: ${(100 * _uploadProgress!).toStringAsFixed(0)}%'
+                          : (_uploadStatusText ?? 'กำลังอัปโหลด'),
+                    ),
                   ],
                 ),
               ),
@@ -514,19 +858,11 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     for (int i = 0; i < _existingImageUrls.length; i++) {
       final imageUrl = _existingImageUrls[i];
+      final displayUrl = i < _existingThumbnailUrls.length ? _existingThumbnailUrls[i] : imageUrl;
       tiles.add(_buildImageTile(
         image: ClipRRect(
           borderRadius: BorderRadius.circular(12),
-          child: Image.network(
-            imageUrl,
-            width: 110,
-            height: 110,
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => const ColoredBox(
-              color: Colors.black12,
-              child: Icon(Icons.broken_image, size: 40, color: Colors.grey),
-            ),
-          ),
+          child: _buildCachedImage(displayUrl),
         ),
         onRemove: () => _removeExistingImageAt(i),
       ));
@@ -581,6 +917,50 @@ class AddProductScreenState extends State<AddProductScreen> {
     );
   }
 
+  Widget _buildCachedImage(String url) {
+    if (url.isEmpty) {
+      return const ColoredBox(
+        color: Colors.black12,
+        child: Icon(Icons.broken_image, size: 40, color: Colors.grey),
+      );
+    }
+    final localPath = _localMediaPaths[url];
+    if (localPath != null) {
+      return Image.file(
+        File(localPath),
+        width: 110,
+        height: 110,
+        fit: BoxFit.cover,
+      );
+    }
+    _tryWarmLocalCache(url);
+    return CachedAppImage(
+      imageUrl: url,
+      width: 110,
+      height: 110,
+      fit: BoxFit.cover,
+      errorWidget: const ColoredBox(
+        color: Colors.black12,
+        child: Icon(Icons.broken_image, size: 40, color: Colors.grey),
+      ),
+    );
+  }
+
+  void _tryWarmLocalCache(String url) {
+    if (url.isEmpty || _localMediaPaths.containsKey(url) || _cacheLookupInProgress.contains(url)) {
+      return;
+    }
+    _cacheLookupInProgress.add(url);
+    MediaCacheService.instance.getCachedPath(url).then((path) {
+      _cacheLookupInProgress.remove(url);
+      if (!mounted || path == null) return;
+      if (_localMediaPaths[url] == path) return;
+      setState(() {
+        _localMediaPaths[url] = path;
+      });
+    });
+  }
+
   Widget _buildImageTile({required Widget image, required VoidCallback onRemove}) {
     return Stack(
       clipBehavior: Clip.none,
@@ -610,6 +990,9 @@ class AddProductScreenState extends State<AddProductScreen> {
         ? null
         : _existingVideoUrl;
     final bool hasVideo = _videoFile != null || (videoUrl?.isNotEmpty ?? false);
+    final String? cachedVideoPath = videoUrl != null ? _localMediaPaths[videoUrl] : null;
+    final String? thumbnailUrl = _videoFile != null ? null : _existingVideoThumbnailUrl;
+    final String? cachedThumbnailPath = thumbnailUrl != null ? _localMediaPaths[thumbnailUrl] : null;
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 1,
@@ -632,7 +1015,10 @@ class AddProductScreenState extends State<AddProductScreen> {
                 child: _videoFile != null
                     ? ProductVideoPlayer(videoUrl: _videoFile!.path) // ส่วนนี้ถูกต้องแล้ว
                     : (videoUrl != null
-                        ? ProductVideoPlayer(videoUrl: videoUrl)
+                        ? ProductVideoPlayer(
+                            videoUrl: cachedVideoPath ?? videoUrl,
+                            thumbnailUrl: cachedThumbnailPath ?? thumbnailUrl,
+                          )
                         : const Text('ไม่พบวิดีโอ')),
               ),
             ),

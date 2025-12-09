@@ -12,6 +12,7 @@ import 'services/chat_service.dart';
 import 'services/friend_service.dart';
 import 'services/notification_service.dart';
 import 'call_screen.dart';
+import 'widgets/cached_app_image.dart';
 
 class ChatRoomScreen extends StatefulWidget {
   const ChatRoomScreen({super.key, required this.friendProfile});
@@ -324,17 +325,42 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
       if (!mounted) return;
 
-      // 2. นำทางไปยังหน้าจอการโทร พร้อมข้อมูลที่ได้จาก Cloud Function
-      Navigator.push(
+      // 2. สร้างโปรไฟล์เป้าหมายจากข้อมูลที่ Cloud Function ส่งกลับ (ถ้ามี)
+      UserProfile targetProfile = widget.friendProfile;
+      final calleeProfileData = callData['calleeProfile'];
+      if (calleeProfileData is Map<String, dynamic>) {
+        targetProfile = targetProfile.copyWith(
+          displayName: (calleeProfileData['displayName'] as String?) ?? targetProfile.displayName,
+          phoneNumber: (calleeProfileData['phoneNumber'] as String?) ?? targetProfile.phoneNumber,
+          photoUrl: (calleeProfileData['photoUrl'] as String?) ?? targetProfile.photoUrl,
+        );
+      }
+
+      // 3. นำทางไปยังหน้าจอการโทร พร้อมข้อมูลที่ได้จาก Cloud Function
+      final callResult = await Navigator.push(
         context,
         MaterialPageRoute(
           builder: (context) => CallScreen(
             channelName: callData['channelId'] as String? ?? _chatId, // ใช้ channelId จาก function
             isVideo: isVideo,
-            targetProfile: widget.friendProfile,
+            targetProfile: targetProfile,
             tokenOverride: callData['token'] as String?, // ใช้ token จาก function
+            isIncoming: false,
           ),
         ),
+      );
+
+      final answered = (callResult is Map && callResult['answered'] == true);
+      final durationMillis = (callResult is Map ? callResult['durationMillis'] as int? : null);
+      final declined = (callResult is Map && callResult['declined'] == true);
+
+      await _chatService.logCallEvent(
+        initiator: caller,
+        target: widget.friendProfile,
+        isVideo: isVideo,
+        answered: answered,
+        duration: durationMillis != null ? Duration(milliseconds: durationMillis) : null,
+        declined: declined,
       );
     } catch (e) {
       if (mounted) {
@@ -386,7 +412,7 @@ class _MessageBubble extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
             child: message.mediaUrl != null
-                ? Image.network(message.mediaUrl!, fit: BoxFit.cover)
+                ? CachedAppImage(imageUrl: message.mediaUrl!, fit: BoxFit.cover)
                 : const SizedBox.shrink(),
           ),
         );
@@ -395,6 +421,24 @@ class _MessageBubble extends StatelessWidget {
             icon: Icons.videocam,
             label: message.fileName ?? 'ไฟล์วิดีโอ',
             url: message.mediaUrl);
+      case 'call':
+        final callIcon = message.callType == 'video'
+            ? Icons.videocam_outlined
+            : Icons.call_made;
+        final callLabel = _buildCallLabel(message);
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(callIcon, color: textColor.withOpacity(0.8), size: 18),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                callLabel,
+                style: TextStyle(color: textColor, fontStyle: FontStyle.italic),
+              ),
+            ),
+          ],
+        );
       case 'file':
         return _buildAttachmentTile(context,
             icon: Icons.description,
@@ -404,6 +448,19 @@ class _MessageBubble extends StatelessWidget {
       default:
         return Text(message.text ?? '', style: TextStyle(color: textColor, fontSize: 15));
     }
+  }
+
+  String _buildCallLabel(ChatMessage message) {
+    final status = message.callStatus;
+    if (status == 'declined') return 'ยกเลิกสาย';
+    if (status == 'missed') return 'ไม่ได้รับสาย';
+    if (status == 'answered') {
+      final duration = message.callDurationSeconds ?? 0;
+      final minutes = (duration ~/ 60).toString().padLeft(2, '0');
+      final seconds = (duration % 60).toString().padLeft(2, '0');
+      return 'สนทนา $minutes:$seconds';
+    }
+    return message.text ?? 'บันทึกการโทร';
   }
 
   Widget _buildAttachmentTile(

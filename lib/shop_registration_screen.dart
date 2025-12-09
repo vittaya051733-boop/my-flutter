@@ -1,5 +1,6 @@
-﻿import 'dart:io';
+﻿import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -11,18 +12,34 @@ import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img; // เพิ่ม: สำหรับแปลงรูปภาพ
 import 'firebase_options.dart';
 import 'utils/app_colors.dart';
+import 'utils/shop_profile_resolver.dart';
+import 'services/shop_profile_fetcher.dart';
+import 'storage_helper.dart';
+import 'widgets/cached_app_image.dart';
 
 class ShopRegistrationScreen extends StatefulWidget {
   final String? serviceType;
   final DocumentSnapshot? shopData; // optional: existing shop doc to edit
+  final Map<String, dynamic>? prefilledData; // optional: cached/normalized map for offline mode
   
-  const ShopRegistrationScreen({super.key, this.serviceType, this.shopData});
+  const ShopRegistrationScreen({super.key, this.serviceType, this.shopData, this.prefilledData});
 
   @override
   State<ShopRegistrationScreen> createState() => _ShopRegistrationScreenState();
 }
 
 class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
+  static const List<String> _nameKeys = <String>['shopName', 'name', 'displayName', 'businessName', 'storeName', 'brandName', 'title'];
+  static const List<String> _descriptionKeys = <String>['description', 'shopDescription', 'detail', 'summary', 'about'];
+  static const List<String> _addressKeys = <String>['address', 'shopAddress', 'addressLine', 'locationText'];
+  static const List<String> _phoneKeys = <String>['phone', 'phoneNumber', 'contactPhone', 'mobile', 'tel'];
+  static const List<String> _emailKeys = <String>['email', 'contactEmail'];
+  static const List<String> _bankNameKeys = <String>['bankName', 'bank', 'bankname', 'financialInstitution'];
+  static const List<String> _accountNumberKeys = <String>['accountNumber', 'bankAccountNumber', 'accountNo', 'acctNumber'];
+  static const List<String> _accountOwnerKeys = <String>['accountOwner', 'accountName', 'ownerName', 'accountHolder', 'accountHolderName'];
+  static const List<String> _serviceTypeKeys = <String>['serviceType', 'service_type', 'category', 'type'];
+  static const List<String> _bookBankImageKeys = <String>['bookBankImageUrl', 'bankBookImageUrl', 'bookBankImage', 'passbookImageUrl'];
+
   final _formKey = GlobalKey<FormState>();
   AutovalidateMode _autoValidateMode = AutovalidateMode.disabled;
   final _shopNameController = TextEditingController();
@@ -63,6 +80,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   String? _existingBookBankImageUrl;
   bool _isCheckingExisting = true;
   String? _resolvedServiceType;
+  bool _hasAttemptedRemotePrefill = false;
   
   // เก็บผล OCR จากรูปสมุดบัญชี
   String _ocrText = '';
@@ -132,36 +150,58 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     _loadUserEmail();
     WidgetsBinding.instance.addPostFrameCallback((_) => _initRegistrationStatus());
     _prefillIfEditing();
+    Future.microtask(_ensureShopProfileLoaded);
   }
 
   void _prefillIfEditing() {
-    if (widget.shopData == null || !widget.shopData!.exists) return;
-    final data = widget.shopData!.data() as Map<String, dynamic>?;
-    if (data == null) return;
-    _shopNameController.text = (data['name'] ?? '').toString();
-    _shopDescriptionController.text = (data['description'] ?? '').toString();
-    _addressController.text = (data['address'] ?? '').toString();
-    _phoneController.text = (data['phone'] ?? '').toString();
-    _emailController.text = (data['email'] ?? '').toString();
-    _bankNameController.text = (data['bankName'] ?? '').toString();
-    _accountNumberController.text = (data['accountNumber'] ?? '').toString();
-    _accountOwnerController.text = (data['accountOwner'] ?? '').toString();
-    final loc = data['location'];
-    if (loc is Map) {
-      _latitude = (loc['latitude'] as num?)?.toDouble();
-      _longitude = (loc['longitude'] as num?)?.toDouble();
+    final Map<String, dynamic> merged = <String, dynamic>{};
+    if (widget.prefilledData != null && widget.prefilledData!.isNotEmpty) {
+      merged.addAll(_stringKeyedMap(widget.prefilledData!));
     }
-    _resolvedServiceType = (data['serviceType'] ?? widget.serviceType)?.toString();
-    _isCheckingExisting = false; // ready to edit
+    if (widget.shopData != null && widget.shopData!.exists) {
+      final data = widget.shopData!.data() as Map<String, dynamic>?;
+      if (data != null) {
+        merged.addAll(_stringKeyedMap(data));
+      }
+    }
+    if (merged.isEmpty) return;
+    _hydrateFromMap(merged);
+    _isCheckingExisting = false; // ready to edit with prefilled data
+  }
 
-    // keep existing media urls for preview/save
-    _existingShopImageUrl = (data['shopImageUrl'] ?? '').toString();
-    _existingBookBankImageUrl = (data['bookBankImageUrl'] ?? '').toString();
+  Future<void> _ensureShopProfileLoaded() async {
+    if (_hasAttemptedRemotePrefill) return;
+    if (_shopNameController.text.trim().isNotEmpty ||
+        _phoneController.text.trim().isNotEmpty ||
+        _addressController.text.trim().isNotEmpty) {
+      return;
+    }
+
+    _hasAttemptedRemotePrefill = true;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final ShopProfileFetchResult? result = await ShopProfileFetcher.findByUser(
+      user.uid,
+      email: user.email,
+    );
+
+    if (result == null) {
+      return;
+    }
+
+    final Map<String, dynamic> merged = Map<String, dynamic>.from(result.data)
+      ..['_collection'] = result.collection;
+    _hydrateFromMap(merged);
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _initRegistrationStatus() async {
     // ถ้าเป็นโหมดแก้ไข (มี shopData) ให้ข้ามการ redirect
-    if (widget.shopData != null && widget.shopData!.exists) {
+    if ((widget.shopData != null && widget.shopData!.exists) ||
+        (widget.prefilledData != null && widget.prefilledData!.isNotEmpty)) {
       if (mounted) setState(() => _isCheckingExisting = false);
       return;
     }
@@ -548,7 +588,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
 
   Future<void> _deleteOldStorageFile(String url) async {
     try {
-      final ref = FirebaseStorage.instance.refFromURL(url);
+      final ref = StorageHelper.instance.refFromURL(url);
       await ref.delete();
     } catch (e) {
       debugPrint('Skip delete old file: $e');
@@ -661,8 +701,8 @@ Future<String?> _uploadImage() async {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'shop_images/${user.uid}_$timestamp.webp';
-      final storageRef = FirebaseStorage.instance.ref().child(fileName);
+      final fileName = 'contracts/${user.uid}/shop_images/$timestamp.png';
+      final storageRef = StorageHelper.instance.ref().child(fileName);
 
       final bytes = await _selectedImage!.readAsBytes();
       debugPrint('✅ Read shop image bytes: ${bytes.length}');
@@ -671,10 +711,10 @@ Future<String?> _uploadImage() async {
         debugPrint('❌ Could not decode shop image.');
         throw Exception('ไม่สามารถอ่านข้อมูลรูปภาพร้านค้าได้ (ไฟล์อาจเสียหาย)');
       }
-      final webpBytes = img.encodePng(image);
+      final pngBytes = img.encodePng(image);
 
       final uploadTask = await storageRef.putData(
-        Uint8List.fromList(webpBytes),
+        Uint8List.fromList(pngBytes),
         SettableMetadata(contentType: 'image/png'),
       );
       final downloadUrl = await uploadTask.ref.getDownloadURL();
@@ -686,6 +726,143 @@ Future<String?> _uploadImage() async {
     }
 }
 
+  void _hydrateFromMap(Map<String, dynamic> rawData) {
+    final Map<String, dynamic> data = _stringKeyedMap(rawData);
+
+    final String? shopName = ShopProfileResolver.resolveName(data) ?? _resolveStringField(data, _nameKeys);
+    _setTextIfEmpty(_shopNameController, shopName);
+
+    final String? description = _resolveStringField(data, _descriptionKeys);
+    _setTextIfEmpty(_shopDescriptionController, description);
+
+    final String? address = _resolveStringField(data, _addressKeys);
+    _setTextIfEmpty(_addressController, address);
+
+    final String? phone = _resolveStringField(data, _phoneKeys);
+    _setTextIfEmpty(_phoneController, phone);
+
+    final String? email = _resolveStringField(data, _emailKeys);
+    _setTextIfEmpty(_emailController, email);
+
+    final String? bankName = _resolveStringField(data, _bankNameKeys);
+    _setTextIfEmpty(_bankNameController, bankName);
+
+    final String? accountNumber = _resolveStringField(data, _accountNumberKeys);
+    _setTextIfEmpty(_accountNumberController, accountNumber);
+
+    final String? accountOwner = _resolveStringField(data, _accountOwnerKeys);
+    _setTextIfEmpty(_accountOwnerController, accountOwner);
+
+    final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(data);
+    if (shopImageUrl != null && shopImageUrl.isNotEmpty && _existingShopImageUrl == null) {
+      _existingShopImageUrl = shopImageUrl;
+    }
+
+    final String? bookBankImage = _resolveStringField(data, _bookBankImageKeys);
+    if (bookBankImage != null && bookBankImage.isNotEmpty && _existingBookBankImageUrl == null) {
+      _existingBookBankImageUrl = bookBankImage;
+    }
+
+    final String? serviceType = _resolveStringField(data, _serviceTypeKeys);
+    if (serviceType != null) {
+      _resolvedServiceType = serviceType;
+    }
+
+    _applyLocationFromData(data);
+  }
+
+  void _applyLocationFromData(Map<String, dynamic> data) {
+    final dynamic locationValue = data['location'] ?? data['coordinates'] ?? data['geo'] ?? data['position'] ?? data['shopLocation'];
+    if (_tryApplyLocation(locationValue)) {
+      return;
+    }
+
+    final String? latString = _resolveStringField(data, const <String>['lat', 'latitude', 'y']);
+    final String? lngString = _resolveStringField(data, const <String>['lng', 'long', 'longitude', 'x']);
+    final double? lat = latString != null ? double.tryParse(latString) : null;
+    final double? lng = lngString != null ? double.tryParse(lngString) : null;
+    if (lat != null && lng != null) {
+      _latitude = lat;
+      _longitude = lng;
+    }
+  }
+
+  bool _tryApplyLocation(dynamic value) {
+    if (value == null) return false;
+    if (value is GeoPoint) {
+      _latitude = value.latitude;
+      _longitude = value.longitude;
+      return true;
+    }
+    if (value is Map) {
+      final Map<String, dynamic> map = _stringKeyedMap(value);
+      final double? lat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
+      final double? lng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
+      if (lat != null && lng != null) {
+        _latitude = lat;
+        _longitude = lng;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  double? _parseDouble(dynamic value) {
+    if (value == null) return null;
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
+  }
+
+  String? _resolveStringField(Map<String, dynamic> source, List<String> candidateKeys) {
+    if (source.isEmpty) return null;
+    final Set<String> normalized = candidateKeys.map((key) => key.toLowerCase()).toSet();
+    final Queue<Map<String, dynamic>> queue = Queue<Map<String, dynamic>>();
+    queue.add(_stringKeyedMap(source));
+
+    while (queue.isNotEmpty) {
+      final Map<String, dynamic> current = queue.removeFirst();
+      for (final MapEntry<String, dynamic> entry in current.entries) {
+        final String key = entry.key.toLowerCase();
+        final dynamic value = entry.value;
+
+        if (normalized.contains(key) && value != null) {
+          if (value is String) {
+            final String trimmed = value.trim();
+            if (trimmed.isNotEmpty) return trimmed;
+          } else if (value is num) {
+            return value.toString();
+          }
+        }
+
+        if (value is Map) {
+          queue.add(_stringKeyedMap(value));
+        } else if (value is Iterable) {
+          for (final dynamic nested in value) {
+            if (nested is Map) {
+              queue.add(_stringKeyedMap(nested));
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic> _stringKeyedMap(Map<dynamic, dynamic> source) {
+    return source.map((dynamic key, dynamic value) => MapEntry<String, dynamic>(key.toString(), value));
+  }
+
+  void _setTextIfEmpty(TextEditingController controller, String? value) {
+    if (value == null || value.trim().isEmpty) return;
+    if (controller.text.trim().isNotEmpty) return;
+    controller.text = value.trim();
+  }
+
 // เพิ่มฟังก์ชัน _uploadBookBankImage ที่หายไป เพื่อให้อัปโหลดรูปสมุดบัญชีได้
 Future<String?> _uploadBookBankImage() async {
   if (_selectedBookBankImage == null) return null;
@@ -693,8 +870,8 @@ Future<String?> _uploadBookBankImage() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
     final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final fileName = 'book_bank_images/${user.uid}_$timestamp.webp';
-    final storageRef = FirebaseStorage.instance.ref().child(fileName);
+    final fileName = 'contracts/${user.uid}/book_bank_images/$timestamp.png';
+    final storageRef = StorageHelper.instance.ref().child(fileName);
 
     final bytes = await _selectedBookBankImage!.readAsBytes();
     final image = img.decodeImage(bytes);
@@ -724,7 +901,12 @@ Future<String?> _uploadBookBankImage() async {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () {
-            Navigator.of(context).pushReplacementNamed('/contract');
+            if (Navigator.of(context).canPop()) {
+              Navigator.of(context).pop();
+            } else {
+              // Fallback for flows that expect contract screen as the root destination
+              Navigator.of(context).pushReplacementNamed('/contract');
+            }
           },
         ),
       ),
@@ -823,8 +1005,8 @@ Future<String?> _uploadBookBankImage() async {
                                   : (_existingShopImageUrl != null && _existingShopImageUrl!.isNotEmpty)
                                       ? ClipRRect(
                                           borderRadius: BorderRadius.circular(12),
-                                          child: Image.network(
-                                            _existingShopImageUrl!,
+                                          child: CachedAppImage(
+                                            imageUrl: _existingShopImageUrl!,
                                             fit: BoxFit.cover,
                                           ),
                                         )
@@ -885,8 +1067,8 @@ Future<String?> _uploadBookBankImage() async {
                                 : (_existingBookBankImageUrl != null && _existingBookBankImageUrl!.isNotEmpty)
                                     ? ClipRRect(
                                         borderRadius: BorderRadius.circular(12),
-                                        child: Image.network(
-                                          _existingBookBankImageUrl!,
+                                        child: CachedAppImage(
+                                          imageUrl: _existingBookBankImageUrl!,
                                           fit: BoxFit.cover,
                                         ),
                                       )
