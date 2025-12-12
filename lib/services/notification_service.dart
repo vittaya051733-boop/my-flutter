@@ -1,21 +1,29 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../models/user_profile.dart';
 import '../call_screen.dart';
 import '../main.dart';
 import '../widgets/chat_message_popup.dart';
+import '../chat_room_screen.dart';
 
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
+
+  static const MethodChannel _callIntentChannel = MethodChannel('van.merchant/call_intents');
+  static const MethodChannel _appStateChannel = MethodChannel('van.merchant/app_state');
+  static const String _methodDrainPending = 'drain_pending_intents';
 
   static const List<String> _registrationCollections = <String>[
     'market_registrations',
@@ -30,10 +38,21 @@ class NotificationService {
 
   bool _initialized = false;
   String? _currentFcmToken;
+  bool _incomingCallVisible = false;
+  bool _callIntentBridgeAttached = false;
+  String? _activeIncomingChannelId;
+  final Set<String> _cancelledChannelIds = <String>{};
+  String? _backgroundReturnChannelId;
+  bool _shouldReturnAppToBackground = false;
 
   /// เริ่มต้นระบบ Notification
   Future<void> initialize() async {
     if (_initialized) return;
+
+    final systemPermissionGranted = await _ensureSystemNotificationPermission();
+    if (!systemPermissionGranted) {
+      debugPrint('Notification permission denied at system level');
+    }
 
     // Request permission
     NotificationSettings settings = await _firebaseMessaging.requestPermission(
@@ -65,6 +84,8 @@ class NotificationService {
       onDidReceiveNotificationResponse: _onNotificationTapped,
     );
 
+    await _ensureAndroidNotificationChannel();
+
     // Get FCM token
     final token = await _firebaseMessaging.getToken();
     if (token != null) {
@@ -83,7 +104,42 @@ class NotificationService {
     // Handle notification tap when app is in background
     FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
 
+    _setupCallIntentBridge();
     _initialized = true;
+  }
+
+  Future<bool> _ensureSystemNotificationPermission() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return true;
+    }
+    final status = await Permission.notification.status;
+    if (status.isGranted || status.isLimited) {
+      return true;
+    }
+    if (status.isPermanentlyDenied) {
+      return false;
+    }
+    final requested = await Permission.notification.request();
+    return requested.isGranted || requested.isLimited;
+  }
+
+  Future<void> _ensureAndroidNotificationChannel() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    final androidPlugin =
+        _localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin == null) {
+      return;
+    }
+    const channel = AndroidNotificationChannel(
+      'order_channel',
+      'การแจ้งเตือนทั่วไป',
+      description: 'ใช้สำหรับแจ้งเตือนข้อความและออเดอร์',
+      importance: Importance.high,
+      playSound: true,
+    );
+    await androidPlugin.createNotificationChannel(channel);
   }
 
   /// บันทึก FCM Token ลง Firestore
@@ -204,25 +260,36 @@ class NotificationService {
     final notification = message.notification;
     final data = message.data;
 
+    if (data['type'] == 'call_cancel') {
+      _handleCallCancelFromNative(data['channelId'] as String?);
+      return;
+    }
+
     // แจ้งเตือนข้อความแชตเข้า
     if (data['type'] == 'chat') {
       final context = MyApp.navigatorKey.currentState?.context;
       final senderName = data['senderName'] ?? 'ข้อความใหม่';
       final messageText = data['message'] ?? '';
+      void handleTap() {
+        _openChatFromNotificationData(data);
+      }
       if (context != null) {
         ChatMessagePopup.show(
           context,
           senderName: senderName,
           message: messageText,
-          onTap: () {
-            // TODO: Navigate to chat screen with chatId if needed
-          },
+          onTap: handleTap,
         );
       } else {
         await _showLocalNotification(
           title: senderName,
           body: messageText,
-          payload: data['chatId'],
+          payload: jsonEncode({
+            'type': 'chat',
+            'chatId': data['chatId'],
+            'senderId': data['senderId'],
+            'senderName': senderName,
+          }),
         );
       }
       return;
@@ -236,35 +303,13 @@ class NotificationService {
         debugPrint('Skip showing incoming UI for own outgoing call');
         return;
       }
-      // สร้าง UserProfile จาก payload (ใช้ fromMap ให้ตรงกับ model)
-      final profile = UserProfile.fromMap(
-        data['callerId'] ?? '',
-        {
-          'displayName': data['callerName'] ?? 'ผู้โทร',
-          'photoUrl': data['callerPhotoUrl'],
-        },
-      );
-      final navigatorState = MyApp.navigatorKey.currentState;
-      if (navigatorState?.context != null) {
-        navigatorState!.push(
-          MaterialPageRoute(
-            fullscreenDialog: true,
-            builder: (_) => CallScreen(
-              channelName: data['channelId'] ?? '',
-              isVideo: data['callType'] == 'video',
-              targetProfile: profile,
-              isIncoming: true,
-              tokenOverride: data['token'],
-            ),
-          ),
-        );
-        return;
-      }
-      // ถ้า context ยังไม่พร้อม ให้แสดง local notification ปกติ
-      await _showCallNotification(
-        title: 'สายเข้า',
-        body: '${data['callerName'] ?? 'มีสายเข้า'} (${data['callType'] == 'video' ? 'วิดีโอคอล' : 'เสียง'})',
-        callData: data,
+      _navigateToIncomingCall(
+        channelId: data['channelId'] ?? '',
+        token: data['token'],
+        callerId: data['callerId'] ?? data['caller_id'] ?? '',
+        callerName: data['callerName'] ?? 'ผู้โทร',
+        callerPhotoUrl: data['callerPhotoUrl'],
+        isVideo: _resolveIsVideoFlag(data),
       );
       return;
     }
@@ -321,49 +366,6 @@ class NotificationService {
     );
   }
 
-  /// แสดง local notification สำหรับสายเข้าโดยเฉพาะ
-  Future<void> _showCallNotification({
-    required String title,
-    required String body,
-    required Map<String, dynamic> callData,
-  }) async {
-    final payload = jsonEncode({
-      'type': 'call',
-      'channelId': callData['channelId'] ?? '',
-      'token': callData['token'],
-      'callerId': callData['callerId'] ?? callData['caller_id'] ?? '',
-      'callerName': callData['callerName'] ?? 'ผู้โทร',
-      'callerPhotoUrl': callData['callerPhotoUrl'],
-      'isVideo': _resolveIsVideoFlag(callData),
-    });
-
-    const androidDetails = AndroidNotificationDetails(
-      'call_channel', // ID ใหม่สำหรับสายเข้า
-      'การแจ้งเตือนสายเรียกเข้า',
-      channelDescription: 'แจ้งเตือนเมื่อมีสายเรียกเข้า',
-      importance: Importance.max,
-      priority: Priority.max,
-      enableVibration: true,
-      playSound: true,
-      sound: RawResourceAndroidNotificationSound('ringtone'), // ต้องมีไฟล์ ringtone.mp3 ใน res/raw
-      fullScreenIntent: true, // ทำให้แสดงผลเต็มจอ
-    );
-
-    const iosDetails = DarwinNotificationDetails(
-      presentAlert: true,
-      presentBadge: true,
-      presentSound: true,
-      sound: 'ringtone.aiff', // ต้องมีไฟล์ ringtone.aiff ใน project
-    );
-
-    const notificationDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: iosDetails,
-    );
-
-    await _localNotifications.show(0, title, body, notificationDetails, payload: payload);
-  }
-
   /// จัดการเมื่อกด notification
   void _onNotificationTapped(NotificationResponse response) {
     final payload = response.payload;
@@ -372,16 +374,22 @@ class NotificationService {
     }
     try {
       final decoded = jsonDecode(payload);
-      if (decoded is Map<String, dynamic> && decoded['type'] == 'call') {
-        _navigateToIncomingCall(
-          channelId: decoded['channelId'] as String? ?? '',
-          token: decoded['token'] as String?,
-          callerId: decoded['callerId'] as String? ?? '',
-          callerName: decoded['callerName'] as String? ?? 'ผู้โทร',
-          callerPhotoUrl: decoded['callerPhotoUrl'] as String?,
-          isVideo: decoded['isVideo'] == true,
-        );
-        return;
+      if (decoded is Map<String, dynamic>) {
+        if (decoded['type'] == 'call') {
+          _navigateToIncomingCall(
+            channelId: decoded['channelId'] as String? ?? '',
+            token: decoded['token'] as String?,
+            callerId: decoded['callerId'] as String? ?? '',
+            callerName: decoded['callerName'] as String? ?? 'ผู้โทร',
+            callerPhotoUrl: decoded['callerPhotoUrl'] as String?,
+            isVideo: decoded['isVideo'] == true,
+          );
+          return;
+        }
+        if (decoded['type'] == 'chat') {
+          _openChatFromNotificationData(decoded);
+          return;
+        }
       }
       debugPrint('Notification tapped with payload: $payload');
     } catch (error) {
@@ -414,6 +422,97 @@ class NotificationService {
         isVideo: _resolveIsVideoFlag(message.data),
       );
     }
+
+    if (message.data['type'] == 'call_cancel') {
+      _handleCallCancelFromNative(message.data['channelId'] as String?);
+      return;
+    }
+
+    if (message.data['type'] == 'chat') {
+      _openChatFromNotificationData(message.data);
+    }
+  }
+
+  void _setupCallIntentBridge() {
+    if (!Platform.isAndroid || _callIntentBridgeAttached) {
+      return;
+    }
+    _callIntentBridgeAttached = true;
+    _callIntentChannel.setMethodCallHandler((call) async {
+      if (call.method != 'incoming_call_intent') {
+        return;
+      }
+      _handleIncomingCallPayload(call.arguments);
+    });
+    _drainPendingAndroidIntents();
+  }
+
+  Map<String, dynamic>? _normalizePlatformPayload(dynamic arguments) {
+    if (arguments is! Map) {
+      return null;
+    }
+    final normalized = <String, dynamic>{};
+    arguments.forEach((key, value) {
+      normalized[key.toString()] = value;
+    });
+    return normalized;
+  }
+
+  Future<void> _drainPendingAndroidIntents() async {
+    try {
+      final List<dynamic>? pending =
+          await _callIntentChannel.invokeListMethod<dynamic>(_methodDrainPending);
+      if (pending == null) return;
+      for (final dynamic rawPayload in pending) {
+        _handleIncomingCallPayload(rawPayload);
+      }
+    } catch (error) {
+      debugPrint('Unable to drain Android call intents: $error');
+    }
+  }
+
+  void _handleIncomingCallPayload(dynamic payloadData) {
+    final payload = _normalizePlatformPayload(payloadData);
+    if (payload == null) {
+      return;
+    }
+    if (payload['cancelOnly'] == true) {
+      _handleCallCancelFromNative(payload['channelId'] as String?);
+      return;
+    }
+    final bool minimizeOnEnd = payload['appWasForeground'] == false;
+    _navigateToIncomingCall(
+      channelId: payload['channelId'] as String? ?? '',
+      token: payload['token'] as String?,
+      callerId: payload['callerId'] as String? ?? '',
+      callerName: payload['callerName'] as String? ?? 'ผู้โทร',
+      callerPhotoUrl: payload['callerPhotoUrl'] as String?,
+      isVideo: payload['isVideo'] == true,
+      minimizeOnEnd: minimizeOnEnd,
+    );
+  }
+
+  void _handleCallCancelFromNative(String? channelId) {
+    if (channelId != null) {
+      _cancelledChannelIds.add(channelId);
+    }
+    _dismissIncomingCallUI(channelId: channelId);
+  }
+
+  void _dismissIncomingCallUI({String? channelId}) {
+    if (!_incomingCallVisible) {
+      return;
+    }
+    if (_activeIncomingChannelId != null && channelId != null && _activeIncomingChannelId != channelId) {
+      return;
+    }
+    final navigatorState = MyApp.navigatorKey.currentState;
+    if (navigatorState != null) {
+      navigatorState.maybePop();
+    }
+    _incomingCallVisible = false;
+    _activeIncomingChannelId = null;
+    _maybeReturnAppToBackground(channelId: channelId);
   }
 
   void _navigateToIncomingCall({
@@ -423,14 +522,49 @@ class NotificationService {
     required String callerName,
     String? callerPhotoUrl,
     required bool isVideo,
+    int retryCount = 8,
+    bool minimizeOnEnd = false,
   }) {
+    if (channelId.isEmpty || token == null || token.isEmpty) {
+      debugPrint('Incoming call payload missing channel/token, skip UI presentation');
+      return;
+    }
+    if (_cancelledChannelIds.contains(channelId)) {
+      debugPrint('Call $channelId already cancelled, skip presenting UI');
+      return;
+    }
+    if (_incomingCallVisible) {
+      debugPrint('Incoming call UI already visible, skip duplicate navigation');
+      return;
+    }
     final navigatorState = MyApp.navigatorKey.currentState;
     final context = navigatorState?.context;
     if (context == null) {
-      debugPrint('Navigator context unavailable, cannot open CallScreen');
+      if (retryCount <= 0) {
+        debugPrint('Navigator context unavailable, cannot open CallScreen');
+        return;
+      }
+      Future.delayed(const Duration(milliseconds: 300), () {
+        _navigateToIncomingCall(
+          channelId: channelId,
+          token: token,
+          callerId: callerId,
+          callerName: callerName,
+          callerPhotoUrl: callerPhotoUrl,
+          isVideo: isVideo,
+          retryCount: retryCount - 1,
+          minimizeOnEnd: minimizeOnEnd,
+        );
+      });
       return;
     }
 
+    _incomingCallVisible = true;
+    _activeIncomingChannelId = channelId;
+    if (minimizeOnEnd) {
+      _backgroundReturnChannelId = channelId;
+      _shouldReturnAppToBackground = true;
+    }
     navigatorState!.push(
       MaterialPageRoute(
         fullscreenDialog: true,
@@ -448,7 +582,14 @@ class NotificationService {
           tokenOverride: token,
         ),
       ),
-    );
+    ).whenComplete(() {
+      _incomingCallVisible = false;
+      if (_activeIncomingChannelId == channelId) {
+        _activeIncomingChannelId = null;
+      }
+      _cancelledChannelIds.remove(channelId);
+      _maybeReturnAppToBackground(channelId: channelId);
+    });
   }
 
   bool _resolveIsVideoFlag(Map<String, dynamic> data) {
@@ -466,6 +607,74 @@ class NotificationService {
     await _showLocalNotification(
       title: 'ทดสอบการแจ้งเตือน',
       body: 'นี่คือการแจ้งเตือนทดสอบจากระบบ',
+    );
+  }
+
+  Future<void> _maybeReturnAppToBackground({String? channelId}) async {
+    if (!_shouldReturnAppToBackground) {
+      return;
+    }
+    if (_backgroundReturnChannelId != null && channelId != null && _backgroundReturnChannelId != channelId) {
+      return;
+    }
+    _shouldReturnAppToBackground = false;
+    _backgroundReturnChannelId = null;
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await _appStateChannel.invokeMethod('move_task_to_back');
+    } catch (error) {
+      debugPrint('Unable to return app to background: $error');
+    }
+  }
+
+  Future<void> _openChatFromNotificationData(
+    Map<String, dynamic> data, {
+    int retryCount = 6,
+  }) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) {
+      debugPrint('Skip navigating to chat: no authenticated user');
+      return;
+    }
+    final navigatorState = MyApp.navigatorKey.currentState;
+    if (navigatorState == null) {
+      if (retryCount <= 0) {
+        debugPrint('Navigator not ready, cannot navigate to chat');
+        return;
+      }
+      Future.delayed(const Duration(milliseconds: 250), () {
+        _openChatFromNotificationData(data, retryCount: retryCount - 1);
+      });
+      return;
+    }
+
+    final senderIdRaw = data['senderId'] ?? data['sender_id'];
+    final String? senderId = senderIdRaw?.toString();
+    final senderName = (data['senderName'] ?? data['title'] ?? 'คู่สนทนา').toString();
+
+    UserProfile? profile;
+    if (senderId != null && senderId.isNotEmpty) {
+      try {
+        final doc = await FirebaseFirestore.instance.collection('users').doc(senderId).get();
+        if (doc.exists) {
+          profile = UserProfile.fromSnapshot(doc);
+        }
+      } catch (error) {
+        debugPrint('Failed to load chat profile for $senderId: $error');
+      }
+    }
+
+    profile ??= UserProfile(
+      uid: senderId ?? 'unknown',
+      displayName: senderName,
+    );
+
+    navigatorState.push(
+      MaterialPageRoute(
+        builder: (_) => ChatRoomScreen(friendProfile: profile!),
+      ),
     );
   }
 
@@ -489,6 +698,23 @@ class NotificationService {
       'callType': callType,
     });
     print('Call result: ${result.data}');
+  }
+
+  Future<void> cancelCallInvite({
+    required String channelId,
+    required String calleeId,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+          .httpsCallable('cancelCallInvite');
+      await callable.call({
+        'channelId': channelId,
+        'calleeId': calleeId,
+        'callerId': FirebaseAuth.instance.currentUser?.uid,
+      });
+    } catch (error) {
+      debugPrint('Failed to cancel call invite: $error');
+    }
   }
 
   /// เริ่มการโทรโดยเรียก Cloud Function เพื่อสร้าง token และส่ง notification
