@@ -1,47 +1,140 @@
 // ...existing code...
-const functions = require('firebase-functions');
+const functions = require('firebase-functions/v1');
+const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
+const DEFAULT_REGION = 'asia-southeast1';
+const CALL_TTL_MS = 30 * 1000; // 30 seconds
 // แจ้งเตือนข้อความแชตใหม่ (Firestore Trigger)
-exports.notifyNewChatMessage = functions.firestore
+exports.notifyNewChatMessage = functions.region(DEFAULT_REGION).firestore
   .document('chats/{chatId}/messages/{messageId}')
-  .onCreate(async (snap, context) => {
-    const message = snap.data();
-    if (!message) return;
+  .onCreate((snap, context) => _handleChatMessageTrigger('chats', snap, context));
 
-    // ดึงข้อมูลผู้รับ (เช่น receiverId)
-    const receiverId = message.receiverId;
-    if (!receiverId) return;
+exports.notifyLegacyChatMessage = functions.region(DEFAULT_REGION).firestore
+  .document('chatRooms/{chatId}/messages/{messageId}')
+  .onCreate((snap, context) => _handleChatMessageTrigger('chatRooms', snap, context));
 
-    // ดึง FCM token ของผู้รับ
-    const userDoc = await admin.firestore().collection('users').doc(receiverId).get();
-    const fcmToken = userDoc.exists ? userDoc.data().fcmToken : null;
-    if (!fcmToken) {
-      console.warn(`[notifyNewChatMessage] No FCM token for user ${receiverId}`);
-      return;
-    }
+async function _handleChatMessageTrigger(collectionName, snap, context) {
+  const message = snap.data();
+  if (!message) {
+    console.warn(`[notifyNewChatMessage:${collectionName}] Empty snapshot`);
+    return;
+  }
 
-    // สร้างข้อความแจ้งเตือน
-    const payload = {
-      notification: {
-        title: message.senderName || 'ข้อความใหม่',
-        body: message.text || 'คุณได้รับข้อความใหม่',
-      },
-      data: {
-        chatId: context.params.chatId,
-        senderId: message.senderId || '',
-        type: 'chat',
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      },
-      token: fcmToken,
-    };
+  const chatId = context.params.chatId;
+  const senderId = message.senderId;
+  let receiverId = message.receiverId;
 
-    try {
-      await admin.messaging().send(payload);
-      console.log(`[notifyNewChatMessage] Sent to ${receiverId}`);
-    } catch (error) {
-      console.error('[notifyNewChatMessage] Error:', error);
-    }
+  if (!receiverId) {
+    receiverId = await _resolveReceiverId(chatId, senderId);
+  }
+
+  if (!receiverId) {
+    console.warn(`[notifyNewChatMessage:${collectionName}] Unable to resolve receiver for chat ${chatId}`);
+    return;
+  }
+
+  const userDoc = await admin.firestore().collection('users').doc(receiverId).get();
+  const fcmToken = userDoc.exists ? userDoc.data().fcmToken : null;
+  if (!fcmToken) {
+    console.warn(`[notifyNewChatMessage:${collectionName}] No FCM token for user ${receiverId}`);
+    return;
+  }
+
+  await _sendChatNotification({
+    title: message.senderName || 'ข้อความใหม่',
+    previewText: _resolveMessagePreview(message),
+    chatId,
+    senderId,
+    receiverId,
+    fcmToken,
+    collectionName,
   });
+}
+
+async function _sendChatNotification({
+  title,
+  previewText,
+  chatId,
+  senderId,
+  receiverId,
+  fcmToken,
+  collectionName,
+}) {
+  const payload = {
+    notification: {
+      title,
+      body: previewText,
+    },
+    data: {
+      chatId,
+      senderId: senderId || '',
+      senderName: title,
+      message: previewText,
+      type: 'chat',
+      click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    },
+    android: {
+      priority: 'high',
+      notification: {
+        channelId: 'order_channel',
+        sound: 'default',
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
+    },
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          alert: {
+            title,
+            body: previewText,
+          },
+        },
+      },
+    },
+    token: fcmToken,
+  };
+
+  try {
+    await admin.messaging().send(payload);
+    console.log(`[notifyNewChatMessage:${collectionName}] Sent to ${receiverId}`);
+  } catch (error) {
+    console.error(`[notifyNewChatMessage:${collectionName}] Error:`, error);
+  }
+}
+
+async function _resolveReceiverId(chatId, senderId) {
+  try {
+    const chatDoc = await admin.firestore().collection('chats').doc(chatId).get();
+    if (!chatDoc.exists) {
+      return null;
+    }
+    const participants = chatDoc.data().participants || [];
+    return participants.find((participantId) => participantId !== senderId) || null;
+  } catch (error) {
+    console.error(`[notifyNewChatMessage] Failed to resolve receiver for chat ${chatId}`, error);
+    return null;
+  }
+}
+
+function _resolveMessagePreview(message) {
+  if (message.text) {
+    return message.text;
+  }
+  switch (message.type) {
+    case 'image':
+      return 'ส่งรูปภาพ';
+    case 'video':
+      return 'ส่งวิดีโอ';
+    case 'file':
+      return 'ส่งไฟล์แนบ';
+    case 'call':
+      return message.callType === 'video' ? 'วิดีโอคอล' : 'สายเสียง';
+    default:
+      return 'คุณได้รับข้อความใหม่';
+  }
+}
 // ...existing code...
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 admin.initializeApp();
@@ -49,13 +142,9 @@ admin.initializeApp();
 const db = admin.firestore();
 const FieldValue = admin.firestore.FieldValue;
 
-const agoraConfig = functions.config().agora || {};
-const AGORA_APP_ID = agoraConfig.app_id || process.env.AGORA_APP_ID;
-const AGORA_APP_CERTIFICATE = agoraConfig.app_certificate || process.env.AGORA_APP_CERTIFICATE;
-const AGORA_TOKEN_TTL = parseInt(
-  agoraConfig.token_ttl_seconds || process.env.AGORA_TOKEN_TTL_SECONDS || '3600',
-  10
-);
+const AGORA_APP_ID_SECRET = defineSecret('AGORA_APP_ID');
+const AGORA_APP_CERT_SECRET = defineSecret('AGORA_APP_CERTIFICATE');
+const AGORA_TTL_SECRET = defineSecret('AGORA_APP_TTL_SECONDS');
 
 const SHOP_COLLECTIONS = [
   'market_registrations',
@@ -69,7 +158,7 @@ const SHOP_COLLECTIONS = [
  * Cloud Function สำหรับตรวจสอบเวลาเตรียมออเดอร์และส่งการแจ้งเตือน
  * ทำงานทุก 1 นาที
  */
-exports.checkPreparingOrders = functions.pubsub
+exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
   .schedule('every 1 minutes')
   .onRun(async (context) => {
     const now = admin.firestore.Timestamp.now();
@@ -212,7 +301,7 @@ async function sendNotification(fcmToken, title, body, orderId) {
 /**
  * Trigger เมื่อมีการอัพเดทสถานะออเดอร์
  */
-exports.onOrderStatusUpdate = functions.firestore
+exports.onOrderStatusUpdate = functions.region(DEFAULT_REGION).firestore
   .document('orders/{orderId}')
   .onUpdate(async (change, context) => {
     const before = change.before.data();
@@ -277,7 +366,7 @@ exports.onOrderStatusUpdate = functions.firestore
  * คำนวณระยะทางและเวลาที่ใช้จัดส่ง (ตัวอย่าง)
  * ในการใช้งานจริงควรใช้ Google Maps Distance Matrix API
  */
-exports.calculateDeliveryTime = functions.https.onCall(async (data, context) => {
+exports.calculateDeliveryTime = functions.region(DEFAULT_REGION).https.onCall(async (data, context) => {
   const { shopLocation, customerLocation } = data;
 
   try {
@@ -306,9 +395,10 @@ exports.calculateDeliveryTime = functions.https.onCall(async (data, context) => 
  * ใช้สำหรับโทรจริง (voice/video call)
  * รับข้อมูล caller/callee/callType, สร้าง Agora token/channel, ส่ง FCM payload type 'call'
  */
-const singaporeRegion = 'asia-southeast1';
-
-exports.callUser = functions.region(singaporeRegion).https.onCall(async (data, context) => {
+exports.callUser = functions
+  .region(DEFAULT_REGION)
+  .runWith({ secrets: [AGORA_APP_ID_SECRET, AGORA_APP_CERT_SECRET, AGORA_TTL_SECRET] })
+  .https.onCall(async (data, context) => {
   // ข้อมูลที่รับมา
   const callerId = data.callerId;
   const callerName = data.callerName;
@@ -324,19 +414,32 @@ exports.callUser = functions.region(singaporeRegion).https.onCall(async (data, c
 
   // ส่ง FCM payload type 'call' ไปยัง callee
   const message = {
-    notification: {
-      title: `สาย${callType === 'video' ? 'วิดีโอคอล' : 'เสียง'}จาก ${callerName}`,
-      body: 'แตะเพื่อรับสาย',
-    },
     data: {
       type: 'call',
-      callerId,
-      callerName,
-      callerPhotoUrl,
+      callerId: callerId || '',
+      callerName: callerName || 'ผู้โทร',
+      callerPhotoUrl: callerPhotoUrl || '',
       channelId,
       callType,
       token: agoraToken,
+      isVideo: callType === 'video' ? 'true' : 'false',
       click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    },
+    android: {
+      priority: 'high',
+      ttl: CALL_TTL_MS,
+    },
+    apns: {
+      headers: {
+        'apns-priority': '10',
+      },
+      payload: {
+        aps: {
+          sound: 'default',
+          'content-available': 1,
+          category: 'INCOMING_CALL',
+        },
+      },
     },
     token: calleeFCMToken,
   };
@@ -368,7 +471,10 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 // เพิ่มฟังก์ชัน initiateCall สำหรับฟีเจอร์โทร
-exports.initiateCall = functions.region(singaporeRegion).https.onCall(async (data, context) => {
+exports.initiateCall = functions
+  .region(DEFAULT_REGION)
+  .runWith({ secrets: [AGORA_APP_ID_SECRET, AGORA_APP_CERT_SECRET, AGORA_TTL_SECRET] })
+  .https.onCall(async (data, context) => {
   const { calleeId, callerId, callerName, callerPhotoUrl, isVideo, callType, callerData } = data;
   if (!calleeId) {
     throw new functions.https.HttpsError('invalid-argument', 'calleeId is required');
@@ -408,10 +514,6 @@ exports.initiateCall = functions.region(singaporeRegion).https.onCall(async (dat
   const token = await buildAgoraToken(channelId);
 
   const message = {
-    notification: {
-      title: `สาย${resolvedCallType === 'video' ? 'วิดีโอคอล' : 'เสียง'}จาก ${resolvedCallerName}`,
-      body: 'แตะเพื่อรับสาย',
-    },
     data: {
       type: 'call',
       callerId: resolvedCallerId,
@@ -419,9 +521,25 @@ exports.initiateCall = functions.region(singaporeRegion).https.onCall(async (dat
       callerPhotoUrl: resolvedCallerPhoto,
       channelId,
       callType: resolvedCallType,
-      isVideo: String(!!isVideo),
+      isVideo: isVideo ? 'true' : 'false',
       token,
       click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    },
+    android: {
+      priority: 'high',
+      ttl: CALL_TTL_MS,
+    },
+    apns: {
+      headers: {
+        'apns-priority': '10',
+      },
+      payload: {
+        aps: {
+          sound: 'default',
+          'content-available': 1,
+          category: 'INCOMING_CALL',
+        },
+      },
     },
     token: fcmToken,
   };
@@ -440,19 +558,65 @@ exports.initiateCall = functions.region(singaporeRegion).https.onCall(async (dat
   };
 });
 
+exports.cancelCallInvite = functions.region(DEFAULT_REGION).https.onCall(async (data, context) => {
+  const channelId = data.channelId;
+  const calleeId = data.calleeId;
+  const callerId = data.callerId || '';
+
+  if (!channelId || !calleeId) {
+    throw new functions.https.HttpsError('invalid-argument', 'channelId and calleeId are required');
+  }
+
+  const calleeDoc = await db.collection('users').doc(calleeId).get();
+  const fcmToken = calleeDoc.exists ? calleeDoc.data().fcmToken : null;
+  if (!fcmToken) {
+    throw new functions.https.HttpsError('failed-precondition', 'Callee token unavailable');
+  }
+
+  const message = {
+    data: {
+      type: 'call_cancel',
+      channelId,
+      callerId,
+    },
+    android: {
+      priority: 'high',
+      ttl: CALL_TTL_MS,
+    },
+    apns: {
+      headers: {
+        'apns-priority': '10',
+      },
+      payload: {
+        aps: {
+          sound: 'default',
+          'content-available': 1,
+          category: 'INCOMING_CALL',
+        },
+      },
+    },
+    token: fcmToken,
+  };
+
+  await admin.messaging().send(message);
+  console.log('[cancelCallInvite] sent cancel signal', { channelId, calleeId });
+  return { success: true };
+});
+
 async function buildAgoraToken(channelId, uid = 0) {
-  if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+  const { appId, appCertificate, tokenTtl } = resolveAgoraConfig();
+  if (!appId || !appCertificate) {
     throw new functions.https.HttpsError(
       'failed-precondition',
-      'Agora credentials are not configured. Set functions config agora.app_id and agora.app_certificate.'
+      'Agora credentials are not configured. Set secrets AGORA_APP_ID and AGORA_APP_CERTIFICATE.'
     );
   }
 
-  const privilegeExpiredTs = Math.floor(Date.now() / 1000) + AGORA_TOKEN_TTL;
+  const privilegeExpiredTs = Math.floor(Date.now() / 1000) + tokenTtl;
   try {
     return RtcTokenBuilder.buildTokenWithUid(
-      AGORA_APP_ID,
-      AGORA_APP_CERTIFICATE,
+      appId,
+      appCertificate,
       channelId,
       uid,
       RtcRole.PUBLISHER,
@@ -462,6 +626,17 @@ async function buildAgoraToken(channelId, uid = 0) {
     console.error('[agora] Failed to build token', { channelId, error });
     throw new functions.https.HttpsError('internal', 'Unable to create Agora token');
   }
+}
+
+function resolveAgoraConfig() {
+  const appId = AGORA_APP_ID_SECRET.value() || process.env.AGORA_APP_ID;
+  const appCertificate = AGORA_APP_CERT_SECRET.value() || process.env.AGORA_APP_CERTIFICATE;
+  const ttlRaw = AGORA_TTL_SECRET.value() || process.env.AGORA_APP_TTL_SECONDS || '3600';
+  let tokenTtl = parseInt(ttlRaw, 10);
+  if (!Number.isFinite(tokenTtl) || tokenTtl <= 0) {
+    tokenTtl = 3600;
+  }
+  return { appId, appCertificate, tokenTtl };
 }
 
 async function getOrCreateUserProfile(uid) {

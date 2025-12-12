@@ -5,8 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'models/user_profile.dart';
+import 'services/notification_service.dart';
 import 'widgets/cached_app_image.dart';
 
 class CallScreen extends StatefulWidget {
@@ -44,9 +47,16 @@ class _CallScreenState extends State<CallScreen> {
   DateTime? _callStart;
   bool _resultSent = false;
   Timer? _durationTimer;
+  bool _cancelSignalSent = false;
 
   AudioPlayer? _ringbackPlayer;
   String? _fatalError;
+
+  DocumentReference<Map<String, dynamic>>? _sessionDocRef;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sessionSubscription;
+  bool _callSessionMarkedEnded = false;
+
+  String? get _currentUserId => FirebaseAuth.instance.currentUser?.uid;
 
   // Agora App ID
   static const String appId = '37050f5308fd450ba070b53c01596c06';
@@ -66,6 +76,8 @@ class _CallScreenState extends State<CallScreen> {
       _fatalError = 'ไม่พบข้อมูลการโทรจากเซิร์ฟเวอร์ กรุณาลองใหม่อีกครั้ง';
       return;
     }
+
+    _setupCallSessionTracking();
 
     if (!widget.isIncoming) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -133,6 +145,10 @@ class _CallScreenState extends State<CallScreen> {
             _remoteConnected = true;
             _callStart = DateTime.now();
           });
+          unawaited(_updateCallSessionStatus('connected', extra: {
+            'connectedAt': FieldValue.serverTimestamp(),
+            'remoteAgoraUid': remoteUid,
+          }));
           _startDurationTicker();
           _stopRingback(); // หยุดเสียงรอสายเมื่ออีกฝ่ายรับสาย
         },
@@ -144,7 +160,7 @@ class _CallScreenState extends State<CallScreen> {
             _remoteConnected = false;
           });
           _stopDurationTicker();
-          _endCall();
+          _endCall(remoteEnded: true);
         },
         onError: (err, msg) {
           print('Agora: onError code=$err msg=$msg');
@@ -195,6 +211,77 @@ class _CallScreenState extends State<CallScreen> {
     _ringbackPlayer = null;
   }
 
+  void _setupCallSessionTracking() {
+    if (_activeChannelId.isEmpty) return;
+    _sessionDocRef = FirebaseFirestore.instance.collection('call_sessions').doc(_activeChannelId);
+    _sessionSubscription = _sessionDocRef!
+        .snapshots()
+        .listen(_handleSessionSnapshot, onError: (error, stack) {
+      debugPrint('call session listen error: $error');
+    });
+    if (!widget.isIncoming) {
+      _createCallSessionDocument();
+    }
+  }
+
+  void _handleSessionSnapshot(DocumentSnapshot<Map<String, dynamic>> snapshot) {
+    final data = snapshot.data();
+    if (data == null) return;
+    final status = data['status'] as String?;
+    if (status == 'ended') {
+      final endedBy = data['endedBy'] as String?;
+      if (endedBy != null && endedBy == _currentUserId) return;
+      _endCall(remoteEnded: true);
+    }
+  }
+
+  Future<void> _createCallSessionDocument() async {
+    final docRef = _sessionDocRef;
+    if (docRef == null) return;
+    final payload = <String, dynamic>{
+      'channelId': _activeChannelId,
+      'status': 'ringing',
+      'isVideo': widget.isVideo,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      if (_currentUserId != null) 'callerId': _currentUserId,
+      if (widget.targetProfile.uid.isNotEmpty) 'calleeId': widget.targetProfile.uid,
+    };
+    await docRef.set(payload, SetOptions(merge: true));
+  }
+
+  Future<void> _updateCallSessionStatus(
+    String status, {
+    Map<String, dynamic>? extra,
+    bool allowDuplicateEnd = false,
+  }) async {
+    final docRef = _sessionDocRef;
+    if (docRef == null) return;
+    if (status == 'ended' && _callSessionMarkedEnded && !allowDuplicateEnd) {
+      return;
+    }
+    final data = <String, dynamic>{
+      'status': status,
+      'updatedAt': FieldValue.serverTimestamp(),
+      if (_currentUserId != null) 'lastUpdatedBy': _currentUserId,
+      ...?extra,
+    };
+    if (status == 'ended' && !_callSessionMarkedEnded) {
+      _callSessionMarkedEnded = true;
+      data['endedAt'] = FieldValue.serverTimestamp();
+      if (_currentUserId != null) {
+        data['endedBy'] = _currentUserId;
+      }
+    }
+    await docRef.set(data, SetOptions(merge: true));
+  }
+
+  String _resolveSessionEndReason(bool declined, bool answered) {
+    if (declined) return 'declined';
+    if (answered) return 'completed';
+    return widget.isIncoming ? 'missed' : 'cancelled';
+  }
+
   void _toggleSpeaker() {
     final engine = _engine;
     if (engine == null) return;
@@ -213,6 +300,8 @@ class _CallScreenState extends State<CallScreen> {
   void dispose() {
     _stopRingback();
     _stopDurationTicker();
+    _sessionSubscription?.cancel();
+    _sessionSubscription = null;
     _engine?.leaveChannel();
     _engine?.release();
     _endCall();
@@ -273,6 +362,10 @@ class _CallScreenState extends State<CallScreen> {
     setState(() {
       _incomingAccepted = true;
     });
+    unawaited(_updateCallSessionStatus('accepted', extra: {
+      'acceptedAt': FieldValue.serverTimestamp(),
+      if (_currentUserId != null) 'acceptedBy': _currentUserId,
+    }));
     _stopRingback();
     await _initAgora();
   }
@@ -628,10 +721,21 @@ class _CallScreenState extends State<CallScreen> {
     _durationTimer = null;
   }
 
-  Future<void> _endCall({bool declined = false}) async {
+  Future<void> _endCall({bool declined = false, bool remoteEnded = false}) async {
     if (_resultSent) return;
     final duration = _callDuration;
     final answered = _remoteConnected && _remoteUid != null;
+    if (!remoteEnded) {
+      final reason = _resolveSessionEndReason(declined, answered);
+      await _updateCallSessionStatus('ended', extra: {
+        'endedReason': reason,
+        'answered': answered,
+        'declined': declined,
+      });
+    }
+    if (!widget.isIncoming && !answered && !remoteEnded) {
+      unawaited(_notifyCallCancelled());
+    }
     final result = {
       'answered': answered,
       if (duration != null && answered) 'durationMillis': duration.inMilliseconds,
@@ -643,6 +747,17 @@ class _CallScreenState extends State<CallScreen> {
     if (mounted && Navigator.of(context).canPop()) {
       Navigator.of(context).pop(result);
     }
+  }
+
+  Future<void> _notifyCallCancelled() async {
+    if (_cancelSignalSent || _activeChannelId.isEmpty || widget.targetProfile.uid.isEmpty) {
+      return;
+    }
+    _cancelSignalSent = true;
+    await NotificationService().cancelCallInvite(
+      channelId: _activeChannelId,
+      calleeId: widget.targetProfile.uid,
+    );
   }
 }
 

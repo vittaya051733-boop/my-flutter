@@ -71,5 +71,15 @@
 	<string>แอปนี้ต้องการเข้าถึงคลังรูปภาพของคุณเพื่อเลือกรูปภาพสำหรับร้านค้าและสมุดบัญชีของคุณ</string>
 	<key>NSCameraUsageDescription</key>
 	<string>แอปนี้ต้องการเข้าถึงกล้องของคุณเพื่อถ่ายภาพสำหรับร้านค้าและสมุดบัญชีของคุณ</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>แอปนี้ต้องการบันทึกไฟล์ลงในคลังรูปภาพของคุณสำหรับการดาวน์โหลดใบเสร็จและรูปสินค้า</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>แอปนี้ต้องการใช้ไมโครโฟนของคุณสำหรับการโทรด้วยเสียงและวิดีโอ</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>แอปนี้ต้องการตำแหน่งของคุณเพื่อระบุตำแหน่งรถและลูกค้า</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>ตำแหน่งแบบต่อเนื่องช่วยให้แอปรับงานและติดตามสถานะการจัดส่งได้แม้ขณะหน้าจอล็อก</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>ต้องใช้บลูทูธเพื่อเชื่อมต่อนักพิมพ์ความร้อนและอุปกรณ์เสริมอื่นๆ</string>
 </dict>
 </plist>

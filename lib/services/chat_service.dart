@@ -48,6 +48,8 @@ class ChatService {
 
     await messageRef.set({
       'senderId': sender.uid,
+      'senderName': sender.displayName,
+      'receiverId': target.uid,
       'type': 'text',
       'text': text,
       'createdAt': FieldValue.serverTimestamp(),
@@ -81,12 +83,16 @@ class ChatService {
     await storageRef.putFile(file, metadata);
     final downloadUrl = await storageRef.getDownloadURL();
 
+    final summaryText = _summaryForType(messageType, fileName);
     final expiresAt = Timestamp.fromDate(DateTime.now().add(const Duration(days: 30)));
     final messageRef = chatDoc.collection('messages').doc();
     final fileSize = await file.length();
     await messageRef.set({
       'senderId': sender.uid,
+      'senderName': sender.displayName,
+      'receiverId': target.uid,
       'type': messageType,
+      'text': summaryText,
       'mediaUrl': downloadUrl,
       'fileName': fileName,
       'fileSize': fileSize,
@@ -95,7 +101,6 @@ class ChatService {
       'expiresAt': expiresAt,
     });
 
-    final summaryText = _summaryForType(messageType, fileName);
     await _updateChatSummary(
       chatDoc,
       lastMessage: summaryText,
@@ -129,6 +134,8 @@ class ChatService {
     final messageRef = chatDoc.collection('messages').doc();
     await messageRef.set({
       'senderId': initiator.uid,
+      'senderName': initiator.displayName,
+      'receiverId': target.uid,
       'type': 'call',
       'callType': isVideo ? 'video' : 'voice',
       'direction': 'outgoing',
