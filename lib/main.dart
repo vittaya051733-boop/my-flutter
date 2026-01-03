@@ -75,7 +75,7 @@ void main() {
       await FirebaseAppCheck.instance.setTokenAutoRefreshEnabled(true);
 
       // เพิ่ม: พิมพ์ Debug Token ออกมาใน Console ทุกครั้งที่แอปเริ่มทำงาน (เฉพาะ Debug Mode)
-      if (kDebugMode) {
+      if (kDebugMode || kAppCheckForceDebug) {
         FirebaseAppCheck.instance.onTokenChange.listen((token) {
           debugPrint('App Check Debug Token: $token');
         });
@@ -89,8 +89,11 @@ void main() {
       } catch (e) {
         debugPrint('Could not get App Check token on startup: $e');
       }
-    } catch (_) {
+    } catch (e) {
       // กลืนทุก error ของ App Check เพื่อให้แอปรันได้ก่อน
+      if (kDebugMode || kAppCheckForceDebug) {
+        debugPrint('App Check activate failed: $e');
+      }
     }
 
     // Initialize FCM + Local Notifications

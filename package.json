@@ -1,5 +1,8 @@
 {
   "dependencies": {
     "agora-token": "^2.0.5"
+  },
+  "devDependencies": {
+    "firebase-tools": "^15.1.0"
   }
 }
