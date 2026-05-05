@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'navigation_helper.dart';
 
+import 'services/email_otp_service.dart';
 import 'utils/app_colors.dart';
 
 class EmailVerificationHelper extends StatefulWidget {
   final String? prefilledEmail;
-  
+
   const EmailVerificationHelper({super.key, this.prefilledEmail});
 
   @override
@@ -25,195 +25,44 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
     }
   }
 
-  Future<void> _checkEmailAndHelp() async {
+  @override
+  void dispose() {
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  User? get _currentUser => FirebaseAuth.instance.currentUser;
+
+  Future<void> _sendOtpAgain() async {
     final email = _emailController.text.trim();
     if (email.isEmpty) {
       _showMessage('กรุณาใส่อีเมล', AppColors.accent);
       return;
     }
 
-    setState(() => _loading = true);
-    
-    try {
-      // Instead of checking first, just try to send the reset email.
-      // This is the recommended flow to prevent email enumeration attacks.
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-
-      if (mounted) {
-        _showDialog(
-          title: '✅ ส่งคำขอรีเซ็ตแล้ว',
-          content: '''หากอีเมล $email มีอยู่ในระบบ เราได้ส่งลิงก์สำหรับรีเซ็ตรหัสผ่านไปให้แล้ว
-
-📧 ได้ส่งลิงก์รีเซ็ตรหัสผ่านไปแล้ว
-
-🔍 วิธีหาอีเมลใน Gmail:
-• ตรวจสอบใน Inbox ก่อน
-• ดูในโฟลเดอร์ Spam/จดหมายขยะ
-• ดูในแท็บ โปรโมชัน (Promotions)
-• ค้นหาคำว่า "Firebase", "VanMarket", "รีเซ็ต"
-
-⚡ ข้อดี: การคลิกลิงก์รีเซ็ตจะช่วยยืนยันอีเมลของคุณด้วย!
-
-⏰ หากไม่เจออีเมล รอสัก 5-10 นาทีแล้วลองใหม่''',
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('เข้าใจแล้ว'),
-            ),
-          ],
-        );
-      }
-    } on FirebaseAuthException catch (e) {
-      // Handle specific errors if needed, but generally we don't want to reveal
-      // if an email exists or not.
-      if (e.code == 'invalid-email') {
-        _showMessage('รูปแบบอีเมลไม่ถูกต้อง', Colors.red);
-      } else {
-        // For other errors, show a generic message.
-        _showMessage('เกิดข้อผิดพลาด: $e', Colors.red);
-      }
-    } catch (e) {
-      _showMessage('เกิดข้อผิดพลาด: $e', Colors.red);
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _sendAgain() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) return;
-
-    setState(() => _loading = true);
-    try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-      _showMessage('📧 ส่งลิงก์รีเซ็ตใหม่แล้ว! ตรวจสอบอีเมล (รวม Spam)', Colors.green);
-    } catch (e) {
-      _showMessage('ไม่สามารถส่งอีเมลได้: $e', Colors.red);
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _tryLoginDirectly() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) {
-  _showMessage('กรุณาใส่อีเมล', AppColors.accent);
+    final currentUserEmail = _currentUser?.email?.trim().toLowerCase();
+    if (currentUserEmail == null || currentUserEmail != email.toLowerCase()) {
+      _showMessage('กรุณาเข้าสู่ระบบด้วยบัญชีอีเมลนี้ก่อน แล้วค่อยขอ OTP ใหม่', Colors.red);
       return;
     }
 
-    // Show password input dialog
-    String? password = await _showPasswordDialog();
-    if (password == null || password.isEmpty) return;
-
     setState(() => _loading = true);
     try {
-      final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
-
-      if (credential.user != null) {
-        if (credential.user!.emailVerified) {
-          _showMessage('🎉 เข้าสู่ระบบสำเร็จ! อีเมลยืนยันแล้ว', Colors.green);
-          await Future.delayed(const Duration(seconds: 1));
-          if (mounted) {
-            // ตรวจสอบว่าเคยเซ็นสัญญาหรือยัง
-            await _navigateToNextStep(credential.user!);
-          }
-        } else {
-          // Email not verified, offer to send verification
-          await FirebaseAuth.instance.signOut();
-          
-          final resend = await _showYesNoDialog(
-            title: '⚠️ อีเมลยังไม่ได้ยืนยัน',
-            content: 'บัญชีของคุณมีอยู่แต่อีเมลยังไม่ได้ยืนยัน\nต้องการให้ส่งลิงก์รีเซ็ตรหัสผ่าน (ซึ่งจะยืนยันอีเมลด้วย) หรือไม่?',
-          );
-          
-          if (resend == true) {
-            await _sendAgain();
-          }
-        }
-      }
-    } on FirebaseAuthException catch (e) {
-      String message = 'เกิดข้อผิดพลาด';
-      switch (e.code) {
-        case 'wrong-password':
-          message = 'รหัสผ่านไม่ถูกต้อง\nลองใช้ "ส่งลิงก์รีเซ็ตรหัสผ่าน" แทน';
-          break;
-        case 'user-not-found':
-          message = 'ไม่พบผู้ใช้นี้ กรุณาสมัครสมาชิกก่อน';
-          break;
-        default:
-          message = e.message ?? 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ';
-      }
-      _showMessage(message, Colors.red);
-    } finally {
-      setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _navigateToNextStep(User user) async {
-    // ใช้ NavigationHelper เพื่อตรวจสอบและนำทาง
-    await NavigationHelper.navigateBasedOnUserStatus(context, user);
-  }
-
-  Future<String?> _showPasswordDialog() async {
-    final controller = TextEditingController();
-    return await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('ใส่รหัสผ่าน'),
-        content: TextField(
-          controller: controller,
-          obscureText: true,
-          decoration: const InputDecoration(
-            labelText: 'รหัสผ่าน',
-            border: OutlineInputBorder(),
-          ),
+      await EmailOtpService.instance.sendOtp();
+      _showMessage('ส่ง OTP ใหม่ไปที่ $email แล้ว', Colors.green);
+    } catch (e) {
+      _showMessage(
+        EmailOtpService.instance.mapError(
+          e,
+          fallback: 'ไม่สามารถส่ง OTP ใหม่ได้',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('ยกเลิก'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('ตกลง'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<bool?> _showYesNoDialog({required String title, required String content}) async {
-    return await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('ไม่'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('ใช่'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showDialog({required String title, required String content, required List<Widget> actions}) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: actions,
-      ),
-    );
+        Colors.red,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _loading = false);
+      }
+    }
   }
 
   void _showMessage(String message, Color color) {
@@ -230,7 +79,7 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('🔧 แก้ปัญหาอีเมลยืนยัน'),
+        title: const Text('🔧 ช่วยเหลือ OTP อีเมล'),
         backgroundColor: Colors.blue.shade600,
         foregroundColor: Colors.white,
       ),
@@ -256,10 +105,9 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      '• ตรวจสอบว่าอีเมลสมัครแล้วหรือยัง\n'
-                      '• ส่งลิงก์รีเซ็ตรหัสผ่าน (ยืนยันอีเมลอัตโนมัติ)\n'
-                      '• แนะนำวิธีหาอีเมลใน Gmail\n'
-                      '• ทดสอบเข้าสู่ระบบ',
+                      '• ตรวจสอบว่าใช้อีเมลถูกบัญชีหรือไม่\n'
+                      '• ส่ง OTP ใหม่ไปยังอีเมลเดิม\n'
+                      '• กลับไปหน้ากรอก OTP เพื่อยืนยันต่อ',
                       style: TextStyle(color: Colors.white),
                     ),
                   ],
@@ -273,17 +121,17 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
                 labelText: 'อีเมล',
                 prefixIcon: Icon(Icons.email),
                 border: OutlineInputBorder(),
-                helperText: 'ใส่อีเมลที่มีปัญหา',
+                helperText: 'ใส่อีเมลที่ใช้สมัครบัญชีนี้',
               ),
               keyboardType: TextInputType.emailAddress,
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
-              onPressed: _loading ? null : _checkEmailAndHelp,
-              icon: _loading 
+              onPressed: _loading ? null : _sendOtpAgain,
+              icon: _loading
                   ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.help_outline),
-              label: Text(_loading ? 'กำลังตรวจสอบ...' : '🔍 ตรวจสอบและช่วยแก้ปัญหา'),
+                  : const Icon(Icons.send_outlined),
+              label: Text(_loading ? 'กำลังส่ง...' : 'ส่ง OTP ใหม่'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.green.shade600,
                 foregroundColor: Colors.white,
@@ -292,9 +140,9 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
-              onPressed: _loading ? null : _tryLoginDirectly,
-              icon: const Icon(Icons.login),
-              label: const Text('🚪 ลองเข้าสู่ระบบ (หากจำรหัสผ่านได้)'),
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.arrow_back),
+              label: const Text('กลับไปหน้ากรอก OTP'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.accent,
                 foregroundColor: Colors.white,
@@ -310,7 +158,7 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '💡 เคล็ดลับหาอีเมลใน Gmail',
+                      '💡 คำแนะนำ',
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
@@ -318,11 +166,9 @@ class _EmailVerificationHelperState extends State<EmailVerificationHelper> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      '1. ตรวจสอบใน Inbox ก่อน\n'
-                      '2. ดูในโฟลเดอร์ Spam/จดหมายขยะ\n'
-                      '3. ดูในแท็บ โปรโมชัน (Promotions)\n'
-                      '4. ค้นหาคำว่า "Firebase", "VanMarket", "รีเซ็ต"\n'
-                      '5. รอ 5-10 นาที อีเมลอาจมาช้า',
+                      '1. หากไม่ได้รับ OTP ให้ตรวจสอบ Spam/Junk\n'
+                      '2. ตรวจสอบว่าอีเมลในหน้านี้ตรงกับอีเมลที่สมัคร\n'
+                      '3. หากพิมพ์อีเมลผิด ให้สมัครใหม่ด้วยอีเมลที่ถูกต้อง',
                     ),
                   ],
                 ),

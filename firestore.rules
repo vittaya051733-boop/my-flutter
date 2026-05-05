@@ -31,6 +31,10 @@ service cloud.firestore {
       ];
     }
 
+    function isPublicProductVisible(data) {
+      return data != null && data.isActive == true;
+    }
+
     function isOrderParticipant(data) {
       return signedIn()
           && data != null
@@ -59,8 +63,9 @@ service cloud.firestore {
 
     // สินค้า (แอปโหลดจาก collection('products'))
     match /products/{productId} {
-      // โหลดสินค้าได้เมื่อ login แล้ว (รองรับ both get และ query/list)
-      allow get, list: if signedIn();
+      // เจ้าของอ่านของตัวเองได้ และลูกค้าอ่านได้เฉพาะสินค้าที่ร้านเปิดและเลือกเผยแพร่แล้ว
+      allow get, list: if (signedIn() && resource.data.ownerUid == uid())
+          || isPublicProductVisible(resource.data);
 
       // เจ้าของสินค้าเท่านั้นที่เพิ่ม/แก้/ลบ
       allow create: if signedIn() && request.resource.data.ownerUid == uid();
@@ -70,6 +75,12 @@ service cloud.firestore {
           && request.resource.data.ownerUid == uid();
 
       allow delete: if signedIn() && resource.data.ownerUid == uid();
+
+      match /specifications/{specId} {
+        allow get, list: if signedIn() && get(/databases/$(database)/documents/products/$(productId)).data.ownerUid == uid();
+        allow create, update, delete: if signedIn()
+            && get(/databases/$(database)/documents/products/$(productId)).data.ownerUid == uid();
+      }
     }
 
     // โปรไฟล์ผู้ใช้ (ใช้เก็บ fcmToken ฯลฯ)
@@ -92,7 +103,7 @@ service cloud.firestore {
       allow list: if false;
     }
 
-    // เอกสารลงทะเบียนร้านค้า (รองรับทั้ง docId=uid และ query ด้วย email หลังล็อกอิน)
+    // เอกสารลงทะเบียนร้านค้า มีข้อมูลส่วนตัว ห้ามเปิดให้ลูกค้าอ่านตรง ๆ
     match /{collection}/{docId} {
       allow read: if isRegistrationCollection(collection)
           && signedIn()
@@ -197,7 +208,7 @@ service cloud.firestore {
 
     // Default deny
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
   }
 }

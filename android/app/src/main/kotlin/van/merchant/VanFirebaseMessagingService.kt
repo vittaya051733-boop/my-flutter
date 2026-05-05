@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.media.RingtoneManager
 import android.os.Build
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.RemoteMessage
@@ -19,6 +21,11 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         when (data["type"]) {
             "call" -> showIncomingCallNotification(data)
             "call_cancel" -> dismissIncomingCall(data)
+            "app_notification" -> {
+                if (data["action"] == "order_accepted") {
+                    showOrderDecisionNotification(data)
+                }
+            }
         }
         // ส่งต่อให้ plugin จัดการ notification/chat อื่น ๆ (เช่น FCM -> Dart)
         super.onMessageReceived(message)
@@ -46,15 +53,48 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
             isVideo = isVideo
         )
 
+        val incomingActivityIntent = IncomingCallActivityIntentBuilder.build(
+            context = this,
+            channelId = channelId,
+            token = token,
+            callerId = callerId,
+            callerName = callerName,
+            callerPhoto = callerPhoto,
+            isVideo = isVideo,
+        )
+
         val pendingIntent = PendingIntent.getActivity(
             this,
             REQUEST_CODE_INCOMING_CALL,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            incomingActivityIntent,
+            pendingIntentFlags()
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         ensureChannel(notificationManager)
+        wakeDeviceForIncomingCall()
+
+        if (!VanMerchantApp.isAppInForeground()) {
+            IncomingCallOverlayController.show(
+                context = this,
+                data = IncomingCallOverlayData(
+                    channelId = channelId,
+                    callerName = callerName,
+                    isVideo = isVideo,
+                ),
+                onOpenCallScreen = {
+                    try {
+                        startActivity(incomingActivityIntent)
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to open call screen from overlay", error)
+                    }
+                },
+                onDismiss = {
+                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    manager.cancel(NOTIFICATION_ID_INCOMING_CALL)
+                },
+            )
+        }
 
         val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
@@ -62,6 +102,7 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
             .setContentText("แตะเพื่อรับสาย")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setOngoing(true)
             .setAutoCancel(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -74,7 +115,7 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         notificationManager.notify(NOTIFICATION_ID_INCOMING_CALL, notification)
         CallIntentRouter.deliverIntent(intent)
         try {
-            startActivity(intent)
+            startActivity(incomingActivityIntent)
         } catch (error: Exception) {
             Log.w(TAG, "Unable to start call UI", error)
         }
@@ -84,7 +125,55 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         val channelId = data["channelId"] ?: return
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.cancel(NOTIFICATION_ID_INCOMING_CALL)
+        IncomingCallOverlayController.dismiss(channelId)
+        IncomingCallActivity.dismissIfShowing(channelId)
         sendCancelIntent(channelId)
+    }
+
+    private fun showOrderDecisionNotification(data: Map<String, String>) {
+        val orderId = data["orderId"] ?: return
+        val title = data["title"] ?: "มีออเดอร์รอร้านยืนยัน"
+        val body = data["body"] ?: "แตะเพื่อรับหรือปฏิเสธออเดอร์"
+        val notificationId = data["notificationId"]
+        val intent = OrderDecisionIntentBuilder.build(
+            context = this,
+            orderId = orderId,
+            notificationId = notificationId,
+            title = title,
+            body = body,
+        )
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            orderId.hashCode(),
+            intent,
+            pendingIntentFlags()
+        )
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        ensureChannel(notificationManager)
+        wakeDeviceForIncomingCall()
+
+        val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setFullScreenIntent(pendingIntent, true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notificationManager.notify(orderId.hashCode(), notification)
+        CallIntentRouter.deliverIntent(intent)
+        try {
+            startActivity(intent)
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to start order decision UI", error)
+        }
     }
 
     private fun ensureChannel(notificationManager: NotificationManager) {
@@ -96,15 +185,45 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         ).apply {
             description = "Full-screen notifications for incoming calls"
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            setBypassDnd(true)
+            enableVibration(true)
+            setSound(
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                Notification.AUDIO_ATTRIBUTES_DEFAULT
+            )
         }
         notificationManager.createNotificationChannel(channel)
+    }
+
+    private fun wakeDeviceForIncomingCall() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "$packageName:incoming_call"
+            )
+            wakeLock.acquire(3000)
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to acquire wake lock for incoming call", error)
+        }
     }
 
     companion object {
         private const val CALL_CHANNEL_ID = "call_channel"
         private const val REQUEST_CODE_INCOMING_CALL = 3182
-        private const val NOTIFICATION_ID_INCOMING_CALL = 2387
+        const val NOTIFICATION_ID_INCOMING_CALL = 2387
         private const val TAG = "VanFcmService"
+    }
+
+    private fun pendingIntentFlags(): Int {
+        var flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            flags = flags or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+        }
+        return flags
     }
 }
 
@@ -136,6 +255,49 @@ private object MainActivityIntentBuilder {
         flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
             android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         putExtra(MainActivity.EXTRA_CHANNEL_ID, channelId)
+    }
+}
+
+private object IncomingCallActivityIntentBuilder {
+    fun build(
+        context: Context,
+        channelId: String,
+        token: String,
+        callerId: String?,
+        callerName: String,
+        callerPhoto: String?,
+        isVideo: Boolean,
+    ) = Intent(context, IncomingCallActivity::class.java).apply {
+        action = MainActivity.ACTION_SHOW_INCOMING_CALL
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+            Intent.FLAG_ACTIVITY_SINGLE_TOP
+        putExtra(MainActivity.EXTRA_CHANNEL_ID, channelId)
+        putExtra(MainActivity.EXTRA_CALL_TOKEN, token)
+        putExtra(MainActivity.EXTRA_CALLER_ID, callerId.orEmpty())
+        putExtra(MainActivity.EXTRA_CALLER_NAME, callerName)
+        putExtra(MainActivity.EXTRA_CALLER_PHOTO, callerPhoto)
+        putExtra(MainActivity.EXTRA_IS_VIDEO, isVideo)
+        putExtra(MainActivity.EXTRA_APP_WAS_FOREGROUND, VanMerchantApp.isAppInForeground())
+    }
+}
+
+private object OrderDecisionIntentBuilder {
+    fun build(
+        context: Context,
+        orderId: String,
+        notificationId: String?,
+        title: String,
+        body: String,
+    ) = Intent(context, MainActivity::class.java).apply {
+        action = MainActivity.ACTION_SHOW_ORDER_DECISION
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+            Intent.FLAG_ACTIVITY_SINGLE_TOP
+        putExtra(MainActivity.EXTRA_ORDER_ID, orderId)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_ID, notificationId)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_TITLE, title)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_BODY, body)
     }
 }
 

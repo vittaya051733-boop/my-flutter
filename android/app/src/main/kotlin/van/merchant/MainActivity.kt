@@ -1,8 +1,11 @@
 package van.merchant
 
+import android.app.NotificationManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -35,15 +38,55 @@ class MainActivity : FlutterActivity() {
 							}
 						result.success(null)
 					}
+					METHOD_CAN_USE_FULL_SCREEN_INTENT -> {
+						result.success(canUseFullScreenIntent())
+					}
+					METHOD_OPEN_FULL_SCREEN_INTENT_SETTINGS -> {
+						openFullScreenIntentSettings()
+						result.success(null)
+					}
+					METHOD_CAN_DRAW_OVERLAYS -> {
+						result.success(canDrawOverlays())
+					}
+					METHOD_OPEN_OVERLAY_SETTINGS -> {
+						openOverlaySettings()
+						result.success(null)
+					}
+					METHOD_SHOW_INCOMING_CALL_ACTIVITY -> {
+						showIncomingCallActivity(call.arguments)
+						result.success(null)
+					}
 					else -> result.notImplemented()
 				}
 			}
 		CallIntentRouter.register(flutterEngine)
 	}
 
+	private fun showIncomingCallActivity(arguments: Any?) {
+		val payload = arguments as? Map<*, *> ?: return
+		val channelId = payload[EXTRA_CHANNEL_ID] as? String ?: return
+		val token = payload[EXTRA_CALL_TOKEN] as? String ?: return
+		val intent = Intent(this, IncomingCallActivity::class.java).apply {
+			action = ACTION_SHOW_INCOMING_CALL
+			flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+				Intent.FLAG_ACTIVITY_CLEAR_TOP or
+				Intent.FLAG_ACTIVITY_SINGLE_TOP
+			putExtra(EXTRA_CHANNEL_ID, channelId)
+			putExtra(EXTRA_CALL_TOKEN, token)
+			putExtra(EXTRA_CALLER_ID, payload[EXTRA_CALLER_ID] as? String ?: "")
+			putExtra(EXTRA_CALLER_NAME, payload[EXTRA_CALLER_NAME] as? String ?: "ผู้โทร")
+			putExtra(EXTRA_CALLER_PHOTO, payload[EXTRA_CALLER_PHOTO] as? String)
+			putExtra(EXTRA_IS_VIDEO, payload[EXTRA_IS_VIDEO] == true)
+			putExtra(EXTRA_APP_WAS_FOREGROUND, true)
+		}
+		startActivity(intent)
+	}
+
 	private fun applyCallWindowFlags(intent: Intent?) {
-		val isIncomingCall = intent?.action == ACTION_SHOW_INCOMING_CALL
-		if (isIncomingCall) {
+		val shouldWakeScreen = intent?.action == ACTION_SHOW_INCOMING_CALL ||
+			intent?.action == ACTION_SHOW_ORDER_DECISION
+		if (shouldWakeScreen) {
+			window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
 				setShowWhenLocked(true)
 				setTurnScreenOn(true)
@@ -56,6 +99,7 @@ class MainActivity : FlutterActivity() {
 				)
 			}
 		} else {
+			window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
 				setShowWhenLocked(false)
 				setTurnScreenOn(false)
@@ -70,9 +114,49 @@ class MainActivity : FlutterActivity() {
 		}
 	}
 
+	private fun canUseFullScreenIntent(): Boolean {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+			return true
+		}
+		val notificationManager = getSystemService(NotificationManager::class.java)
+		return notificationManager?.canUseFullScreenIntent() ?: true
+	}
+
+	private fun openFullScreenIntentSettings() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+			val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+				data = Uri.parse("package:$packageName")
+				addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+			}
+			startActivity(intent)
+			return
+		}
+		val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+			data = Uri.parse("package:$packageName")
+			addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+		}
+		startActivity(intent)
+	}
+
+	private fun canDrawOverlays(): Boolean {
+		return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
+	}
+
+	private fun openOverlaySettings() {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+			return
+		}
+		val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+			data = Uri.parse("package:$packageName")
+			addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+		}
+		startActivity(intent)
+	}
+
 	companion object {
 		const val ACTION_SHOW_INCOMING_CALL = "van.merchant.ACTION_SHOW_INCOMING_CALL"
 		const val ACTION_CANCEL_INCOMING_CALL = "van.merchant.ACTION_CANCEL_INCOMING_CALL"
+		const val ACTION_SHOW_ORDER_DECISION = "van.merchant.ACTION_SHOW_ORDER_DECISION"
 		const val EXTRA_CHANNEL_ID = "extra_channel_id"
 		const val EXTRA_CALL_TOKEN = "extra_call_token"
 		const val EXTRA_CALLER_ID = "extra_caller_id"
@@ -80,7 +164,16 @@ class MainActivity : FlutterActivity() {
 		const val EXTRA_CALLER_PHOTO = "extra_caller_photo"
 		const val EXTRA_IS_VIDEO = "extra_is_video"
 		const val EXTRA_APP_WAS_FOREGROUND = "extra_app_was_foreground"
+		const val EXTRA_ORDER_ID = "extra_order_id"
+		const val EXTRA_NOTIFICATION_ID = "extra_notification_id"
+		const val EXTRA_NOTIFICATION_TITLE = "extra_notification_title"
+		const val EXTRA_NOTIFICATION_BODY = "extra_notification_body"
 		private const val APP_CONTROL_CHANNEL = "van.merchant/app_state"
 		private const val METHOD_MOVE_TASK_TO_BACK = "move_task_to_back"
+		private const val METHOD_CAN_USE_FULL_SCREEN_INTENT = "can_use_full_screen_intent"
+		private const val METHOD_OPEN_FULL_SCREEN_INTENT_SETTINGS = "open_full_screen_intent_settings"
+		private const val METHOD_CAN_DRAW_OVERLAYS = "can_draw_overlays"
+		private const val METHOD_OPEN_OVERLAY_SETTINGS = "open_overlay_settings"
+		private const val METHOD_SHOW_INCOMING_CALL_ACTIVITY = "show_incoming_call_activity"
 	}
 }

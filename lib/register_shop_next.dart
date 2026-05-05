@@ -1,8 +1,8 @@
 ﻿import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:myapp/register_screen.dart';
-import 'package:myapp/register_shop_blank.dart';
+import 'package:van1/register_screen.dart';
+import 'package:van1/register_shop_blank.dart';
 
 class RegisterShopNextScreen extends StatefulWidget {
   const RegisterShopNextScreen({super.key});

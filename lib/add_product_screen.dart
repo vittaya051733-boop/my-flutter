@@ -12,6 +12,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import '../models/product_model.dart'; // Import the model
 import 'utils/app_colors.dart';
+import 'utils/shop_profile_resolver.dart';
 import 'storage_helper.dart';
 import 'services/product_cache_service.dart';
 import 'services/media_cache_service.dart';
@@ -76,22 +77,38 @@ class AddProductScreenState extends State<AddProductScreen> {
   final Set<String> _cacheLookupInProgress = {};
 
   bool _isSaving = false;
+  bool _isResolvingServiceType = true;
   double? _uploadProgress;
   String? _uploadStatusText;
 
-  static const int _maxImageCount = 10;
+  static const int _shopMaxImageCount = 10;
+  static const int _defaultMaxImageCount = 1;
   static const Duration _maxVideoDuration = Duration(minutes: 5);
-  static const int _imageCompressionSkipThresholdBytes = 600 * 1024; // 600 KB
   static const int _videoCompressionSkipThresholdBytes = 15 * 1024 * 1024; // 15 MB
+  String? _serviceType;
 
   int get _currentImageCount => _existingImageUrls.length + _newImageFiles.length;
+  bool get _isShopServiceType => _normalizeServiceType(_serviceType) == 'ร้านค้า';
+  bool get _canAddVideo => _isShopServiceType;
+  int get _maxImageCount => _isShopServiceType ? _shopMaxImageCount : _defaultMaxImageCount;
 
   String? _selectedUnit = 'ชิ้น';
   final List<String> _units = ['ชิ้น', 'มัด', 'ถุง', 'แพ็ค', 'กล่อง', 'อื่นๆ'];
+  String? _selectedProductCategory;
+  bool _isFreshProduct = false;
+  bool _isProcessed = false;
+  final List<String> _productCategories = [
+    'ของสด',
+    'อาหารแปรรูป',
+    'สินค้าทั่วไป',
+    'ร้านขายยาและเวชภัณฑ์',
+    'สินค้าเกษตร',
+  ];
 
   @override
   void initState() {
     super.initState();
+    _loadCurrentServiceType();
     if (widget.productToEdit != null) {
       final p = widget.productToEdit!;
       _nameController.text = p.name;
@@ -112,6 +129,11 @@ class AddProductScreenState extends State<AddProductScreen> {
       }
       _selectedUnit = _units.contains(p.unit) ? p.unit : 'อื่นๆ';
       if (_selectedUnit == 'อื่นๆ') _otherUnitController.text = p.unit;
+      _selectedProductCategory = _productCategories.contains(p.productCategory)
+          ? p.productCategory
+          : null;
+      _isFreshProduct = p.isFreshProduct;
+      _isProcessed = p.isProcessed;
         _existingImageUrls = List<String>.from(p.imageUrls);
         _existingThumbnailUrls = p.thumbnailUrls.isNotEmpty
           ? List<String>.from(p.thumbnailUrls)
@@ -142,14 +164,271 @@ class AddProductScreenState extends State<AddProductScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  bool get _isPharmacyCategory => _selectedProductCategory == 'ร้านขายยาและเวชภัณฑ์';
+
+  String get _computedTaxStatus {
+    if (_isPharmacyCategory) {
+      return 'taxable';
+    }
+    return (_isFreshProduct && !_isProcessed) ? 'exempt' : 'taxable';
+  }
+
+  String get _taxStatusLabel => _computedTaxStatus == 'exempt'
+      ? 'สินค้านี้ยกเว้นภาษี'
+      : 'สินค้านี้เสียภาษี';
+
+  Color get _taxStatusColor => _computedTaxStatus == 'exempt'
+      ? const Color(0xFF2E7D32)
+      : const Color(0xFFC62828);
+
+  String get _taxReason {
+    if (_isPharmacyCategory) {
+      return 'หมวดยาและเวชภัณฑ์กำหนดให้เสียภาษีทั้งหมด';
+    }
+    if (_isFreshProduct && !_isProcessed) {
+      return 'ของสดที่ยังไม่ผ่านการแปรรูป';
+    }
+    if (_isFreshProduct && _isProcessed) {
+      return 'ของสดที่ผ่านการแปรรูปแล้ว';
+    }
+    return 'สินค้าไม่ได้เข้ากลุ่มของสดไม่แปรรูป';
+  }
+
+  String? _normalizeServiceType(String? rawValue) {
+    final value = rawValue?.trim();
+    switch (value) {
+      case 'market':
+      case 'ตลาดสด':
+        return 'ตลาด';
+      case 'shop':
+      case 'store':
+        return 'ร้านค้า';
+      case 'restaurant':
+        return 'ร้านอาหาร';
+      case 'pharmacy':
+        return 'ร้านขายยา';
+      case 'agriculture':
+      case 'farm':
+      case 'สินค้าเกษตร':
+        return 'สินค้าเกษตร';
+      default:
+        return value;
+    }
+  }
+
+  String? _readServiceTypeFromData(Map<String, dynamic>? data) {
+    if (data == null) return null;
+    const keys = <String>['serviceType', 'service_type', 'category', 'type'];
+    for (final key in keys) {
+      final value = data[key]?.toString();
+      final normalized = _normalizeServiceType(value);
+      if (normalized != null && normalized.isNotEmpty) {
+        return normalized;
+      }
+    }
+    return null;
+  }
+
+  String? _resolveStringField(Map<String, dynamic>? data, List<String> keys) {
+    if (data == null) return null;
+    for (final key in keys) {
+      final value = data[key]?.toString().trim();
+      if (value != null && value.isNotEmpty) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  double? _parseDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value.trim());
+    return null;
+  }
+
+  Map<String, double?> _extractLocation(Map<String, dynamic>? data) {
+    final dynamic locationValue =
+        data?['location'] ?? data?['coordinates'] ?? data?['geo'] ?? data?['position'] ?? data?['shopLocation'];
+
+    if (locationValue is GeoPoint) {
+      return <String, double?>{
+        'latitude': locationValue.latitude,
+        'longitude': locationValue.longitude,
+      };
+    }
+
+    if (locationValue is Map) {
+      final map = Map<String, dynamic>.from(locationValue);
+      final lat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
+      final lng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
+      return <String, double?>{
+        'latitude': lat,
+        'longitude': lng,
+      };
+    }
+
+    return <String, double?>{
+      'latitude': _parseDouble(data?['latitude'] ?? data?['lat'] ?? data?['y']),
+      'longitude': _parseDouble(data?['longitude'] ?? data?['lng'] ?? data?['long'] ?? data?['x']),
+    };
+  }
+
+  Future<DocumentSnapshot<Map<String, dynamic>>?> _findShopDocInCollection(
+    String collection,
+    String userId,
+    String? email,
+  ) async {
+    final col = FirebaseFirestore.instance.collection(collection);
+
+    final directDoc = await col.doc(userId).get();
+    if (directDoc.exists) {
+      return directDoc;
+    }
+
+    final ownerQuery = await col.where('ownerId', isEqualTo: userId).limit(1).get();
+    if (ownerQuery.docs.isNotEmpty) {
+      return ownerQuery.docs.first;
+    }
+
+    final normalizedEmail = email?.trim().toLowerCase();
+    if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
+      final emailQuery = await col.where('email', isEqualTo: normalizedEmail).limit(1).get();
+      if (emailQuery.docs.isNotEmpty) {
+        return emailQuery.docs.first;
+      }
+      final rawEmailQuery = await col.where('email', isEqualTo: email).limit(1).get();
+      if (rawEmailQuery.docs.isNotEmpty) {
+        return rawEmailQuery.docs.first;
+      }
+    }
+
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _resolveShopProfileData(
+    String userId,
+    String? normalizedServiceType,
+    String? email,
+  ) async {
+    const collectionByType = <String, String>{
+      'ตลาด': 'market_registrations',
+      'ร้านค้า': 'shop_registrations',
+      'ร้านอาหาร': 'restaurant_registrations',
+      'ร้านขายยา': 'pharmacy_registrations',
+      'สินค้าเกษตร': 'agriculture_registrations',
+    };
+
+    const serviceByCollection = <String, String>{
+      'market_registrations': 'ตลาด',
+      'shop_registrations': 'ร้านค้า',
+      'restaurant_registrations': 'ร้านอาหาร',
+      'pharmacy_registrations': 'ร้านขายยา',
+      'agriculture_registrations': 'สินค้าเกษตร',
+    };
+
+    String? hintedServiceType = normalizedServiceType;
+    try {
+      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(userId).get();
+      hintedServiceType = _normalizeServiceType(
+            contractDoc.data()?['serviceType']?.toString(),
+          ) ??
+          hintedServiceType;
+    } catch (_) {
+      // Ignore contract read failures and continue with available hints.
+    }
+
+    final prioritizedCollections = <String>[
+      if (hintedServiceType != null && collectionByType.containsKey(hintedServiceType))
+        collectionByType[hintedServiceType]!,
+      ...collectionByType.values,
+    ];
+
+    final visited = <String>{};
+    for (final collection in prioritizedCollections) {
+      if (!visited.add(collection)) continue;
+      final doc = await _findShopDocInCollection(collection, userId, email);
+      if (doc == null) continue;
+
+      final data = Map<String, dynamic>.from(doc.data() ?? <String, dynamic>{});
+      data.putIfAbsent('serviceType', () => serviceByCollection[collection]);
+      return data;
+    }
+
+    return null;
+  }
+
+  Future<String?> _resolveServiceTypeFromRegistrations(String userId) async {
+    const registrationCollections = <MapEntry<String, String>>[
+      MapEntry<String, String>('market_registrations', 'ตลาด'),
+      MapEntry<String, String>('shop_registrations', 'ร้านค้า'),
+      MapEntry<String, String>('restaurant_registrations', 'ร้านอาหาร'),
+      MapEntry<String, String>('pharmacy_registrations', 'ร้านขายยา'),
+      MapEntry<String, String>('agriculture_registrations', 'สินค้าเกษตร'),
+    ];
+
+    for (final entry in registrationCollections) {
+      final doc = await FirebaseFirestore.instance.collection(entry.key).doc(userId).get();
+      if (!doc.exists) continue;
+      return _readServiceTypeFromData(doc.data()) ?? entry.value;
+    }
+
+    return null;
+  }
+
+  Future<void> _loadCurrentServiceType() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (!mounted) return;
+      setState(() {
+        _serviceType = null;
+        _isResolvingServiceType = false;
+      });
+      return;
+    }
+
+    try {
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      String? serviceType = _readServiceTypeFromData(userDoc.data());
+
+      if (serviceType == null) {
+        final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
+        serviceType = _readServiceTypeFromData(contractDoc.data());
+      }
+
+      serviceType ??= await _resolveServiceTypeFromRegistrations(user.uid);
+
+      if (!mounted) return;
+      setState(() {
+        _serviceType = serviceType;
+        _isResolvingServiceType = false;
+      });
+    } catch (e, stack) {
+      debugPrint('Failed to resolve service type for product media rules: $e');
+      debugPrint('$stack');
+      if (!mounted) return;
+      setState(() {
+        _serviceType = null;
+        _isResolvingServiceType = false;
+      });
+    }
+  }
+
   Future<void> _pickImagesFromGallery() async {
+    if (_isResolvingServiceType) return;
+
     final remainingSlots = _maxImageCount - _currentImageCount;
     if (remainingSlots <= 0) {
       _showSnack('ใส่รูปได้สูงสุด $_maxImageCount รูป');
       return;
     }
 
-    final List<XFile> picks = await _picker.pickMultiImage(imageQuality: 70);
+    final List<XFile> picks;
+    if (_maxImageCount == 1) {
+      final singlePick = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70);
+      picks = singlePick == null ? <XFile>[] : <XFile>[singlePick];
+    } else {
+      picks = await _picker.pickMultiImage(imageQuality: 70);
+    }
     if (picks.isEmpty) return;
 
     final imagesToAdd = picks.take(remainingSlots).toList();
@@ -161,6 +440,8 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   Future<void> _captureImage() async {
+    if (_isResolvingServiceType) return;
+
     if (_currentImageCount >= _maxImageCount) {
       _showSnack('ใส่รูปได้สูงสุด $_maxImageCount รูป');
       return;
@@ -172,6 +453,11 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   Future<void> _pickVideo() async {
+    if (_isResolvingServiceType || !_canAddVideo) {
+      _showSnack('เพิ่มวิดีโอได้เฉพาะประเภทร้านค้า');
+      return;
+    }
+
     final ImageSource? source = await showModalBottomSheet<ImageSource>(
       context: context,
       builder: (context) => SafeArea(
@@ -254,26 +540,43 @@ class AddProductScreenState extends State<AddProductScreen> {
   Future<File> _compressImageFile(File sourceFile, {required bool forThumbnail}) async {
     final suffix = forThumbnail ? 'thumb' : 'full';
     final targetPath = '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix.webp';
+    final minDimension = forThumbnail ? 600 : 1600;
+    final quality = forThumbnail ? 60 : 82;
 
     try {
       final compressed = await FlutterImageCompress.compressAndGetFile(
         sourceFile.path,
         targetPath,
         format: CompressFormat.webp,
-        minWidth: forThumbnail ? 600 : 1600,
-        minHeight: forThumbnail ? 600 : 1600,
-        quality: forThumbnail ? 60 : 82,
+        minWidth: minDimension,
+        minHeight: minDimension,
+        quality: quality,
       );
       if (compressed != null) {
         final compressedFile = File(compressed.path);
-        final originalLength = await sourceFile.length();
-        final compressedLength = await compressedFile.length();
-        if (compressedLength < originalLength || forThumbnail) {
+        if (await compressedFile.exists()) {
           return compressedFile;
         }
       }
     } catch (e, stack) {
       debugPrint('Image compression failed ($suffix): $e');
+      debugPrint('$stack');
+    }
+
+    try {
+      final sourceBytes = await sourceFile.readAsBytes();
+      final compressedBytes = await FlutterImageCompress.compressWithList(
+        sourceBytes,
+        format: CompressFormat.webp,
+        minWidth: minDimension,
+        minHeight: minDimension,
+        quality: quality,
+      );
+      if (compressedBytes.isNotEmpty) {
+        return _writeBytesToTempFile(compressedBytes, suffix: '$suffix.webp');
+      }
+    } catch (e, stack) {
+      debugPrint('Image byte compression failed ($suffix): $e');
       debugPrint('$stack');
     }
 
@@ -291,8 +594,9 @@ class AddProductScreenState extends State<AddProductScreen> {
     Reference ref,
     File file, {
     bool trackProgress = false,
+    SettableMetadata? metadata,
   }) async {
-    final uploadTask = ref.putFile(file);
+    final uploadTask = ref.putFile(file, metadata);
     if (trackProgress) {
       uploadTask.snapshotEvents.listen((event) {
         if (event.totalBytes > 0) {
@@ -314,25 +618,50 @@ class AddProductScreenState extends State<AddProductScreen> {
     return snapshot.ref.getDownloadURL();
   }
 
+  String _extensionFromPath(String path, {required String fallback}) {
+    final fileName = path.split(Platform.pathSeparator).last;
+    final dotIndex = fileName.lastIndexOf('.');
+    if (dotIndex == -1 || dotIndex == fileName.length - 1) {
+      return fallback;
+    }
+    return fileName.substring(dotIndex + 1).toLowerCase();
+  }
+
+  String _imageContentTypeFromExtension(String extension) {
+    switch (extension.toLowerCase()) {
+      case 'webp':
+        return 'image/webp';
+      case 'png':
+        return 'image/png';
+      case 'gif':
+        return 'image/gif';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      default:
+        return 'image/jpeg';
+    }
+  }
+
   Future<_ProductImageUploadResult?> _uploadImageToFirebase(XFile image) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception("User not logged in");
 
       final sanitizedBase = image.name.split('.').first.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}_$sanitizedBase.webp';
 
       final sourceFile = File(image.path);
-      final sourceSize = await sourceFile.length();
-      final shouldCompressOriginal = sourceSize > _imageCompressionSkipThresholdBytes;
-
-      File originalUploadFile = sourceFile;
-      if (shouldCompressOriginal) {
-        originalUploadFile = await _compressImageFile(sourceFile, forThumbnail: false);
-      }
-
-      final thumbnailBase = shouldCompressOriginal ? originalUploadFile : sourceFile;
+      final originalUploadFile = await _compressImageFile(sourceFile, forThumbnail: false);
+      final thumbnailBase = originalUploadFile;
       final compressedThumbnail = await _compressImageFile(thumbnailBase, forThumbnail: true);
+      final originalExtension = _extensionFromPath(originalUploadFile.path, fallback: 'jpg');
+      final thumbnailExtension = _extensionFromPath(compressedThumbnail.path, fallback: 'jpg');
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = '${timestamp}_$sanitizedBase.$originalExtension';
+      final thumbnailFileName = '${timestamp}_${sanitizedBase}_thumb.$thumbnailExtension';
+      final originalMetadata = SettableMetadata(contentType: _imageContentTypeFromExtension(originalExtension));
+      final thumbnailMetadata = SettableMetadata(contentType: _imageContentTypeFromExtension(thumbnailExtension));
 
       final baseRef = StorageHelper.instance
           .ref()
@@ -343,10 +672,12 @@ class AddProductScreenState extends State<AddProductScreen> {
         baseRef.child(fileName),
         originalUploadFile,
         trackProgress: true,
+        metadata: originalMetadata,
       );
       final thumbnailUrl = await _uploadFileWithOptionalProgress(
-        baseRef.child('thumbnails').child(fileName),
+        baseRef.child('thumbnails').child(thumbnailFileName),
         compressedThumbnail,
+        metadata: thumbnailMetadata,
       );
 
       final cachedOriginal = await MediaCacheService.instance.cacheUploadedFile(
@@ -438,10 +769,14 @@ class AddProductScreenState extends State<AddProductScreen> {
         if (thumbBytes != null) {
           rawThumbFile = await _writeBytesToTempFile(thumbBytes, suffix: 'video_thumb.jpg');
           compressedThumbFile = await _compressImageFile(rawThumbFile, forThumbnail: true);
-          final thumbName = '${timestamp}_${sanitizedBase}_thumb.webp';
+          final thumbExtension = _extensionFromPath(compressedThumbFile.path, fallback: 'jpg');
+          final thumbName = '${timestamp}_${sanitizedBase}_thumb.$thumbExtension';
           thumbnailUrl = await _uploadFileWithOptionalProgress(
             refBase.child('thumbnails').child(thumbName),
             compressedThumbFile,
+            metadata: SettableMetadata(
+              contentType: _imageContentTypeFromExtension(thumbExtension),
+            ),
           );
         }
       } catch (thumbError, stack) {
@@ -515,6 +850,13 @@ class AddProductScreenState extends State<AddProductScreen> {
       return;
     }
 
+    if ((_selectedProductCategory ?? '').trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกข้อมูลภาษีสินค้าและเลือกประเภทสินค้า')),
+      );
+      return;
+    }
+
     if (_stockController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')));
       return;
@@ -529,6 +871,8 @@ class AddProductScreenState extends State<AddProductScreen> {
     setState(() { _isSaving = true; });
 
     try {
+      await _backfillProductActiveFieldsForOwner(user.uid);
+
       final List<String> imageUrls = List<String>.from(_existingImageUrls);
       final List<String> thumbnailUrls = List<String>.from(_existingThumbnailUrls);
       if (_newImageFiles.isNotEmpty) {
@@ -599,18 +943,73 @@ class AddProductScreenState extends State<AddProductScreen> {
 
       final productDescription = _productDescriptionController.text.trim();
       final toppingsText = _descriptionController.text.trim();
+      final colors = _colorsController.text
+          .split(',')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      final sizes = _sizesController.text
+          .split(',')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      final resolvedUnit = _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '');
+      final taxStatus = _computedTaxStatus;
+      final normalizedServiceType = _normalizeServiceType(_serviceType);
+      final shopProfileData = await _resolveShopProfileData(user.uid, normalizedServiceType, user.email);
+      if (shopProfileData == null) {
+        throw Exception('ไม่พบข้อมูลร้านจากคอลเลกชันที่ลงทะเบียน กรุณาตรวจสอบข้อมูลการสมัครร้าน');
+      }
+      final shopName =
+          ShopProfileResolver.resolveName(shopProfileData) ??
+          _resolveStringField(shopProfileData, const <String>['shopName', 'name', 'displayName', 'businessName', 'storeName']);
+      final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(shopProfileData);
+      final String shopQrCode = user.uid; // Wallet QR in this app is the shop UID.
+      if (shopName == null || shopName.trim().isEmpty) {
+        throw Exception('ไม่พบชื่อร้านจากข้อมูลที่สมัคร กรุณาแก้ไขข้อมูลร้านก่อนบันทึกสินค้า');
+      }
+      final shopLocation = _extractLocation(shopProfileData);
+      final latitude = shopLocation['latitude'];
+      final longitude = shopLocation['longitude'];
+      if (latitude == null || longitude == null) {
+        throw Exception('ไม่พบพิกัดร้านจากข้อมูลที่สมัคร กรุณาแก้ไขพิกัดร้านก่อนบันทึกสินค้า');
+      }
+      final resolvedProductServiceType =
+          _readServiceTypeFromData(shopProfileData) ?? normalizedServiceType ?? '';
+
+      await _backfillShopInfoForOwner(
+        ownerUid: user.uid,
+        shopName: shopName,
+        shopImageUrl: shopImageUrl,
+        latitude: latitude,
+        longitude: longitude,
+        serviceType: resolvedProductServiceType,
+      );
 
       final productData = <String, dynamic>{
         'name': _nameController.text,
         'description': productDescription.isNotEmpty ? productDescription : toppingsText,
+        'productCategory': _selectedProductCategory,
+        'isFreshProduct': _isFreshProduct,
+        'isProcessed': _isProcessed,
+        'taxStatus': taxStatus,
+        'taxStatusLabel': _taxStatusLabel,
         'price': double.tryParse(_priceController.text) ?? 0.0,
         'stock': int.tryParse(_stockController.text) ?? 0,
         'imageUrls': imageUrls,
         'thumbnailUrls': thumbnailUrls,
-        'colors': _colorsController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
-          'sizes': _sizesController.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList(),
-          'weight': weightValue,
-        'unit': _selectedUnit == 'อื่นๆ' ? _otherUnitController.text : _selectedUnit ?? '',
+        'colors': colors,
+        'sizes': sizes,
+        'weight': weightValue,
+        'unit': resolvedUnit,
+        'shopName': shopName,
+        if (shopImageUrl != null && shopImageUrl.trim().isNotEmpty) 'shopImageUrl': shopImageUrl,
+        'shopQrCode': shopQrCode,
+        'location': <String, double?>{
+          'latitude': latitude,
+          'longitude': longitude,
+        },
+        'serviceType': resolvedProductServiceType,
         'ownerUid': user.uid,
         'updatedAt': FieldValue.serverTimestamp(),
       };
@@ -637,6 +1036,8 @@ class AddProductScreenState extends State<AddProductScreen> {
       DocumentReference<Map<String, dynamic>> docRef;
       if (widget.productToEdit == null) {
         productData['createdAt'] = FieldValue.serverTimestamp();
+        productData['isActive'] = true;
+        productData['activeAt'] = FieldValue.serverTimestamp();
         docRef = await productsRef.add(productData);
       } else {
         final targetId = widget.productToEdit!.id;
@@ -646,6 +1047,41 @@ class AddProductScreenState extends State<AddProductScreen> {
         docRef = productsRef.doc(targetId);
         await docRef.update(productData);
       }
+
+      final specificationsData = <String, dynamic>{
+        'productId': docRef.id,
+        'ownerUid': user.uid,
+        'description': productDescription,
+        'toppings': toppingsText,
+        'productCategory': _selectedProductCategory,
+        'isFreshProduct': _isFreshProduct,
+        'isProcessed': _isProcessed,
+        'taxStatus': taxStatus,
+        'taxStatusLabel': _taxStatusLabel,
+        'taxReason': _taxReason,
+        'colors': colors,
+        'sizes': sizes,
+        'unit': resolvedUnit,
+        'weight': weightValue,
+        'headings': <String, String>{
+          'description': 'คำอธิบายสินค้า',
+          'toppings': 'ท็อปปิ้ง',
+          'productCategory': 'ประเภทสินค้า',
+          'isFreshProduct': 'เป็นของสด',
+          'isProcessed': 'ผ่านการแปรรูปแล้ว',
+          'taxStatus': 'สถานะภาษี',
+          'colors': 'สี',
+          'sizes': 'ขนาด',
+          'unit': 'หน่วย',
+          'weight': 'น้ำหนัก',
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      if (widget.productToEdit == null) {
+        specificationsData['createdAt'] = FieldValue.serverTimestamp();
+      }
+
+      await docRef.collection('specifications').doc('main').set(specificationsData, SetOptions(merge: true));
 
       final latestSnapshot = await docRef.get();
       final latestData = latestSnapshot.data();
@@ -672,6 +1108,148 @@ class AddProductScreenState extends State<AddProductScreen> {
           _uploadStatusText = null;
         });
       }
+    }
+  }
+
+  Future<void> _backfillShopInfoForOwner({
+    required String ownerUid,
+    required String shopName,
+    String? shopImageUrl,
+    required double latitude,
+    required double longitude,
+    required String serviceType,
+  }) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('products')
+          .where('ownerUid', isEqualTo: ownerUid)
+          .get();
+
+      if (snapshot.docs.isEmpty) return;
+
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      int operationCount = 0;
+
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final Map<String, dynamic> updates = <String, dynamic>{};
+
+        final existingShopName = (data['shopName'] ?? '').toString().trim();
+        if (existingShopName != shopName) {
+          updates['shopName'] = shopName;
+        }
+
+        final normalizedShopImageUrl = shopImageUrl?.trim();
+        final existingShopImageUrl = (data['shopImageUrl'] ?? '').toString().trim();
+        if (normalizedShopImageUrl != null && normalizedShopImageUrl.isNotEmpty) {
+          if (existingShopImageUrl != normalizedShopImageUrl) {
+            updates['shopImageUrl'] = normalizedShopImageUrl;
+          }
+        }
+
+        final dynamic rawLocation = data['location'];
+        double? existingLat;
+        double? existingLng;
+        if (rawLocation is GeoPoint) {
+          existingLat = rawLocation.latitude;
+          existingLng = rawLocation.longitude;
+        } else if (rawLocation is Map) {
+          final map = Map<String, dynamic>.from(rawLocation);
+          existingLat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
+          existingLng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
+        }
+
+        final bool needsLocationUpdate =
+            existingLat == null ||
+            existingLng == null ||
+            (existingLat - latitude).abs() > 0.0000001 ||
+            (existingLng - longitude).abs() > 0.0000001;
+        if (needsLocationUpdate) {
+          updates['location'] = <String, double>{
+            'latitude': latitude,
+            'longitude': longitude,
+          };
+        }
+
+        final existingServiceType = (data['serviceType'] ?? '').toString().trim();
+        if (serviceType.isNotEmpty && existingServiceType != serviceType) {
+          updates['serviceType'] = serviceType;
+        }
+
+        if (updates.isEmpty) {
+          continue;
+        }
+
+        updates['updatedAt'] = FieldValue.serverTimestamp();
+        batch.update(doc.reference, updates);
+        operationCount++;
+
+        if (operationCount >= 450) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          operationCount = 0;
+        }
+      }
+
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Failed to backfill shop info in products: $e');
+    }
+  }
+
+  Future<void> _backfillProductActiveFieldsForOwner(String ownerUid) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('products')
+          .where('ownerUid', isEqualTo: ownerUid)
+          .get();
+
+      if (snapshot.docs.isEmpty) return;
+
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      int operationCount = 0;
+
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final Map<String, dynamic> updates = <String, dynamic>{};
+        final dynamic isActiveRaw = data['isActive'];
+        final bool isActive = isActiveRaw is bool ? isActiveRaw : true;
+
+        if (isActiveRaw is! bool) {
+          updates['isActive'] = isActive;
+        }
+
+        if (isActive) {
+          if (data['activeAt'] == null) {
+            updates['activeAt'] = FieldValue.serverTimestamp();
+          }
+          if (data.containsKey('inactiveAt') && data['inactiveAt'] != null) {
+            updates['inactiveAt'] = FieldValue.delete();
+          }
+        } else if (data['inactiveAt'] == null) {
+          updates['inactiveAt'] = FieldValue.serverTimestamp();
+        }
+
+        if (updates.isEmpty) continue;
+
+        updates['updatedAt'] = FieldValue.serverTimestamp();
+        batch.update(doc.reference, updates);
+        operationCount++;
+
+        if (operationCount >= 450) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          operationCount = 0;
+        }
+      }
+
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Failed to backfill active fields in products: $e');
     }
   }
 
@@ -728,6 +1306,8 @@ class AddProductScreenState extends State<AddProductScreen> {
                 Expanded(child: _buildTextField(label: 'สต็อกทั้งหมด', controller: _stockController, keyboardType: TextInputType.number)),
               ],
             ),
+            const SizedBox(height: 24),
+            _buildTaxSection(),
             const SizedBox(height: 32),
 
             OutlinedButton.icon(
@@ -773,6 +1353,7 @@ class AddProductScreenState extends State<AddProductScreen> {
   Widget _buildMediaSection() {
     final bool hasImages = _currentImageCount > 0;
     final bool hasVideo = _videoFile != null || (_existingVideoUrl?.isNotEmpty ?? false);
+    final bool showVideoControls = _canAddVideo || hasVideo;
 
     final Widget imageContent = hasImages
         ? _buildImagePreviewContent()
@@ -782,13 +1363,13 @@ class AddProductScreenState extends State<AddProductScreen> {
           );
 
     final Widget videoContent = hasVideo
-        ? _buildVideoPreviewContent()
-        : _buildPlaceholderSquare(
-            icon: Icons.videocam_outlined,
-            label: 'ยังไม่มีวิดีโอ',
-          );
+      ? _buildVideoPreviewContent()
+      : _buildPlaceholderSquare(
+        icon: Icons.videocam_outlined,
+        label: 'ยังไม่มีวิดีโอ',
+        );
 
-    final bool showCombinedRow = !hasImages && !hasVideo;
+    final bool showCombinedRow = !hasImages && !hasVideo && showVideoControls;
 
     return Container(
       width: double.infinity,
@@ -806,22 +1387,36 @@ class AddProductScreenState extends State<AddProductScreen> {
             runSpacing: 12,
             children: [
               ElevatedButton.icon(
-                onPressed: _captureImage,
+                onPressed: _isResolvingServiceType ? null : _captureImage,
                 icon: const Icon(Icons.photo_camera_outlined),
                 label: const Text('ถ่ายรูป'),
               ),
               ElevatedButton.icon(
-                onPressed: _pickImagesFromGallery,
+                onPressed: _isResolvingServiceType ? null : _pickImagesFromGallery,
                 icon: const Icon(Icons.photo_library_outlined),
                 label: Text('เลือกรูป (${_currentImageCount}/$_maxImageCount)'),
               ),
-              ElevatedButton.icon(
-                onPressed: _pickVideo,
-                icon: const Icon(Icons.videocam_outlined),
-                label: const Text('เพิ่มวิดีโอ'),
-              ),
+              if (_canAddVideo)
+                ElevatedButton.icon(
+                  onPressed: _isResolvingServiceType ? null : _pickVideo,
+                  icon: const Icon(Icons.videocam_outlined),
+                  label: const Text('เพิ่มวิดีโอ'),
+                ),
             ],
           ),
+          if (_isResolvingServiceType) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'กำลังตรวจสอบประเภทร้านเพื่อกำหนดสิทธิ์การเพิ่มรูปและวิดีโอ',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ] else if (!_isShopServiceType) ...[
+            const SizedBox(height: 8),
+            Text(
+              'ประเภทร้าน ${_serviceType ?? 'ทั่วไป'} เพิ่มรูปสินค้าได้ 1 รูป และไม่รองรับวิดีโอ',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
           const SizedBox(height: 16),
           if (showCombinedRow)
             Row(
@@ -839,14 +1434,16 @@ class AddProductScreenState extends State<AddProductScreen> {
                 alignment: Alignment.centerLeft,
                 child: SizedBox(width: 120, child: imageContent),
               ),
-            const SizedBox(height: 16),
-            if (hasVideo)
-              videoContent
-            else
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SizedBox(width: 120, child: videoContent),
-              ),
+            if (showVideoControls) ...[
+              const SizedBox(height: 16),
+              if (hasVideo)
+                videoContent
+              else
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(width: 120, child: videoContent),
+                ),
+            ],
           ],
         ],
       ),
@@ -1115,6 +1712,119 @@ class AddProductScreenState extends State<AddProductScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildTaxSection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('ภาษีสินค้า', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          const Text('ประเภทสินค้า', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            value: _selectedProductCategory,
+            items: _productCategories.map((category) {
+              return DropdownMenuItem<String>(
+                value: category,
+                child: Text(category),
+              );
+            }).toList(),
+            onChanged: (value) {
+              setState(() {
+                _selectedProductCategory = value;
+                if (_isPharmacyCategory) {
+                  _isFreshProduct = false;
+                  _isProcessed = false;
+                }
+              });
+            },
+            decoration: InputDecoration(
+              hintText: 'เลือกประเภทสินค้า',
+              helperText: 'จำเป็นต้องเลือกก่อนบันทึกสินค้า',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: Colors.grey.shade400),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            ),
+          ),
+          if (_isPharmacyCategory) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'หมวดร้านขายยาและเวชภัณฑ์จะถูกคำนวณเป็นสินค้าที่เสียภาษีอัตโนมัติ',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+          const SizedBox(height: 12),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('เป็นของสด'),
+            subtitle: const Text('เช่น ผัก ผลไม้ เนื้อสด อาหารทะเลสด'),
+            value: _isFreshProduct,
+            onChanged: _isPharmacyCategory ? null : (value) {
+              setState(() {
+                _isFreshProduct = value;
+              });
+            },
+            activeColor: AppColors.accent,
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('ผ่านการแปรรูปแล้ว'),
+            subtitle: const Text('เช่น หั่น หมัก ปรุง บรรจุพร้อมขาย หรือแปรรูปจากสภาพสด'),
+            value: _isProcessed,
+            onChanged: _isPharmacyCategory ? null : (value) {
+              setState(() {
+                _isProcessed = value;
+              });
+            },
+            activeColor: AppColors.accent,
+          ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: _taxStatusColor.withAlpha(18),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: _taxStatusColor.withAlpha(90)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _taxStatusLabel,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: _taxStatusColor,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _taxReason,
+                  style: const TextStyle(fontSize: 13, color: Colors.black87),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

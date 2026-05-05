@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -33,6 +34,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   UserProfile? _currentProfile;
   bool _sending = false;
   bool _uploading = false;
+  bool _startingCall = false;
+  bool _markingAsRead = false;
   String? _error;
 
   String get _chatId => _chatService.chatIdFor(
@@ -60,9 +63,27 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     }
     final profile = await _friendService.getProfile(user.uid) ??
         await _friendService.ensureCurrentUserProfile(user);
+    if (profile == null) {
+      if (!mounted) return;
+      setState(() => _error = 'ไม่พบข้อมูลผู้ใช้ปัจจุบัน');
+      return;
+    }
+
+    try {
+      await _chatService.ensureChatAvailable(
+        sender: profile,
+        target: widget.friendProfile,
+      );
+      await _chatService.purgeExpiredMessages(_chatId);
+      await _chatService.markChatAsRead(owner: profile, friend: widget.friendProfile);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'ไม่สามารถเริ่มห้องแชทได้: $e');
+      return;
+    }
+
     if (!mounted) return;
     setState(() => _currentProfile = profile);
-    await _chatService.purgeExpiredMessages(_chatId);
   }
 
   @override
@@ -94,12 +115,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           IconButton(
             tooltip: 'โทรด้วยเสียง',
             icon: const Icon(Icons.call_outlined),
-            onPressed: () => _startCall(isVideo: false),
+            onPressed: _startingCall ? null : () => _startCall(isVideo: false),
           ),
           IconButton(
             tooltip: 'วิดีโอคอล',
             icon: const Icon(Icons.videocam_outlined),
-            onPressed: () => _startCall(isVideo: true),
+            onPressed: _startingCall ? null : () => _startCall(isVideo: true),
           ),
         ],
       ),
@@ -128,6 +149,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           return const Center(child: CircularProgressIndicator());
         }
         final messages = snapshot.data ?? const [];
+        _scheduleMarkAsRead(profile);
         if (messages.isEmpty) {
           return const Center(child: Text('เริ่มต้นสนทนาก่อนเลย'));
         }
@@ -143,6 +165,20 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         );
       },
     );
+  }
+
+  void _scheduleMarkAsRead(UserProfile profile) {
+    if (_markingAsRead) {
+      return;
+    }
+    _markingAsRead = true;
+    unawaited(() async {
+      try {
+        await _chatService.markChatAsRead(owner: profile, friend: widget.friendProfile);
+      } finally {
+        _markingAsRead = false;
+      }
+    }());
   }
 
   Widget _buildComposer(UserProfile profile) {
@@ -307,6 +343,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   Future<void> _startCall({required bool isVideo}) async {
+    if (_startingCall) return;
     final caller = _currentProfile;
     if (caller == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -314,6 +351,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       );
       return;
     }
+
+    setState(() => _startingCall = true);
 
     try {
       // 1. เรียก Cloud Function ผ่าน NotificationService เพื่อสร้าง token และส่ง notification
@@ -344,6 +383,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
             channelName: callData['channelId'] as String? ?? _chatId, // ใช้ channelId จาก function
             isVideo: isVideo,
             targetProfile: targetProfile,
+            appIdOverride: callData['appId'] as String?,
             tokenOverride: callData['token'] as String?, // ใช้ token จาก function
             isIncoming: false,
           ),
@@ -367,6 +407,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('เกิดข้อผิดพลาดในการเริ่มการโทร: $e')),
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _startingCall = false);
       }
     }
   }

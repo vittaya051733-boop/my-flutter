@@ -3,6 +3,19 @@
     "default": "van-merchant",
     "vanmerchant": "van-merchant"
   },
-  "targets": {},
+  "targets": {
+    "van-merchant": {
+      "hosting": {
+        "van1": [
+          "van1"
+        ]
+      },
+      "storage": {
+        "van1": [
+          "van-merchant-van1-storage-802503541368"
+        ]
+      }
+    }
+  },
   "etags": {}
 }

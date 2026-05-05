@@ -1,4 +1,62 @@
-# Firestore Schema สำหรับระบบ Orders
+# Firestore Schema สำหรับระบบ Orders และ Products
+
+## Collection: products
+
+```
+products/
+  {productId}/
+    - name: string
+    - description: string
+    - toppings: string?
+    - productCategory: string?
+    - isFreshProduct: boolean
+    - isProcessed: boolean
+    - taxStatus: string (exempt | taxable)
+    - price: number
+    - stock: number
+    - imageUrls: array<string>
+    - thumbnailUrls: array<string>
+    - colors: array<string>
+    - sizes: array<string>
+    - unit: string
+    - weight: string
+    - videoUrl: string?
+    - videoThumbnailUrl: string?
+    - ownerUid: string
+    - createdAt: timestamp
+    - updatedAt: timestamp
+```
+
+## Collection: specifications (subcollection ของ products)
+
+```
+products/{productId}/specifications/
+  main/
+    - productId: string
+    - ownerUid: string
+    - description: string
+    - toppings: string
+    - productCategory: string?
+    - isFreshProduct: boolean
+    - isProcessed: boolean
+    - taxStatus: string
+    - taxStatusLabel: string
+    - taxReason: string
+    - colors: array<string>
+    - sizes: array<string>
+    - unit: string
+    - weight: string
+    - headings: map {
+        description: 'คำอธิบายสินค้า'
+        toppings: 'ท็อปปิ้ง'
+        colors: 'สี'
+        sizes: 'ขนาด'
+        unit: 'หน่วย'
+        weight: 'น้ำหนัก'
+      }
+    - createdAt: timestamp
+    - updatedAt: timestamp
+```
 
 ## Collection: orders
 

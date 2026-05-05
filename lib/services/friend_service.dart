@@ -19,7 +19,6 @@ class FriendService {
     'shop_registrations',
     'restaurant_registrations',
     'pharmacy_registrations',
-    'other_registrations',
   ];
 
   Stream<List<FriendPreview>> watchFriends(String ownerId) {
@@ -29,52 +28,38 @@ class FriendService {
         .collection('friends')
         .orderBy('lastActivity', descending: true);
 
-    return ref.snapshots().map(
-      (snapshot) => snapshot.docs
-          .map((doc) => FriendPreview.fromSnapshot(doc))
-          .toList(),
+    return ref.snapshots().asyncMap(
+      (snapshot) async => Future.wait(
+        snapshot.docs.map((doc) => _buildFriendPreview(ownerId, doc)),
+      ),
     );
   }
 
   Future<UserProfile?> ensureCurrentUserProfile(User user) async {
     final docRef = _firestore.collection('users').doc(user.uid);
     final snapshot = await docRef.get();
-    if (snapshot.exists && snapshot.data()?['displayName'] != null) {
-      return UserProfile.fromSnapshot(snapshot);
+    final profile = await _resolveCanonicalProfile(
+      user.uid,
+      userData: snapshot.data(),
+      fallbackDisplayName: user.displayName ?? user.email ?? 'ร้านของฉัน',
+      fallbackPhotoUrl: user.photoURL,
+      fallbackPhoneNumber: user.phoneNumber,
+    );
+    if (profile == null) {
+      return null;
     }
-
-    final data = await _loadShopData(user.uid);
-    final normalizedPhone = _normalizePhone(
-      (data?['phone'] ?? data?['phoneNumber'] ?? user.phoneNumber ?? '') as String,
-    );
-
-    final bool profileCompleted = (data?['isProfileCompleted'] as bool?) ?? false;
-    final profile = UserProfile(
-      uid: user.uid,
-      displayName: _readDisplayName(data, fallback: user.displayName ?? user.email ?? 'ร้านของฉัน'),
-      phoneNumber: normalizedPhone,
-      photoUrl: _readPhotoUrl(data) ?? user.photoURL,
-      serviceType: (data?['serviceType'] as String?) ?? (data?['collection'] as String?),
-      isOfficial: (data?['isOfficialAccount'] as bool?) ?? false,
-      profileCompleted: profileCompleted,
-    );
-
-    await docRef.set(
-      <String, dynamic>{
-        ...profile.toFirestore(),
-        if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
-          'phoneNumber': profile.phoneNumber,
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    await _syncUserProfileDoc(docRef, snapshot.data(), profile);
     return profile;
   }
 
   Future<UserProfile?> getProfile(String uid) async {
     final snapshot = await _firestore.collection('users').doc(uid).get();
-    if (!snapshot.exists) return null;
-    return UserProfile.fromSnapshot(snapshot);
+    final profile = await _resolveCanonicalProfile(uid, userData: snapshot.data());
+    if (profile == null) {
+      return null;
+    }
+    await _syncUserProfileDoc(snapshot.reference, snapshot.data(), profile);
+    return profile;
   }
 
   Future<UserProfile?> findUserByPhone(String rawInput) async {
@@ -454,15 +439,179 @@ class FriendService {
 
   Future<Map<String, dynamic>?> _loadShopData(String uid) async {
     for (final collection in _shopCollections) {
-      final snapshot = await _firestore.collection(collection).doc(uid).get();
-      if (snapshot.exists) {
-        final data = snapshot.data();
+      final directSnapshot = await _firestore.collection(collection).doc(uid).get();
+      if (directSnapshot.exists) {
+        final data = directSnapshot.data();
         if (data != null) {
-          return <String, dynamic>{...data, 'collection': collection};
+          return <String, dynamic>{
+            ...data,
+            'collection': collection,
+            'registrationDocId': directSnapshot.id,
+          };
+        }
+      }
+
+      final ownerQuery = await _firestore
+          .collection(collection)
+          .where('ownerId', isEqualTo: uid)
+          .limit(1)
+          .get();
+      if (ownerQuery.docs.isNotEmpty) {
+        final ownerDoc = ownerQuery.docs.first;
+        final data = ownerDoc.data();
+        if (data.isNotEmpty) {
+          return <String, dynamic>{
+            ...data,
+            'collection': collection,
+            'registrationDocId': ownerDoc.id,
+          };
         }
       }
     }
     return null;
+  }
+
+  Future<FriendPreview> _buildFriendPreview(
+    String ownerId,
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) async {
+    final data = doc.data() ?? const <String, dynamic>{};
+    final Timestamp? ts = data['lastActivity'] as Timestamp?;
+    final profile = await _resolveCanonicalProfile(
+          data['uid']?.toString() ?? doc.id,
+          userData: data,
+          fallbackDisplayName: (data['displayName'] ?? data['name'] ?? 'ผู้ใช้ใหม่').toString(),
+          fallbackPhotoUrl: (data['photoUrl'] ?? data['imageUrl'] ?? data['shopImageUrl']) as String?,
+          fallbackPhoneNumber: (data['phoneNumber'] ?? data['phone']) as String?,
+        ) ??
+        UserProfile.fromMap(data['uid']?.toString() ?? doc.id, data);
+
+    await _syncFriendPreviewDocIfNeeded(ownerId, doc.id, data, profile);
+
+    return FriendPreview(
+      profile: profile,
+      lastMessage: (data['lastMessage'] as String?) ?? 'แตะเพื่อเริ่มสนทนา',
+      unreadCount: (data['unreadCount'] as int?) ?? 0,
+      lastActivity: ts?.toDate(),
+      isMuted: (data['isMuted'] as bool?) ?? false,
+    );
+  }
+
+  Future<UserProfile?> _resolveCanonicalProfile(
+    String uid, {
+    Map<String, dynamic>? userData,
+    String? fallbackDisplayName,
+    String? fallbackPhotoUrl,
+    String? fallbackPhoneNumber,
+  }) async {
+    final resolvedUserData = userData ?? await _loadUserData(uid);
+    final shopData = await _loadShopData(uid);
+    if (resolvedUserData == null && shopData == null) {
+      return null;
+    }
+
+    final displayName = _readDisplayName(
+      shopData,
+      fallback: _readDisplayName(
+        resolvedUserData,
+        fallback: fallbackDisplayName ?? 'ผู้ใช้ใหม่',
+      ),
+    );
+    final photoUrl = _readPhotoUrl(shopData) ?? _readPhotoUrl(resolvedUserData) ?? fallbackPhotoUrl;
+    final phoneNumber = _normalizePhone(
+      (shopData?['phone'] ??
+              shopData?['phoneNumber'] ??
+              resolvedUserData?['phoneNumber'] ??
+              resolvedUserData?['phone'] ??
+              fallbackPhoneNumber ??
+              '')
+          .toString(),
+    );
+    final serviceType = (shopData?['serviceType'] as String?) ??
+        (resolvedUserData?['serviceType'] as String?) ??
+        (shopData?['collection'] as String?);
+
+    return UserProfile(
+      uid: uid,
+      displayName: displayName,
+      phoneNumber: phoneNumber.isEmpty ? null : phoneNumber,
+      photoUrl: photoUrl,
+      serviceType: serviceType,
+      isOfficial: (shopData?['isOfficialAccount'] as bool?) ??
+          (resolvedUserData?['isOfficial'] as bool?) ??
+          false,
+      profileCompleted: (shopData?['isProfileCompleted'] as bool?) ??
+          (resolvedUserData?['profileCompleted'] as bool?) ??
+          false,
+    );
+  }
+
+  Future<Map<String, dynamic>?> _loadUserData(String uid) async {
+    final snapshot = await _firestore.collection('users').doc(uid).get();
+    return snapshot.data();
+  }
+
+  Future<void> _syncUserProfileDoc(
+    DocumentReference<Map<String, dynamic>> docRef,
+    Map<String, dynamic>? existingData,
+    UserProfile profile,
+  ) async {
+    if (!_shouldSyncProfile(existingData, profile)) {
+      return;
+    }
+    await docRef.set(
+      <String, dynamic>{
+        ...profile.toFirestore(),
+        if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
+          'phoneNumber': profile.phoneNumber,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+  }
+
+  Future<void> _syncFriendPreviewDocIfNeeded(
+    String ownerId,
+    String friendId,
+    Map<String, dynamic>? existingData,
+    UserProfile profile,
+  ) async {
+    if (!_shouldSyncProfile(existingData, profile)) {
+      return;
+    }
+    await _firestore
+        .collection('users')
+        .doc(ownerId)
+        .collection('friends')
+        .doc(friendId)
+        .set(
+      <String, dynamic>{
+        ...profile.toFirestore(),
+        'uid': profile.uid,
+        if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
+          'phoneNumber': profile.phoneNumber,
+      },
+      SetOptions(merge: true),
+    );
+  }
+
+  bool _shouldSyncProfile(Map<String, dynamic>? existingData, UserProfile profile) {
+    if (existingData == null || existingData.isEmpty) {
+      return true;
+    }
+    final existingDisplayName = (existingData['displayName'] ?? existingData['name'] ?? '').toString().trim();
+    final existingPhotoUrl = (existingData['photoUrl'] ?? existingData['imageUrl'] ?? existingData['shopImageUrl'] ?? '')
+        .toString()
+        .trim();
+    final existingServiceType = (existingData['serviceType'] ?? existingData['type'] ?? '').toString().trim();
+    final existingPhone = _normalizePhone(
+      (existingData['phoneNumber'] ?? existingData['phone'] ?? '').toString(),
+    );
+
+    return existingDisplayName != profile.displayName.trim() ||
+        existingPhotoUrl != (profile.photoUrl ?? '').trim() ||
+        existingServiceType != (profile.serviceType ?? '').trim() ||
+        existingPhone != (profile.phoneNumber ?? '');
   }
 
   static String _readDisplayName(Map<String, dynamic>? data, {required String fallback}) {

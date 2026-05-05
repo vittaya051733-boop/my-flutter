@@ -8,6 +8,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'register_shop_next.dart';
 import 'contract_screen.dart';
+import 'services/email_otp_service.dart';
 import 'services/notification_service.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
@@ -244,24 +245,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
           return;
         } else {
           try {
-            await user.sendEmailVerification();
-            debugPrint('📧 ส่งอีเมลยืนยันไปที่: ${user.email}');
+            await EmailOtpService.instance.sendOtp();
+            debugPrint('📧 ส่ง OTP ยืนยันอีเมลไปที่: ${user.email}');
           } catch (emailError) {
-            debugPrint('❌ เกิดข้อผิดพลาดในการส่งอีเมล: $emailError');
+            debugPrint('❌ เกิดข้อผิดพลาดในการส่ง OTP อีเมล: $emailError');
             debugPrint('Rollback: กำลังลบบัญชีที่สร้างไม่สำเร็จ...');
             
-            // Rollback: Delete the user if email sending fails.
+            // Rollback: Delete the user if OTP sending fails.
             await user.delete();
             debugPrint('🗑️ ลบบัญชี ${user.uid} เรียบร้อยแล้ว');
 
             // Throw an exception to be caught by the outer catch block.
-            throw Exception('การสร้างบัญชีล้มเหลวเนื่องจากไม่สามารถส่งอีเมลยืนยันได้ กรุณาลองใหม่อีกครั้ง');
+            throw Exception('การสร้างบัญชีล้มเหลวเนื่องจากไม่สามารถส่ง OTP ยืนยันอีเมลได้ กรุณาลองใหม่อีกครั้ง');
           }
         }
       }
-      
-      // Wait a moment to ensure email is sent before signing out
-      await Future.delayed(const Duration(seconds: 2));
       
       if (!mounted) return;
       
@@ -404,13 +402,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
     
     if (!mounted) return;
     
-    // ส่งอีเมลยืนยัน (ถ้าเป็น Google ที่มีอีเมล)
+    // ส่ง OTP ยืนยันอีเมล (ถ้าเป็น Google ที่มีอีเมลและยังไม่ verified)
     if (user.email != null && !user.emailVerified) {
       try {
-        await user.sendEmailVerification();
-        debugPrint('📧 ส่งอีเมลยืนยันไปที่: ${user.email}');
+        await EmailOtpService.instance.sendOtp();
+        debugPrint('📧 ส่ง OTP ยืนยันอีเมลไปที่: ${user.email}');
       } catch (e) {
-        debugPrint('⚠️ ไม่สามารถส่งอีเมลยืนยัน: $e');
+        debugPrint('⚠️ ไม่สามารถส่ง OTP ยืนยันอีเมล: $e');
       }
     }
     

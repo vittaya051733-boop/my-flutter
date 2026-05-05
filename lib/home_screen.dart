@@ -28,23 +28,14 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-      int _notificationCount = 3; // ตัวอย่างจำนวนแจ้งเตือนใหม่
-      List<String> _notificationDetails = [
-        'มีออเดอร์ใหม่เข้ามา',
-        'ลูกค้าส่งข้อความ',
-        'ระบบแจ้งเตือนโปรโมชั่น',
-      ];
-    String? _activeNotification;
-    void showOverlayNotification(String message) {
-      setState(() {
-        _activeNotification = message;
-      });
-      Future.delayed(const Duration(seconds: 5), () {
-        if (mounted && _activeNotification == message) {
-          setState(() => _activeNotification = null);
-        }
-      });
-    }
+  static const String _shopOperationsCollection = 'shop_operations';
+  static const String _notificationTargetApp = 'van1';
+
+  int _notificationCount = 0;
+  String? _activeNotification;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _notificationSubscription;
+  Set<String> _knownNotificationIds = <String>{};
+  bool _didPrimeNotifications = false;
   static const int _tabCount = 9;
 
   late final TabController _tabController;
@@ -60,6 +51,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   String? _currentUserId;
   int _unreadChatCount = 0;
 
+  void showOverlayNotification(String message) {
+    setState(() {
+      _activeNotification = message;
+    });
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted && _activeNotification == message) {
+        setState(() => _activeNotification = null);
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -68,6 +70,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
     _listenUnreadChats();
+    _listenUnreadAppNotifications();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -85,6 +88,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
       _currentUserId = user.uid;
       _hydrateCachedProducts(user.uid);
+      unawaited(_ensureShopOperationsDoc(user.uid));
 
       final collectionsToCheck = await _collectionsToCheck(user);
       if (collectionsToCheck.isEmpty) return;
@@ -122,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           _homeProductIds = homeIds;
           _pages[0] = _buildPage(0);
         });
+        unawaited(_syncShopOperationsStatus(user.uid, isOpen));
         _updateHomeProductsCache();
 
         if (imageUrl != null && imageUrl.isNotEmpty) {
@@ -142,7 +147,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     FirebaseFirestore.instance
-        .collection('chatRooms')
+        .collection('chats')
         .where('participants', arrayContains: user.uid)
         .snapshots()
         .listen((snapshot) {
@@ -162,6 +167,58 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       if (mounted) {
         setState(() => _unreadChatCount = totalUnread);
       }
+    });
+  }
+
+  void _listenUnreadAppNotifications() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return;
+    }
+
+    _notificationSubscription?.cancel();
+    _notificationSubscription = FirebaseFirestore.instance
+        .collection('app_notifications')
+        .where('targetApp', isEqualTo: _notificationTargetApp)
+        .where('recipientUid', isEqualTo: user.uid)
+        .where('read', isEqualTo: false)
+        .snapshots()
+        .listen((snapshot) {
+      final docs = snapshot.docs.toList(growable: false)
+        ..sort((a, b) {
+          final aTime = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+          final bTime = (b.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+          return bTime.compareTo(aTime);
+        });
+
+      final currentIds = docs.map((doc) => doc.id).toSet();
+      final newDocs = _didPrimeNotifications
+          ? docs.where((doc) => !_knownNotificationIds.contains(doc.id)).toList(growable: false)
+          : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+
+      if (mounted) {
+        setState(() {
+          _notificationCount = docs.length;
+        });
+      }
+
+      if (newDocs.isNotEmpty) {
+        final latest = newDocs.first.data();
+        final title = (latest['title'] as String?)?.trim();
+        final body = (latest['body'] as String?)?.trim();
+        final overlayMessage = [
+          if (title != null && title.isNotEmpty) title,
+          if (body != null && body.isNotEmpty) body,
+        ].join(' - ');
+        if (overlayMessage.isNotEmpty) {
+          showOverlayNotification(overlayMessage);
+        }
+      }
+
+      _knownNotificationIds = currentIds;
+      _didPrimeNotifications = true;
+    }, onError: (error) {
+      debugPrint('Failed to listen app notifications: $error');
     });
   }
 
@@ -229,6 +286,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       });
       return;
     }
+    if (!_isShopOpen) {
+      setState(() {
+        _homeProductsFuture = null;
+        _localCachedProducts = const [];
+      });
+      return;
+    }
     setState(() {
       _homeProductsFuture = _fetchHomeProducts(userId, _homeProductIds);
       _pages[0] = _buildPage(0);
@@ -283,12 +347,62 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Future<void> _saveShopOpenStatus(bool isOpen) async {
     try {
       final docRef = await _getOrFindShopDocRef();
-      if (docRef == null) return;
-      await docRef.update({'isOpen': isOpen});
-      debugPrint('Updated isOpen=$isOpen for ${docRef.path}');
+      if (docRef != null) {
+        await docRef.set({'isOpen': isOpen}, SetOptions(merge: true));
+      }
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await _syncShopOperationsStatus(user.uid, isOpen);
+        await _syncProductActiveFlagsForShop(user.uid, isOpen: isOpen);
+      }
+      _updateHomeProductsCache();
+      debugPrint('Updated isOpen=$isOpen');
     } catch (e) {
       debugPrint('Failed to save shop open status: $e');
     }
+  }
+
+  Future<void> _ensureShopOperationsDoc(String shopId) async {
+    final docRef = FirebaseFirestore.instance
+        .collection(_shopOperationsCollection)
+        .doc(shopId);
+    final snapshot = await docRef.get();
+    if (snapshot.exists) return;
+
+    await docRef.set({
+      'shopId': shopId,
+      'isOpen': _isShopOpen,
+      'openProductIds': _isShopOpen ? _homeProductIds.toList() : <String>[],
+      'openProductCount': _isShopOpen ? _homeProductIds.length : 0,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> _syncShopOperationsStatus(String shopId, bool isOpen) async {
+    final List<String> openProductIds =
+        isOpen ? await _fetchCurrentShopProductIds(shopId) : <String>[];
+
+    await FirebaseFirestore.instance
+        .collection(_shopOperationsCollection)
+        .doc(shopId)
+        .set({
+      'shopId': shopId,
+      'isOpen': isOpen,
+      'openProductIds': openProductIds,
+      'openProductCount': openProductIds.length,
+      'openProductsUpdatedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<List<String>> _fetchCurrentShopProductIds(String shopId) async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('products')
+        .where('ownerUid', isEqualTo: shopId)
+        .get();
+
+    return snapshot.docs.map((doc) => doc.id).toList(growable: false);
   }
 
   Future<void> _saveHomeProductIds(Set<String> ids) async {
@@ -296,9 +410,75 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       final docRef = await _getOrFindShopDocRef();
       if (docRef == null) return;
       await docRef.update({'homeProductIds': ids.toList()});
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await _syncProductActiveFlagsForShop(user.uid, isOpen: _isShopOpen);
+      }
       debugPrint('Saved homeProductIds (${ids.length}) to ${docRef.path}');
     } catch (e) {
       debugPrint('Failed to save home product ids: $e');
+    }
+  }
+
+  Future<void> _syncProductActiveFlagsForShop(
+    String shopId, {
+    required bool isOpen,
+  }) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('products')
+          .where('ownerUid', isEqualTo: shopId)
+          .get();
+
+      if (snapshot.docs.isEmpty) {
+        return;
+      }
+
+      final Set<String> activeIds = isOpen ? _homeProductIds : <String>{};
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      int operationCount = 0;
+
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final bool shouldBeActive = activeIds.contains(doc.id);
+        final bool? currentActive = data['isActive'] as bool?;
+        final Map<String, dynamic> updates = <String, dynamic>{};
+
+        if (currentActive != shouldBeActive) {
+          updates['isActive'] = shouldBeActive;
+        }
+
+        if (shouldBeActive) {
+          if (data['activeAt'] == null) {
+            updates['activeAt'] = FieldValue.serverTimestamp();
+          }
+          if (data.containsKey('inactiveAt') && data['inactiveAt'] != null) {
+            updates['inactiveAt'] = FieldValue.delete();
+          }
+        } else if (data['inactiveAt'] == null) {
+          updates['inactiveAt'] = FieldValue.serverTimestamp();
+        }
+
+        if (updates.isEmpty) {
+          continue;
+        }
+
+        updates['updatedAt'] = FieldValue.serverTimestamp();
+        batch.update(doc.reference, updates);
+        operationCount++;
+
+        if (operationCount >= 450) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          operationCount = 0;
+        }
+      }
+
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Failed to sync product active flags for $shopId: $e');
     }
   }
 
@@ -332,6 +512,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    _notificationSubscription?.cancel();
     _tabController.removeListener(_handleTabChange);
     _tabController.dispose();
     super.dispose();
@@ -444,7 +625,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                             // Hidden QR scanner button (index 3) – feature paused for shop app UX
                             _buildNavButton(icon: Icons.delivery_dining, index: 4),
                             _buildNavButton(icon: Icons.wallet, index: 5),
-                            _buildNavButton(icon: Icons.notifications_outlined, index: 6),
+                            _buildNavButton(
+                              icon: Icons.notifications_outlined,
+                              index: 6,
+                              badgeCount: _notificationCount,
+                            ),
                             _buildNavButton(
                               icon: Icons.chat_bubble_outline,
                               index: 7,
@@ -513,15 +698,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: InkWell(
-        onTap: () {
-          _switchToTab(index);
-          if (index == 6 && _notificationCount > 0) {
-            setState(() {
-              _notificationCount = 0;
-            });
-            _showNotificationDetails(context);
-          }
-        },
+        onTap: () => _switchToTab(index),
         borderRadius: BorderRadius.circular(48),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -548,27 +725,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   ),
                   child: Icon(icon, color: iconColor, size: 28),
                 ),
-                if (index == 6 && _notificationCount > 0)
-                  Positioned(
-                    right: -6,
-                    top: -6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.shade700,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white, width: 2),
-                      ),
-                      child: Text(
-                        _notificationCount.toString(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
                 if (badgeCount > 0)
                   Positioned(
                     right: -4,
@@ -597,38 +753,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       ),
     );
 
-  }
-
-  void _showNotificationDetails(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('รายละเอียดการแจ้งเตือน', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              ..._notificationDetails.map((msg) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Row(
-                  children: [
-                    const Icon(Icons.notifications, color: Colors.orange, size: 20),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(msg, style: const TextStyle(fontSize: 15))),
-                  ],
-                ),
-              )),
-              if (_notificationDetails.isEmpty)
-                const Text('ไม่มีการแจ้งเตือนใหม่', style: TextStyle(fontSize: 15)),
-            ],
-          ),
-        );
-      },
-    );
   }
 }
 

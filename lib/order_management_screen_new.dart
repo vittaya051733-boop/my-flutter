@@ -3,14 +3,19 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'models/order_model.dart';
+import 'models/user_profile.dart';
 import 'models/shop_operations_settings.dart';
 import 'utils/app_colors.dart';
+import 'utils/rider_call_launcher.dart';
 import 'test_order_helper.dart';
 import 'order_qr_screen.dart';
+import 'chat_room_screen.dart';
 import 'services/shop_operations_service.dart';
 
 class OrderManagementScreen extends StatefulWidget {
-  const OrderManagementScreen({super.key});
+  const OrderManagementScreen({super.key, this.focusOrderId});
+
+  final String? focusOrderId;
 
   @override
   State<OrderManagementScreen> createState() => _OrderManagementScreenState();
@@ -18,9 +23,30 @@ class OrderManagementScreen extends StatefulWidget {
 
 class _OrderManagementScreenState extends State<OrderManagementScreen> {
   String? _shopId;
-  ShopOperationsSettings _operationsSettings = ShopOperationsSettings.defaults();
+  ShopOperationsSettings _operationsSettings =
+      ShopOperationsSettings.defaults();
   StreamSubscription<ShopOperationsSettings>? _operationsSubscription;
   final Set<String> _autoAcceptingOrders = <String>{};
+
+  bool _shouldHideUnverifiedPromptPayOrder(Map<String, dynamic> data) {
+    final paymentMethod = (data['paymentMethod'] as String?)?.trim() ?? '';
+    final paymentStatus = (data['paymentStatus'] as String?)?.trim() ?? '';
+
+    return paymentMethod == 'promptpay_qr' &&
+        paymentStatus.isNotEmpty &&
+        paymentStatus != 'verified';
+  }
+
+  bool _isAwaitingShopDecision(DetailedOrder order) {
+    return order.status == 'pending' ||
+        (order.status == 'accepted' && order.preparingStartTime == null);
+  }
+
+  bool _isShopOrderForCurrentUser(Map<String, dynamic> data) {
+    final shopId = (data['shopId'] as String?)?.trim();
+    final shopOwnerId = (data['shopOwnerId'] as String?)?.trim();
+    return shopId == _shopId || shopOwnerId == _shopId;
+  }
 
   @override
   void initState() {
@@ -47,10 +73,11 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 
   void _listenOperationsSettings(String shopId) {
     _operationsSubscription?.cancel();
-    _operationsSubscription = ShopOperationsService.streamSettings(shopId).listen((settings) {
-      if (!mounted) return;
-      setState(() => _operationsSettings = settings);
-    });
+    _operationsSubscription = ShopOperationsService.streamSettings(shopId)
+        .listen((settings) {
+          if (!mounted) return;
+          setState(() => _operationsSettings = settings);
+        });
   }
 
   Future<void> _createTestOrder() async {
@@ -59,7 +86,9 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✅ สร้างออเดอร์ทดสอบสำเร็จ: ${orderId.substring(0, 8)}...'),
+            content: Text(
+              '✅ สร้างออเดอร์ทดสอบสำเร็จ: ${orderId.substring(0, 8)}...',
+            ),
             backgroundColor: Colors.green,
           ),
         );
@@ -79,9 +108,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   @override
   Widget build(BuildContext context) {
     if (_shopId == null) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     return Scaffold(
@@ -100,13 +127,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       ),
       backgroundColor: Colors.white,
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance
-            .collection('orders')
-            .where('shopId', isEqualTo: _shopId)
-            .where('status', whereIn: ['pending', 'accepted', 'preparing', 'ready', 'delivering'])
-            // ลบ orderBy ออกชั่วคราว เพราะต้องสร้าง composite index ก่อน
-            // .orderBy('createdAt', descending: true)
-            .snapshots(),
+        stream: FirebaseFirestore.instance.collection('orders').snapshots(),
         builder: (context, snapshot) {
           // Debug: แสดง error ถ้ามี
           if (snapshot.hasError) {
@@ -141,20 +162,63 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.inbox_outlined, size: 64, color: Colors.grey),
+                  const Icon(
+                    Icons.inbox_outlined,
+                    size: 64,
+                    color: Colors.grey,
+                  ),
                   const SizedBox(height: 16),
-                  const Text('ไม่มีออเดอร์ใหม่', style: TextStyle(fontSize: 18)),
+                  const Text(
+                    'ไม่มีออเดอร์ใหม่',
+                    style: TextStyle(fontSize: 18),
+                  ),
                   const SizedBox(height: 8),
-                  Text('Shop ID: $_shopId', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  Text(
+                    'Shop ID: $_shopId',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
                 ],
               ),
             );
           }
 
-          final orders = snapshot.data!.docs
-              .map((doc) => DetailedOrder.fromSnapshot(doc as DocumentSnapshot<Map<String, dynamic>>))
-              .toList()
-            ..sort((a, b) => b.createdAt.compareTo(a.createdAt)); // เรียงใน Dart แทน
+          final orders =
+              snapshot.data!.docs
+                  .where((doc) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    final status = (data['status'] as String?)?.trim() ?? '';
+                    final allowedStatus = <String>{
+                      'pending',
+                      'accepted',
+                      'preparing',
+                      'ready',
+                      'delivering',
+                    };
+                    return _isShopOrderForCurrentUser(data) &&
+                        !_shouldHideUnverifiedPromptPayOrder(data) &&
+                        allowedStatus.contains(status);
+                  })
+                  .map(
+                    (doc) => DetailedOrder.fromSnapshot(
+                      doc as DocumentSnapshot<Map<String, dynamic>>,
+                    ),
+                  )
+                  .toList()
+                ..sort(
+                  (a, b) => b.createdAt.compareTo(a.createdAt),
+                ); // เรียงใน Dart แทน
+
+          final focusOrderId = widget.focusOrderId;
+          if (focusOrderId != null && focusOrderId.isNotEmpty) {
+            orders.sort((a, b) {
+              final aFocused = a.orderId == focusOrderId ? 1 : 0;
+              final bFocused = b.orderId == focusOrderId ? 1 : 0;
+              if (aFocused != bFocused) {
+                return bFocused.compareTo(aFocused);
+              }
+              return b.createdAt.compareTo(a.createdAt);
+            });
+          }
 
           _maybeAutoAcceptPendingOrders(orders);
 
@@ -180,10 +244,17 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   Widget _buildOrderCard(DetailedOrder order) {
+    final isFocused =
+        widget.focusOrderId != null && widget.focusOrderId == order.orderId;
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
       elevation: 3,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isFocused
+            ? const BorderSide(color: AppColors.accent, width: 2)
+            : BorderSide.none,
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -196,6 +267,8 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
             _buildOrderStatus(order),
             if (order.status == 'accepted' || order.status == 'preparing')
               _buildPreparingTimer(order),
+            const SizedBox(height: 12),
+            _buildOrderContactActions(order),
             const SizedBox(height: 16),
             _buildActionButtons(order),
           ],
@@ -227,7 +300,9 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 SizedBox(height: 4),
-                Text('เปิดรับออเดอร์อีกครั้งได้ที่เมนูตั้งค่า > การดำเนินงานร้าน'),
+                Text(
+                  'เปิดรับออเดอร์อีกครั้งได้ที่เมนูตั้งค่า > การดำเนินงานร้าน',
+                ),
               ],
             ),
           ),
@@ -237,25 +312,33 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   void _maybeAutoAcceptPendingOrders(List<DetailedOrder> orders) {
-    if (!_operationsSettings.autoAcceptOrders || _operationsSettings.pauseNewOrders) {
+    if (!_operationsSettings.autoAcceptOrders ||
+        _operationsSettings.pauseNewOrders) {
       return;
     }
     for (final order in orders) {
-      if (order.status != 'pending' || _autoAcceptingOrders.contains(order.orderId)) continue;
+      if (order.status != 'pending' ||
+          _autoAcceptingOrders.contains(order.orderId))
+        continue;
       _autoAcceptingOrders.add(order.orderId);
-      _acceptOrder(order, silent: true).then((_) {
-        if (!mounted) return;
-        final shortId = order.orderId.length > 6 ? order.orderId.substring(0, 6) : order.orderId;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('รับออเดอร์ #$shortId อัตโนมัติแล้ว'),
-            duration: const Duration(seconds: 2),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }).catchError((error) {
-        debugPrint('Auto accept failed for ${order.orderId}: $error');
-      }).whenComplete(() => _autoAcceptingOrders.remove(order.orderId));
+      _acceptOrder(order, silent: true)
+          .then((_) {
+            if (!mounted) return;
+            final shortId = order.orderId.length > 6
+                ? order.orderId.substring(0, 6)
+                : order.orderId;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('รับออเดอร์ #$shortId อัตโนมัติแล้ว'),
+                duration: const Duration(seconds: 2),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          })
+          .catchError((error) {
+            debugPrint('Auto accept failed for ${order.orderId}: $error');
+          })
+          .whenComplete(() => _autoAcceptingOrders.remove(order.orderId));
     }
   }
 
@@ -269,7 +352,10 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
             children: [
               Text(
                 'ออเดอร์ #${order.orderId.substring(0, 8)}',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               const SizedBox(height: 4),
               Text(
@@ -313,16 +399,21 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 8),
-        ...order.items.map((item) => Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                children: [
-                  Text('• ${item.productName}', style: const TextStyle(fontSize: 14)),
-                  const Spacer(),
-                  Text('x${item.quantity}', style: const TextStyle(fontSize: 14)),
-                ],
-              ),
-            )),
+        ...order.items.map(
+          (item) => Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Row(
+              children: [
+                Text(
+                  '• ${item.productName}',
+                  style: const TextStyle(fontSize: 14),
+                ),
+                const Spacer(),
+                Text('x${item.quantity}', style: const TextStyle(fontSize: 14)),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -337,8 +428,13 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         statusText = 'รออนุมัติ';
         break;
       case 'accepted':
-        statusColor = Colors.green;
-        statusText = 'รับออเดอร์แล้ว';
+        if (order.preparingStartTime == null) {
+          statusColor = Colors.orange;
+          statusText = 'ไรเดอร์รับงานแล้ว รอร้านยืนยัน';
+        } else {
+          statusColor = Colors.green;
+          statusText = 'รับออเดอร์แล้ว';
+        }
         break;
       case 'preparing':
         statusColor = Colors.blue;
@@ -377,7 +473,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 
   Widget _buildPreparingTimer(DetailedOrder order) {
     if (order.preparingStartTime == null) return const SizedBox.shrink();
-    
+
     // ใช้ StatefulBuilder เพื่อ rebuild เฉพาะ widget นี้
     return _CountdownTimerWidget(order: order);
   }
@@ -386,16 +482,16 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 /// Widget แยกสำหรับ Timer เพื่อไม่ให้ rebuild ทั้งหน้า
 class _CountdownTimerWidget extends StatefulWidget {
   final DetailedOrder order;
-  
+
   const _CountdownTimerWidget({required this.order});
-  
+
   @override
   State<_CountdownTimerWidget> createState() => _CountdownTimerWidgetState();
 }
 
 class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
   Timer? _timer;
-  
+
   @override
   void initState() {
     super.initState();
@@ -404,13 +500,13 @@ class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
       if (mounted) setState(() {});
     });
   }
-  
+
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
   }
-  
+
   @override
   Widget build(BuildContext context) {
     if (widget.order.preparingStartTime == null) {
@@ -419,10 +515,12 @@ class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
 
     final now = DateTime.now();
     final elapsed = now.difference(widget.order.preparingStartTime!);
-    final remaining = Duration(milliseconds: widget.order.preparingDuration) - elapsed;
+    final remaining =
+        Duration(milliseconds: widget.order.preparingDuration) - elapsed;
 
     if (remaining.isNegative) {
-      final overtime = elapsed - Duration(milliseconds: widget.order.preparingDuration);
+      final overtime =
+          elapsed - Duration(milliseconds: widget.order.preparingDuration);
       return Container(
         margin: const EdgeInsets.only(top: 12),
         padding: const EdgeInsets.all(12),
@@ -481,7 +579,7 @@ class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
       ),
     );
   }
-  
+
   String _formatDuration(Duration duration) {
     final minutes = duration.inMinutes;
     final seconds = duration.inSeconds % 60;
@@ -491,38 +589,162 @@ class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
 
 // ย้าย _buildActionButtons กลับไปที่ _OrderManagementScreenState
 extension on _OrderManagementScreenState {
-  Widget _buildActionButtons(DetailedOrder order) {
-    switch (order.status) {
-      case 'pending':
+  Future<_RiderContactState> _loadRiderContactState(DetailedOrder order) async {
+    final riderId = order.driverId?.trim();
+    if (riderId == null || riderId.isEmpty) {
+      return const _RiderContactState(profile: null, phone: null);
+    }
+
+    UserProfile? profile;
+    Map<String, dynamic>? riderData;
+    try {
+      final riderDoc = await FirebaseFirestore.instance
+          .collection('riders')
+          .doc(riderId)
+          .get();
+      if (riderDoc.exists) {
+        riderData = riderDoc.data();
+        profile = UserProfile.fromMap(riderId, riderData);
+      }
+    } catch (_) {
+      // Fallback profile is used when riders lookup fails.
+    }
+
+    profile ??= UserProfile(
+      uid: riderId,
+      displayName: (order.driverName?.trim().isNotEmpty ?? false)
+          ? order.driverName!.trim()
+          : 'ไรเดอร์',
+      phoneNumber: null,
+    );
+
+    final phoneCandidates = <String?>[
+      profile.phoneNumber,
+      riderData?['phoneNumber'] as String?,
+      riderData?['phone'] as String?,
+      riderData?['contactPhone'] as String?,
+      riderData?['mobile'] as String?,
+    ];
+
+    String? resolvedPhone;
+    for (final candidate in phoneCandidates) {
+      final text = candidate?.trim();
+      if (text != null && text.isNotEmpty) {
+        resolvedPhone = text;
+        break;
+      }
+    }
+
+    return _RiderContactState(profile: profile, phone: resolvedPhone);
+  }
+
+  Widget _buildOrderContactActions(DetailedOrder order) {
+    return FutureBuilder<_RiderContactState>(
+      future: _loadRiderContactState(order),
+      builder: (context, snapshot) {
+        final state = snapshot.data;
+        final hasRider = order.driverId?.trim().isNotEmpty ?? false;
+        final canChat = hasRider && state?.profile != null;
+        final canCall = hasRider || (state?.phone?.trim().isNotEmpty ?? false);
+
         return Row(
           children: [
             Expanded(
-              child: ElevatedButton.icon(
-                onPressed: () => _acceptOrder(order),
-                icon: const Icon(Icons.check_circle),
-                label: const Text('รับออเดอร์'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
+              child: OutlinedButton.icon(
+                onPressed: !canChat
+                    ? null
+                    : () async {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                ChatRoomScreen(friendProfile: state!.profile!),
+                          ),
+                        );
+                      },
+                icon: const Icon(Icons.chat_bubble_outline_rounded),
+                label: const Text('แชทไรเดอร์'),
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 8),
             Expanded(
               child: OutlinedButton.icon(
-                onPressed: () => _rejectOrder(order),
-                icon: const Icon(Icons.cancel),
-                label: const Text('ปฏิเสธ'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.red,
-                  side: const BorderSide(color: Colors.red),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
+                onPressed: !canCall
+                    ? null
+                    : () => RiderCallLauncher.startVoiceCall(
+                        context: context,
+                        riderProfile: state?.profile,
+                        fallbackPhone: state?.phone,
+                      ),
+                icon: const Icon(Icons.phone_in_talk_outlined),
+                label: Text(canCall ? 'โทรไรเดอร์' : 'โทรไรเดอร์ไม่ได้'),
               ),
             ),
           ],
         );
+      },
+    );
+  }
+
+  Future<void> _sendOrderAppNotification({
+    required String targetApp,
+    required String? recipientUid,
+    required String orderId,
+    required String title,
+    required String body,
+    required String action,
+  }) async {
+    final toUid = recipientUid?.trim();
+    if (toUid == null || toUid.isEmpty) {
+      return;
+    }
+
+    await FirebaseFirestore.instance.collection('app_notifications').add({
+      'targetApp': targetApp,
+      'recipientUid': toUid,
+      'orderId': orderId,
+      'title': title,
+      'body': body,
+      'read': false,
+      'createdAt': FieldValue.serverTimestamp(),
+      'source': 'van1_shop',
+      'action': action,
+    });
+  }
+
+  Widget _buildActionButtons(DetailedOrder order) {
+    if (_isAwaitingShopDecision(order)) {
+      return Row(
+        children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: () => _acceptOrder(order),
+              icon: const Icon(Icons.check_circle),
+              label: const Text('รับออเดอร์'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () => _rejectOrder(order),
+              icon: const Icon(Icons.cancel),
+              label: const Text('ปฏิเสธ'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.red,
+                side: const BorderSide(color: Colors.red),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    switch (order.status) {
       case 'accepted':
       case 'preparing':
         return ElevatedButton.icon(
@@ -558,7 +780,11 @@ extension on _OrderManagementScreenState {
             const SizedBox(height: 8),
             const Text(
               'รอพนักงานขนส่งมารับสินค้า',
-              style: TextStyle(fontSize: 14, color: Colors.grey, fontStyle: FontStyle.italic),
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey,
+                fontStyle: FontStyle.italic,
+              ),
               textAlign: TextAlign.center,
             ),
           ],
@@ -566,7 +792,11 @@ extension on _OrderManagementScreenState {
       case 'delivering':
         return const Text(
           'กำลังจัดส่งสินค้า',
-          style: TextStyle(fontSize: 14, color: Colors.blue, fontStyle: FontStyle.italic),
+          style: TextStyle(
+            fontSize: 14,
+            color: Colors.blue,
+            fontStyle: FontStyle.italic,
+          ),
           textAlign: TextAlign.center,
         );
       default:
@@ -593,6 +823,16 @@ extension on _OrderManagementScreenState {
           .doc(order.orderId)
           .update(updatedOrder.toMap());
 
+      await _sendOrderAppNotification(
+        targetApp: 'van3',
+        recipientUid: order.driverId,
+        orderId: order.orderId,
+        title: 'ร้านรับออเดอร์แล้ว',
+        body:
+            'ออเดอร์ #${order.orderId.substring(0, 8)} ร้านเริ่มเตรียมสินค้าแล้ว',
+        action: 'shop_accepted_order',
+      );
+
       if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -604,7 +844,10 @@ extension on _OrderManagementScreenState {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('เกิดข้อผิดพลาด: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('เกิดข้อผิดพลาด: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
@@ -637,15 +880,27 @@ extension on _OrderManagementScreenState {
             .doc(order.orderId)
             .update({'status': 'cancelled', 'updatedAt': Timestamp.now()});
 
+        await _sendOrderAppNotification(
+          targetApp: 'van3',
+          recipientUid: order.driverId,
+          orderId: order.orderId,
+          title: 'ร้านปฏิเสธออเดอร์',
+          body: 'ออเดอร์ #${order.orderId.substring(0, 8)} ถูกยกเลิกโดยร้านค้า',
+          action: 'shop_rejected_order',
+        );
+
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('ปฏิเสธออเดอร์แล้ว')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('ปฏิเสธออเดอร์แล้ว')));
         }
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('เกิดข้อผิดพลาด: $e'), backgroundColor: Colors.red),
+            SnackBar(
+              content: Text('เกิดข้อผิดพลาด: $e'),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }
@@ -659,10 +914,20 @@ extension on _OrderManagementScreenState {
           .collection('orders')
           .doc(order.orderId)
           .update({
-        'status': 'ready',
-        'readyAt': Timestamp.fromDate(now),
-        'updatedAt': Timestamp.now(),
-      });
+            'status': 'ready',
+            'readyAt': Timestamp.fromDate(now),
+            'updatedAt': Timestamp.now(),
+          });
+
+      await _sendOrderAppNotification(
+        targetApp: 'van3',
+        recipientUid: order.driverId,
+        orderId: order.orderId,
+        title: 'ร้านเตรียมสินค้าเสร็จแล้ว',
+        body:
+            'ออเดอร์ #${order.orderId.substring(0, 8)} พร้อมให้ไรเดอร์รับสินค้า',
+        action: 'shop_ready_for_pickup',
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -675,7 +940,10 @@ extension on _OrderManagementScreenState {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('เกิดข้อผิดพลาด: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('เกิดข้อผิดพลาด: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
@@ -684,4 +952,11 @@ extension on _OrderManagementScreenState {
   String _formatTime(DateTime dateTime) {
     return '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
   }
+}
+
+class _RiderContactState {
+  const _RiderContactState({required this.profile, required this.phone});
+
+  final UserProfile? profile;
+  final String? phone;
 }

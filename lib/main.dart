@@ -4,6 +4,7 @@ import 'login_screen.dart';
 import 'welcome_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'register_screen.dart';
 import 'forgot_password_screen.dart';
 import 'email_verification_helper.dart';
@@ -96,17 +97,24 @@ void main() {
       }
     }
 
-    // Initialize FCM + Local Notifications
-    try {
-      await NotificationService().initialize();
-    } catch (e) {
-      debugPrint('Notification init error: $e');
-    }
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandlerVan1);
 
     runApp(const MyApp());
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_initializeNotificationsAfterAppStart());
+    });
   }, (error, stack) {
     // เก็บ/แสดง log ได้ตามต้องการ
   });
+}
+
+Future<void> _initializeNotificationsAfterAppStart() async {
+  try {
+    await NotificationService().initialize();
+  } catch (e) {
+    debugPrint('Notification init error: $e');
+  }
 }
 
 // A simple widget to display a critical error, like Firebase failing to initialize.

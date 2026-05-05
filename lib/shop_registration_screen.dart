@@ -265,15 +265,27 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   }
 
   String _collectionForService(String serviceType) {
-    switch (serviceType) {
+    final normalized = serviceType.trim().toLowerCase();
+    switch (normalized) {
       case 'ตลาด':
+      case 'market':
         return 'market_registrations';
       case 'ร้านค้า':
+      case 'shop':
+      case 'store':
         return 'shop_registrations';
       case 'ร้านอาหาร':
+      case 'restaurant':
+      case 'food':
         return 'restaurant_registrations';
       case 'ร้านขายยา':
+      case 'pharmacy':
         return 'pharmacy_registrations';
+      case 'อื่นๆ':
+      case 'อื่น':
+      case 'other':
+      case 'others':
+        return 'other_registrations';
       default:
         throw Exception('ประเภทบริการไม่ถูกต้อง: $serviceType');
     }
@@ -537,12 +549,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       }
 
       final collection = _collectionForService(serviceType);
-
-      // นับจำนวนร้านในประเภทนี้เพื่อกำหนดลำดับ
-      final querySnapshot = await FirebaseFirestore.instance
-          .collection(collection)
-          .get();
-      final orderNumber = querySnapshot.docs.length + 1;
+        final orderNumber = DateTime.now().millisecondsSinceEpoch;
 
       // บันทึกข้อมูลร้านค้าลง Firestore (แต่ละประเภทเป็น Collection แยก)
       await FirebaseFirestore.instance
@@ -572,6 +579,18 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
+      await _syncShopProfileToProducts(
+        ownerUid: user.uid,
+        shopName: _shopNameController.text.trim(),
+        shopImageUrl: shopImageUrl,
+        latitude: _latitude ?? 0.0,
+        longitude: _longitude ?? 0.0,
+        serviceType: serviceType,
+        address: _addressController.text.trim(),
+        phone: _phoneController.text.trim(),
+        email: _emailController.text.trim(),
+      );
+
       _showSnackBar('✅ ลงทะเบียนร้านค้าสำเร็จ!', Colors.green);
 
       await Future.delayed(const Duration(seconds: 1));
@@ -592,6 +611,137 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       await ref.delete();
     } catch (e) {
       debugPrint('Skip delete old file: $e');
+    }
+  }
+
+  Future<void> _syncShopProfileToProducts({
+    required String ownerUid,
+    required String shopName,
+    String? shopImageUrl,
+    required double latitude,
+    required double longitude,
+    required String serviceType,
+    String? address,
+    String? phone,
+    String? email,
+  }) async {
+    try {
+      final QuerySnapshot<Map<String, dynamic>> snapshot = await FirebaseFirestore.instance
+          .collection('products')
+          .where('ownerUid', isEqualTo: ownerUid)
+          .get();
+
+      if (snapshot.docs.isEmpty) return;
+
+      WriteBatch batch = FirebaseFirestore.instance.batch();
+      int operationCount = 0;
+
+      for (final doc in snapshot.docs) {
+        final Map<String, dynamic> data = doc.data();
+        final Map<String, dynamic> updates = <String, dynamic>{};
+
+        final String normalizedShopName = shopName.trim();
+        if (normalizedShopName.isNotEmpty) {
+          final String existingShopName = (data['shopName'] ?? '').toString().trim();
+          if (existingShopName != normalizedShopName) {
+            updates['shopName'] = normalizedShopName;
+          }
+        }
+
+        final String normalizedUrl = (shopImageUrl ?? '').trim();
+        if (normalizedUrl.isNotEmpty) {
+          final String existingShopImageUrl = (data['shopImageUrl'] ?? '').toString().trim();
+          if (existingShopImageUrl != normalizedUrl) {
+            updates['shopImageUrl'] = normalizedUrl;
+          }
+        }
+
+        double? existingLat;
+        double? existingLng;
+        final dynamic rawLocation = data['location'] ?? data['shopLocation'];
+        if (rawLocation is GeoPoint) {
+          existingLat = rawLocation.latitude;
+          existingLng = rawLocation.longitude;
+        } else if (rawLocation is Map) {
+          final Map<String, dynamic> locationMap = _stringKeyedMap(rawLocation);
+          existingLat = _parseDouble(locationMap['latitude'] ?? locationMap['lat'] ?? locationMap['y']);
+          existingLng = _parseDouble(
+            locationMap['longitude'] ?? locationMap['lng'] ?? locationMap['long'] ?? locationMap['x'],
+          );
+        }
+
+        final bool needsLocationUpdate =
+            existingLat == null ||
+            existingLng == null ||
+            (existingLat - latitude).abs() > 0.0000001 ||
+            (existingLng - longitude).abs() > 0.0000001;
+        if (needsLocationUpdate) {
+          updates['location'] = <String, double>{
+            'latitude': latitude,
+            'longitude': longitude,
+          };
+          updates['shopLocation'] = <String, double>{
+            'latitude': latitude,
+            'longitude': longitude,
+          };
+          updates['shopLatitude'] = latitude;
+          updates['shopLongitude'] = longitude;
+        }
+
+        final String normalizedServiceType = serviceType.trim();
+        if (normalizedServiceType.isNotEmpty) {
+          final String existingServiceType = (data['serviceType'] ?? '').toString().trim();
+          if (existingServiceType != normalizedServiceType) {
+            updates['serviceType'] = normalizedServiceType;
+          }
+        }
+
+        final String normalizedAddress = (address ?? '').trim();
+        if (normalizedAddress.isNotEmpty) {
+          final String existingAddress = (data['shopAddress'] ?? data['address'] ?? '').toString().trim();
+          if (existingAddress != normalizedAddress) {
+            updates['shopAddress'] = normalizedAddress;
+            updates['address'] = normalizedAddress;
+          }
+        }
+
+        final String normalizedPhone = (phone ?? '').trim();
+        if (normalizedPhone.isNotEmpty) {
+          final String existingPhone = (data['shopPhone'] ?? data['phone'] ?? '').toString().trim();
+          if (existingPhone != normalizedPhone) {
+            updates['shopPhone'] = normalizedPhone;
+            updates['phone'] = normalizedPhone;
+          }
+        }
+
+        final String normalizedEmail = (email ?? '').trim();
+        if (normalizedEmail.isNotEmpty) {
+          final String existingEmail = (data['email'] ?? '').toString().trim();
+          if (existingEmail != normalizedEmail) {
+            updates['email'] = normalizedEmail;
+          }
+        }
+
+        if (updates.isEmpty) {
+          continue;
+        }
+
+        updates['updatedAt'] = FieldValue.serverTimestamp();
+        batch.update(doc.reference, updates);
+        operationCount++;
+
+        if (operationCount >= 450) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          operationCount = 0;
+        }
+      }
+
+      if (operationCount > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Failed to sync shop profile to products: $e');
     }
   }
 

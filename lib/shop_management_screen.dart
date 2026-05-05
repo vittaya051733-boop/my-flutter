@@ -154,6 +154,17 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     });
 
     try {
+      final bool removedFromHome = _homeProductIds.remove(product.id!);
+      if (removedFromHome) {
+        widget.onHomeProductIdsChanged?.call(_homeProductIds);
+      }
+      await FirebaseFirestore.instance
+          .collection('products')
+          .doc(product.id!)
+          .collection('specifications')
+          .doc('main')
+          .delete()
+          .catchError((_) => null);
       await FirebaseFirestore.instance.collection('products').doc(product.id!).delete();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ลบสินค้าเรียบร้อยแล้ว')));
@@ -431,10 +442,26 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                   top: 8,
                   right: 8,
                   child: isDeleting
-                      ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
-                      : IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red, size: 22),
-                          onPressed: () => _deleteProduct(product),
+                      ? const SizedBox(width: 44, height: 22, child: Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))))
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.white, size: 22),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                              onPressed: () => _navigateToAddProduct(context, product: product),
+                              tooltip: 'แก้ไขสินค้า',
+                            ),
+                            const SizedBox(width: 4),
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red, size: 22),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                              onPressed: () => _deleteProduct(product),
+                              tooltip: 'ลบสินค้า',
+                            ),
+                          ],
                         ),
                 ),
               ],

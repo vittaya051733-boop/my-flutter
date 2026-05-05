@@ -54,6 +54,7 @@ object CallIntentRouter {
         return when (intent.action) {
             MainActivity.ACTION_SHOW_INCOMING_CALL -> buildIncomingPayload(intent)
             MainActivity.ACTION_CANCEL_INCOMING_CALL -> buildCancelPayload(intent)
+            MainActivity.ACTION_SHOW_ORDER_DECISION -> buildOrderDecisionPayload(intent)
             else -> null
         }
     }
@@ -77,6 +78,19 @@ object CallIntentRouter {
         return mapOf(
             "channelId" to channelId,
             "cancelOnly" to true
+        )
+    }
+
+    private fun buildOrderDecisionPayload(intent: Intent): Map<String, Any?>? {
+        val orderId = intent.getStringExtra(MainActivity.EXTRA_ORDER_ID) ?: return null
+        return mapOf(
+            "orderDecision" to true,
+            "type" to "app_notification",
+            "action" to "order_accepted",
+            "orderId" to orderId,
+            "notificationId" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_ID),
+            "title" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_TITLE),
+            "body" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_BODY)
         )
     }
 

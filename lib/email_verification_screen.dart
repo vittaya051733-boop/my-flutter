@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'dart:async'; // Import the async library for Timer
+
+import 'navigation_helper.dart';
+import 'services/email_otp_service.dart';
 import 'utils/app_colors.dart';
 
 class EmailVerificationScreen extends StatefulWidget {
@@ -11,131 +13,172 @@ class EmailVerificationScreen extends StatefulWidget {
 }
 
 class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
-  bool _isSendingVerification = false;
-  Timer? _timer;
-  final User? user = FirebaseAuth.instance.currentUser;
+  final TextEditingController _otpController = TextEditingController();
+  bool _isSendingOtp = false;
+  bool _isVerifyingOtp = false;
+  String? _targetEmail;
 
   @override
   void initState() {
     super.initState();
-    // Start a timer to periodically check the email verification status.
-    _timer = Timer.periodic(const Duration(seconds: 10), (_) => _checkEmailVerified());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sendOtp(initialRequest: true);
+    });
   }
 
   @override
   void dispose() {
-    _timer?.cancel(); // Always cancel the timer to prevent memory leaks.
+    _otpController.dispose();
     super.dispose();
   }
 
-  Future<void> _checkEmailVerified() async {
-    try {
-      await FirebaseAuth.instance.currentUser?.reload();
-      final refreshedUser = FirebaseAuth.instance.currentUser;
-      if (refreshedUser?.emailVerified == true) {
-        _timer?.cancel();
-        if (!mounted) return;
+  User? get _currentUser => FirebaseAuth.instance.currentUser;
 
-        final args = ModalRoute.of(context)?.settings.arguments;
-        String? serviceType;
-        String? nextRoute;
-        if (args is Map<String, dynamic>) {
-          serviceType = args['serviceType'] as String?;
-          nextRoute = args['nextRoute'] as String?;
-        } else if (args is String?) {
-          serviceType = args;
-        }
+  String? get _currentEmail => _currentUser?.email;
 
-        final targetRoute = switch (nextRoute) {
-          'contract' => '/contract',
-          'post-intro' => '/post-verification-intro',
-          _ => '/contract',
-        };
-
-        Navigator.of(context).pushNamedAndRemoveUntil(
-          targetRoute,
-          (route) => false,
-          arguments: serviceType,
-        );
-      }
-    } on FirebaseAuthException catch (e) {
-      if (e.message?.contains('Too many attempts') ?? false) {
-        await Future.delayed(const Duration(seconds: 5));
-      }
-    } catch (e) {
-      // ดักจับ error ที่อาจเกิดจากการ reload บ่อยไป (เช่น too-many-requests)
-      // ไม่ต้องทำอะไร ปล่อยให้ timer ทำงานรอบถัดไป
-      // debugPrint('Error checking email verification: $e');
-    }
-  }
-
-  Future<void> _sendVerificationEmail() async {
-    if (user == null) return;
+  Future<void> _sendOtp({bool initialRequest = false}) async {
+    if (_isSendingOtp) return;
 
     setState(() {
-      _isSendingVerification = true;
+      _isSendingOtp = true;
     });
 
     try {
-      // Always reload user state before any action to get the latest status.
-      await user!.reload();
+      await _currentUser?.reload();
       final refreshedUser = FirebaseAuth.instance.currentUser;
 
       if (refreshedUser?.emailVerified == true) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ อีเมลของคุณได้รับการยืนยันแล้ว!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
+        if (!mounted) return;
+        await _navigateAfterVerification(refreshedUser!);
         return;
       }
 
-      // Send verification email
-      await user!.sendEmailVerification();
-      debugPrint('📧 ส่งอีเมลยืนยันแล้ว: ${user!.email}');
+      final result = await EmailOtpService.instance.sendOtp();
+      if (!mounted) return;
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ ส่งอีเมลยืนยันไปที่ ${user!.email} อีกครั้งแล้ว กรุณาตรวจสอบโฟลเดอร์ Spam/Junk ด้วย'),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 5),
-          ),
+      setState(() {
+        _targetEmail = result.email ?? _currentEmail;
+      });
+
+      if (!initialRequest) {
+        _showSnack(
+          result.alreadyVerified
+              ? 'อีเมลนี้ยืนยันแล้ว'
+              : 'ส่ง OTP ไปที่ ${_targetEmail ?? _currentEmail ?? "อีเมลของคุณ"} แล้ว',
+          Colors.green,
         );
       }
     } catch (e) {
-      debugPrint('❌ เกิดข้อผิดพลาดในการส่งอีเมล: $e');
-      if (mounted) {
-        String errorMessage = 'เกิดข้อผิดพลาดในการส่งอีเมล';
-
-        if (e is FirebaseAuthException && e.code == 'too-many-requests') {
-          errorMessage = '⚠️ ส่งอีเมลบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่';
-        } else if (e.toString().contains('network')) {
-          errorMessage = '🌐 เกิดปัญหาเครือข่าย กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต';
-        }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMessage),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
+      if (!mounted) return;
+      _showSnack(
+        EmailOtpService.instance.mapError(
+          e,
+          fallback: 'ไม่สามารถส่ง OTP ยืนยันอีเมลได้',
+        ),
+        Colors.red,
+      );
     } finally {
       if (mounted) {
         setState(() {
-          _isSendingVerification = false;
+          _isSendingOtp = false;
         });
       }
     }
   }
 
+  Future<void> _verifyOtp() async {
+    final code = _otpController.text.trim();
+    if (code.length != 6) {
+      _showSnack('กรุณากรอก OTP 6 หลัก', Colors.red);
+      return;
+    }
+
+    setState(() {
+      _isVerifyingOtp = true;
+    });
+
+    try {
+      final result = await EmailOtpService.instance.verifyOtp(code);
+      await _currentUser?.reload();
+      final refreshedUser = FirebaseAuth.instance.currentUser;
+
+      if (!mounted) return;
+
+      if (result.verified || result.alreadyVerified || refreshedUser?.emailVerified == true) {
+        _showSnack('ยืนยันอีเมลสำเร็จ', Colors.green);
+        await _navigateAfterVerification(refreshedUser);
+        return;
+      }
+
+      _showSnack('ยังไม่สามารถยืนยันอีเมลได้ กรุณาลองอีกครั้ง', Colors.red);
+    } catch (e) {
+      if (!mounted) return;
+      _showSnack(
+        EmailOtpService.instance.mapError(
+          e,
+          fallback: 'เกิดข้อผิดพลาดในการตรวจสอบ OTP',
+        ),
+        Colors.red,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isVerifyingOtp = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _navigateAfterVerification(User? user) async {
+    if (!mounted || user == null) return;
+
+    final args = ModalRoute.of(context)?.settings.arguments;
+    String? serviceType;
+    String? nextRoute;
+    if (args is Map<String, dynamic>) {
+      serviceType = args['serviceType'] as String?;
+      nextRoute = args['nextRoute'] as String?;
+    } else if (args is String?) {
+      serviceType = args;
+    }
+
+    switch (nextRoute) {
+      case 'contract':
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/contract',
+          (route) => false,
+          arguments: serviceType,
+        );
+        return;
+      case 'post-intro':
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/post-verification-intro',
+          (route) => false,
+          arguments: serviceType,
+        );
+        return;
+      case 'home':
+        Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
+        return;
+      default:
+        await NavigationHelper.navigateBasedOnUserStatus(context, user);
+    }
+  }
+
+  void _showSnack(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: const Duration(seconds: 5),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final emailLabel = _targetEmail ?? _currentEmail ?? 'อีเมลของคุณ';
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('ยืนยันอีเมล'),
@@ -148,7 +191,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.email_outlined, size: 80, color: AppColors.accent),
+              const Icon(Icons.mark_email_unread_outlined, size: 80, color: AppColors.accent),
               const SizedBox(height: 24),
               const Text(
                 'กรุณายืนยันอีเมลของคุณ',
@@ -160,7 +203,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               ),
               const SizedBox(height: 16),
               Text(
-                'เราได้ส่งลิงก์ยืนยันไปที่:\n${user?.email ?? "อีเมลของคุณ"}',
+                'เราได้ส่งรหัส OTP 6 หลักไปที่:\n$emailLabel',
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 16),
               ),
@@ -176,29 +219,48 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      '📧 วิธีตรวจสอบอีเมล:',
+                      '📧 วิธีตรวจสอบ OTP:',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 8),
-                    const Text('• ตรวจสอบกล่องจดหมาย (Inbox)'),
-                    const Text('• ตรวจสอบโฟลเดอร์สแปม/ขยะ (Spam/Junk)'),
-                    const Text('• ตรวจสอบโฟลเดอร์โฆษณา (Promotions)'),
-                    const Text('• รอ 5-10 นาทีหากยังไม่เห็นอีเมล'),
+                    const Text('• ตรวจสอบกล่องจดหมายหลักก่อน'),
+                    const Text('• หากยังไม่พบ ให้ดูใน Spam/Junk'),
+                    const Text('• รหัสนี้ใช้ได้ภายใน 10 นาที'),
+                    const Text('• กรอกรหัส 6 หลักให้ตรงกับในอีเมล'),
                   ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              TextField(
+                controller: _otpController,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                decoration: const InputDecoration(
+                  labelText: 'รหัส OTP 6 หลัก',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.password_outlined),
                 ),
               ),
               const SizedBox(height: 32),
               ElevatedButton.icon(
-                onPressed: _isSendingVerification ? null : _sendVerificationEmail,
-                icon: _isSendingVerification
+                onPressed: _isVerifyingOtp ? null : _verifyOtp,
+                icon: _isVerifyingOtp
                     ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.send),
-                label: Text(_isSendingVerification ? 'กำลังส่ง...' : 'ส่งอีเมลยืนยันอีกครั้ง'),
+                    : const Icon(Icons.verified_outlined),
+                label: Text(_isVerifyingOtp ? 'กำลังตรวจสอบ...' : 'ยืนยัน OTP'),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton.icon(
+                onPressed: _isSendingOtp ? null : _sendOtp,
+                icon: _isSendingOtp
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.mail_outline),
+                label: Text(_isSendingOtp ? 'กำลังส่ง OTP...' : 'ส่ง OTP อีกครั้ง'),
               ),
               const SizedBox(height: 8),
               TextButton.icon(
                 onPressed: () {
-                  Navigator.pushNamed(context, '/email-helper', arguments: user?.email);
+                  Navigator.pushNamed(context, '/email-helper', arguments: _currentEmail);
                 },
                 icon: const Icon(Icons.help_outline),
                 label: const Text('พบปัญหา?'),

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -9,21 +11,35 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../models/order_model.dart';
+import '../incoming_shop_order_screen.dart';
+import '../order_management_screen_new.dart';
 import '../models/user_profile.dart';
 import '../call_screen.dart';
 import '../main.dart';
 import '../widgets/chat_message_popup.dart';
 import '../chat_room_screen.dart';
 
-
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
 
-  static const MethodChannel _callIntentChannel = MethodChannel('van.merchant/call_intents');
-  static const MethodChannel _appStateChannel = MethodChannel('van.merchant/app_state');
+  static const MethodChannel _callIntentChannel = MethodChannel(
+    'van.merchant/call_intents',
+  );
+  static const MethodChannel _appStateChannel = MethodChannel(
+    'van.merchant/app_state',
+  );
   static const String _methodDrainPending = 'drain_pending_intents';
+  static const String _methodCanUseFullScreenIntent =
+      'can_use_full_screen_intent';
+  static const String _methodOpenFullScreenIntentSettings =
+      'open_full_screen_intent_settings';
+  static const String _methodCanDrawOverlays = 'can_draw_overlays';
+  static const String _methodOpenOverlaySettings = 'open_overlay_settings';
+  static const String _methodShowIncomingCallActivity =
+      'show_incoming_call_activity';
 
   static const List<String> _registrationCollections = <String>[
     'market_registrations',
@@ -32,15 +48,32 @@ class NotificationService {
     'pharmacy_registrations',
     'other_registrations',
   ];
+  static const List<String> _chatProfileCollections = <String>[
+    'users',
+    'customer_users',
+    'riders',
+    'market_registrations',
+    'shop_registrations',
+    'restaurant_registrations',
+    'pharmacy_registrations',
+    'other_registrations',
+  ];
 
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
-  final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _localNotifications =
+      FlutterLocalNotificationsPlugin();
 
   bool _initialized = false;
   String? _currentFcmToken;
   bool _incomingCallVisible = false;
   bool _callIntentBridgeAttached = false;
   String? _activeIncomingChannelId;
+  String? _activeOrderPromptId;
+  final Set<String> _queuedShopDecisionOrderIds = <String>{};
+  StreamSubscription<User?>? _shopDecisionAuthSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _shopDecisionNotificationSubscription;
+  final Set<String> _handledShopDecisionNotificationIds = <String>{};
   final Set<String> _cancelledChannelIds = <String>{};
   String? _backgroundReturnChannelId;
   bool _shouldReturnAppToBackground = false;
@@ -48,6 +81,8 @@ class NotificationService {
   /// เริ่มต้นระบบ Notification
   Future<void> initialize() async {
     if (_initialized) return;
+
+    _setupCallIntentBridge();
 
     final systemPermissionGranted = await _ensureSystemNotificationPermission();
     if (!systemPermissionGranted) {
@@ -67,7 +102,9 @@ class NotificationService {
     }
 
     // Initialize local notifications
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -85,6 +122,8 @@ class NotificationService {
     );
 
     await _ensureAndroidNotificationChannel();
+    await _ensureAndroidIncomingCallPresentationPermission();
+    await _ensureAndroidOverlayPermission();
 
     // Get FCM token
     final token = await _firebaseMessaging.getToken();
@@ -99,13 +138,91 @@ class NotificationService {
     FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
 
     // Handle background messages
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    FirebaseMessaging.onBackgroundMessage(
+      firebaseMessagingBackgroundHandlerVan1,
+    );
 
     // Handle notification tap when app is in background
     FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
 
-    _setupCallIntentBridge();
+    final initialMessage = await _firebaseMessaging.getInitialMessage();
+    if (initialMessage != null) {
+      _handleNotificationTap(initialMessage);
+    }
+
+    _startShopDecisionNotificationListener();
+
     _initialized = true;
+  }
+
+  void _startShopDecisionNotificationListener() {
+    _shopDecisionAuthSubscription ??= FirebaseAuth.instance
+        .authStateChanges()
+        .listen((user) {
+          _shopDecisionNotificationSubscription?.cancel();
+          _shopDecisionNotificationSubscription = null;
+          _handledShopDecisionNotificationIds.clear();
+
+          final uid = user?.uid.trim();
+          if (uid == null || uid.isEmpty) {
+            return;
+          }
+
+          _shopDecisionNotificationSubscription = FirebaseFirestore.instance
+              .collection('app_notifications')
+              .where('targetApp', isEqualTo: 'van1')
+              .where('recipientUid', isEqualTo: uid)
+              .where('read', isEqualTo: false)
+              .snapshots()
+              .listen(
+                _handleShopDecisionNotificationSnapshot,
+                onError: (error) {
+                  debugPrint(
+                    'Failed to listen for shop decision notifications: $error',
+                  );
+                },
+              );
+        });
+  }
+
+  Future<void> _handleShopDecisionNotificationSnapshot(
+    QuerySnapshot<Map<String, dynamic>> snapshot,
+  ) async {
+    final changes = snapshot.docChanges
+        .where((change) {
+          return change.type == DocumentChangeType.added ||
+              change.type == DocumentChangeType.modified;
+        })
+        .toList(growable: false);
+
+    changes.sort((a, b) {
+      final aTime =
+          (a.doc.data()?['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ??
+          0;
+      final bTime =
+          (b.doc.data()?['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ??
+          0;
+      return aTime.compareTo(bTime);
+    });
+
+    for (final change in changes) {
+      final notificationId = change.doc.id;
+      if (!_handledShopDecisionNotificationIds.add(notificationId)) {
+        continue;
+      }
+
+      final data = change.doc.data();
+      if (data == null || !_isIncomingShopDecisionNotification(data)) {
+        continue;
+      }
+
+      final payload = <String, dynamic>{
+        ...data,
+        'type': data['type'] ?? 'app_notification',
+        'notificationId': notificationId,
+      };
+      await _showIncomingOrderDecisionPrompt(payload);
+    }
   }
 
   Future<bool> _ensureSystemNotificationPermission() async {
@@ -127,8 +244,10 @@ class NotificationService {
     if (!Platform.isAndroid) {
       return;
     }
-    final androidPlugin =
-        _localNotifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin = _localNotifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
     if (androidPlugin == null) {
       return;
     }
@@ -142,6 +261,52 @@ class NotificationService {
     await androidPlugin.createNotificationChannel(channel);
   }
 
+  Future<void> _ensureAndroidIncomingCallPresentationPermission() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final bool canUseFullScreenIntent =
+          await _appStateChannel.invokeMethod<bool>(
+            _methodCanUseFullScreenIntent,
+          ) ??
+          true;
+      if (canUseFullScreenIntent) {
+        return;
+      }
+      debugPrint(
+        'Full-screen intent permission not granted. Opening app settings.',
+      );
+      await _appStateChannel.invokeMethod<void>(
+        _methodOpenFullScreenIntentSettings,
+      );
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Unable to verify full-screen intent permission: $error');
+      }
+    }
+  }
+
+  Future<void> _ensureAndroidOverlayPermission() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final bool canDrawOverlays =
+          await _appStateChannel.invokeMethod<bool>(_methodCanDrawOverlays) ??
+          true;
+      if (canDrawOverlays) {
+        return;
+      }
+      debugPrint('Overlay permission not granted. Opening overlay settings.');
+      await _appStateChannel.invokeMethod<void>(_methodOpenOverlaySettings);
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('Unable to verify overlay permission: $error');
+      }
+    }
+  }
+
   /// บันทึก FCM Token ลง Firestore
   Future<void> _saveFCMToken(String token) async {
     try {
@@ -153,18 +318,24 @@ class NotificationService {
       if (user == null) return;
 
       final batch = FirebaseFirestore.instance.batch();
-      final String? registrationCollection = await _resolveRegistrationCollection(user.uid);
+      final String? registrationCollection =
+          await _resolveRegistrationCollection(user.uid);
 
       if (registrationCollection != null) {
-        final docRef =
-            FirebaseFirestore.instance.collection(registrationCollection).doc(user.uid);
+        final docRef = FirebaseFirestore.instance
+            .collection(registrationCollection)
+            .doc(user.uid);
         batch.set(docRef, {'shopFCMToken': token}, SetOptions(merge: true));
       } else {
-        debugPrint('⚠️ ไม่พบคอลเลกชันร้านค้าของ ${user.uid} ข้ามการอัปเดต shopFCMToken');
+        debugPrint(
+          '⚠️ ไม่พบคอลเลกชันร้านค้าของ ${user.uid} ข้ามการอัปเดต shopFCMToken',
+        );
       }
 
       // อัพเดทใน users collection (สร้างหรืออัปเดตได้เสมอ)
-      final userDocRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
+      final userDocRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid);
       batch.set(userDocRef, {'fcmToken': token}, SetOptions(merge: true));
 
       await batch.commit();
@@ -178,7 +349,10 @@ class NotificationService {
   Future<String?> _resolveRegistrationCollection(String userId) async {
     String? collection;
     try {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get();
       collection = _collectionFromServiceType(
         (userDoc.data()?['serviceType'] as String?)?.trim(),
       );
@@ -186,8 +360,10 @@ class NotificationService {
     } catch (_) {}
 
     try {
-      final contractDoc =
-          await FirebaseFirestore.instance.collection('contracts').doc(userId).get();
+      final contractDoc = await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(userId)
+          .get();
       collection = _collectionFromServiceType(
         (contractDoc.data()?['serviceType'] as String?)?.trim(),
       );
@@ -195,8 +371,10 @@ class NotificationService {
     } catch (_) {}
 
     for (final candidate in _registrationCollections) {
-      final snapshot =
-          await FirebaseFirestore.instance.collection(candidate).doc(userId).get();
+      final snapshot = await FirebaseFirestore.instance
+          .collection(candidate)
+          .doc(userId)
+          .get();
       if (snapshot.exists) {
         return candidate;
       }
@@ -244,10 +422,9 @@ class NotificationService {
         return;
       }
 
-      await FirebaseFirestore.instance.collection('users').doc(userId).set(
-        {'fcmToken': token},
-        SetOptions(merge: true),
-      );
+      await FirebaseFirestore.instance.collection('users').doc(userId).set({
+        'fcmToken': token,
+      }, SetOptions(merge: true));
     } catch (e) {
       debugPrint('Error saving user FCM token directly: $e');
     }
@@ -255,7 +432,11 @@ class NotificationService {
 
   /// จัดการ notification เมื่อแอพอยู่ foreground
   Future<void> _handleForegroundMessage(RemoteMessage message) async {
-    debugPrint('Received foreground message: ${message.messageId}');
+    debugPrint(
+      'Received foreground message: ${message.messageId} '
+      'type=${message.data['type']} channel=${message.data['channelId']} '
+      'appId=${message.data['appId']}',
+    );
 
     final notification = message.notification;
     final data = message.data;
@@ -273,6 +454,7 @@ class NotificationService {
       void handleTap() {
         _openChatFromNotificationData(data);
       }
+
       if (context != null) {
         ChatMessagePopup.show(
           context,
@@ -303,8 +485,27 @@ class NotificationService {
         debugPrint('Skip showing incoming UI for own outgoing call');
         return;
       }
+      // พยายามเปิดหน้า Native (IncomingCallActivity) เสมอ
+      // แต่ไม่พึ่งพา result ของ method call เพื่อแสดง UI
+      // เพราะระบบอาจไม่อนุญาต full-screen intent ในบางสถานะหน้าจอ
+      try {
+        await _showIncomingCallActivity(
+          channelId: data['channelId'] ?? '',
+          token: data['token'],
+          callerId: data['callerId'] ?? data['caller_id'] ?? '',
+          callerName: data['callerName'] ?? 'ผู้โทร',
+          callerPhotoUrl: data['callerPhotoUrl'],
+          isVideo: _resolveIsVideoFlag(data),
+        );
+      } catch (_) {
+        // ignore – Flutter UI ด้านล่างยังทำงานได้ตามปกติ
+      }
+
+      // เปิดหน้า CallScreen (Flutter) ทุกครั้ง เพื่อให้แน่ใจว่า
+      // ในทุกสถานะของแอป (foreground) จะมีหน้ารับสายเด้งขึ้นมา
       _navigateToIncomingCall(
         channelId: data['channelId'] ?? '',
+        appId: data['appId'],
         token: data['token'],
         callerId: data['callerId'] ?? data['caller_id'] ?? '',
         callerName: data['callerName'] ?? 'ผู้โทร',
@@ -314,11 +515,32 @@ class NotificationService {
       return;
     }
 
-    if (notification != null) {
+    if (_isIncomingShopDecisionNotification(data)) {
+      await _showIncomingOrderDecisionPrompt(data);
+      return;
+    }
+
+    final fallbackTitle = (data['title'] as String?)?.trim();
+    final fallbackBody = (data['body'] as String?)?.trim();
+    if (notification != null ||
+        (fallbackTitle?.isNotEmpty == true ||
+            fallbackBody?.isNotEmpty == true)) {
       await _showLocalNotification(
-        title: notification.title ?? 'แจ้งเตือน',
-        body: notification.body ?? '',
-        payload: data['orderId'],
+        title: notification?.title?.trim().isNotEmpty == true
+            ? notification!.title!.trim()
+            : (fallbackTitle?.isNotEmpty == true
+                  ? fallbackTitle!
+                  : 'แจ้งเตือน'),
+        body: notification?.body?.trim().isNotEmpty == true
+            ? notification!.body!.trim()
+            : (fallbackBody ?? ''),
+        payload: jsonEncode(<String, dynamic>{
+          'type': data['type'] ?? 'app_notification',
+          'orderId': data['orderId'],
+          'action': data['action'],
+          'title': fallbackTitle ?? notification?.title,
+          'body': fallbackBody ?? notification?.body,
+        }),
       );
     }
 
@@ -378,6 +600,7 @@ class NotificationService {
         if (decoded['type'] == 'call') {
           _navigateToIncomingCall(
             channelId: decoded['channelId'] as String? ?? '',
+            appId: decoded['appId'] as String?,
             token: decoded['token'] as String?,
             callerId: decoded['callerId'] as String? ?? '',
             callerName: decoded['callerName'] as String? ?? 'ผู้โทร',
@@ -390,9 +613,14 @@ class NotificationService {
           _openChatFromNotificationData(decoded);
           return;
         }
+        if (decoded['type'] == 'app_notification') {
+          _openOrderManagement(decoded['orderId'] as String?);
+          return;
+        }
       }
       debugPrint('Notification tapped with payload: $payload');
     } catch (error) {
+      _openOrderManagement(payload);
       debugPrint('Failed to parse notification payload: $error');
     }
   }
@@ -400,9 +628,16 @@ class NotificationService {
   /// จัดการเมื่อกด notification จาก background
   void _handleNotificationTap(RemoteMessage message) {
     debugPrint('Notification tapped from background: ${message.messageId}');
-    final orderId = message.data['orderId'];
-    if (orderId != null) {
-      // TODO: Navigate to order details
+    if (_isIncomingShopDecisionNotification(message.data)) {
+      unawaited(_showIncomingOrderDecisionPrompt(message.data));
+      return;
+    }
+
+    final orderId = message.data['orderId'] as String?;
+    if (orderId != null &&
+        orderId.isNotEmpty &&
+        message.data['type'] == 'app_notification') {
+      _openOrderManagement(orderId);
     }
 
     // เปิดหน้ารับสายอัตโนมัติเมื่อแตะ notification ประเภท call
@@ -410,11 +645,14 @@ class NotificationService {
       final currentUid = FirebaseAuth.instance.currentUser?.uid;
       final callerId = message.data['callerId'] ?? message.data['caller_id'];
       if (currentUid != null && callerId != null && currentUid == callerId) {
-        debugPrint('Skip navigating to CallScreen for self-originated notification');
+        debugPrint(
+          'Skip navigating to CallScreen for self-originated notification',
+        );
         return;
       }
       _navigateToIncomingCall(
         channelId: message.data['channelId'] ?? '',
+        appId: message.data['appId'],
         token: message.data['token'],
         callerId: message.data['callerId'] ?? message.data['caller_id'] ?? '',
         callerName: message.data['callerName'] ?? 'ผู้โทร',
@@ -431,6 +669,244 @@ class NotificationService {
     if (message.data['type'] == 'chat') {
       _openChatFromNotificationData(message.data);
     }
+  }
+
+  bool _isIncomingShopDecisionNotification(Map<String, dynamic> data) {
+    final type = (data['type'] as String?)?.trim();
+    final action = (data['action'] as String?)?.trim();
+    return (type == null || type.isEmpty || type == 'app_notification') &&
+        action == 'order_accepted';
+  }
+
+  Future<void> markAppNotificationRead(String id) async {
+    final normalizedId = id.trim();
+    if (normalizedId.isEmpty) {
+      return;
+    }
+    await FirebaseFirestore.instance
+        .collection('app_notifications')
+        .doc(normalizedId)
+        .set(<String, dynamic>{
+          'read': true,
+          'readAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+  }
+
+  Future<DetailedOrder?> loadActionableShopOrder(String orderId) {
+    return _loadActionableShopOrder(orderId);
+  }
+
+  Future<void> acceptShopOrder(
+    DetailedOrder order, {
+    bool openOrderManagementAfterAccept = true,
+    String? notificationId,
+  }) async {
+    await _acceptShopOrder(order);
+    if (notificationId != null && notificationId.trim().isNotEmpty) {
+      await markAppNotificationRead(notificationId);
+    }
+    if (openOrderManagementAfterAccept) {
+      openOrderManagement(order.orderId);
+    }
+  }
+
+  Future<void> rejectShopOrder(
+    DetailedOrder order, {
+    String? notificationId,
+  }) async {
+    await _rejectShopOrder(order);
+    if (notificationId != null && notificationId.trim().isNotEmpty) {
+      await markAppNotificationRead(notificationId);
+    }
+  }
+
+  void openOrderManagement([String? orderId]) {
+    _openOrderManagement(orderId);
+  }
+
+  Future<void> _showIncomingOrderDecisionPrompt(
+    Map<String, dynamic> data, {
+    int retryCount = 40,
+  }) async {
+    final String orderId = (data['orderId'] as String?)?.trim() ?? '';
+    final String notificationId =
+        (data['notificationId'] as String?)?.trim() ?? '';
+    if (orderId.isEmpty || _activeOrderPromptId == orderId) {
+      return;
+    }
+
+    final navigator = MyApp.navigatorKey.currentState;
+    final overlayContext = navigator?.overlay?.context;
+    if (overlayContext == null) {
+      if (retryCount <= 0 || !_queuedShopDecisionOrderIds.add(orderId)) {
+        return;
+      }
+      Future.delayed(const Duration(milliseconds: 300), () {
+        _queuedShopDecisionOrderIds.remove(orderId);
+        unawaited(
+          _showIncomingOrderDecisionPrompt(data, retryCount: retryCount - 1),
+        );
+      });
+      return;
+    }
+
+    final order = await _loadActionableShopOrder(orderId);
+    if (order == null) {
+      return;
+    }
+
+    _activeOrderPromptId = orderId;
+    try {
+      final accepted = await navigator!.push<bool>(
+        MaterialPageRoute<bool>(
+          fullscreenDialog: true,
+          builder: (_) => IncomingShopOrderScreen(
+            order: order,
+            title: data['title'] as String?,
+            message: data['body'] as String?,
+            onAccept: () => acceptShopOrder(
+              order,
+              openOrderManagementAfterAccept: false,
+              notificationId: notificationId,
+            ),
+            onReject: () =>
+                rejectShopOrder(order, notificationId: notificationId),
+          ),
+        ),
+      );
+      if (accepted == true) {
+        openOrderManagement(order.orderId);
+      }
+    } finally {
+      if (_activeOrderPromptId == orderId) {
+        _activeOrderPromptId = null;
+      }
+    }
+  }
+
+  Future<DetailedOrder?> _loadActionableShopOrder(String orderId) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('orders')
+          .doc(orderId)
+          .get();
+      final data = snapshot.data();
+      if (!snapshot.exists || data == null) {
+        return null;
+      }
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      final shopId = (data['shopId'] as String?)?.trim();
+      final shopOwnerId = (data['shopOwnerId'] as String?)?.trim();
+      final isShopParticipant =
+          currentUser != null &&
+          ((shopOwnerId != null && shopOwnerId == currentUser.uid) ||
+              (shopId != null && shopId == currentUser.uid));
+      if (!isShopParticipant) {
+        return null;
+      }
+
+      final order = DetailedOrder.fromSnapshot(snapshot);
+      final bool awaitingShopDecision =
+          order.status == 'pending' ||
+          (order.status == 'accepted' && order.preparingStartTime == null);
+      return awaitingShopDecision ? order : null;
+    } catch (error) {
+      debugPrint('Failed to load actionable order $orderId: $error');
+      return null;
+    }
+  }
+
+  Future<void> _acceptShopOrder(DetailedOrder order) async {
+    final now = DateTime.now();
+    final updatedOrder = order.copyWith(
+      status: 'preparing',
+      acceptedAt: now,
+      preparingStartTime: now,
+      notifications: <String, NotificationStatus>{
+        'firstWarning': NotificationStatus(sent: false, timeInMinutes: 5),
+        'secondWarning': NotificationStatus(sent: false, timeInMinutes: 7.5),
+        'finalWarning': NotificationStatus(sent: false, timeInMinutes: 10),
+      },
+    );
+
+    await FirebaseFirestore.instance
+        .collection('orders')
+        .doc(order.orderId)
+        .update(updatedOrder.toMap());
+
+    await _sendOrderAppNotification(
+      targetApp: 'van3',
+      recipientUid: order.driverId,
+      orderId: order.orderId,
+      title: 'ร้านรับออเดอร์แล้ว',
+      body:
+          'ออเดอร์ #${order.orderId.substring(0, order.orderId.length >= 8 ? 8 : order.orderId.length)} ร้านเริ่มเตรียมสินค้าแล้ว',
+      action: 'shop_accepted_order',
+    );
+  }
+
+  Future<void> _rejectShopOrder(DetailedOrder order) async {
+    await FirebaseFirestore.instance
+        .collection('orders')
+        .doc(order.orderId)
+        .update(<String, dynamic>{
+          'status': 'cancelled',
+          'updatedAt': Timestamp.now(),
+        });
+
+    await _sendOrderAppNotification(
+      targetApp: 'van3',
+      recipientUid: order.driverId,
+      orderId: order.orderId,
+      title: 'ร้านปฏิเสธออเดอร์',
+      body:
+          'ออเดอร์ #${order.orderId.substring(0, order.orderId.length >= 8 ? 8 : order.orderId.length)} ถูกยกเลิกโดยร้านค้า',
+      action: 'shop_rejected_order',
+    );
+  }
+
+  Future<void> _sendOrderAppNotification({
+    required String targetApp,
+    required String? recipientUid,
+    required String orderId,
+    required String title,
+    required String body,
+    required String action,
+  }) async {
+    final toUid = recipientUid?.trim();
+    if (toUid == null || toUid.isEmpty) {
+      return;
+    }
+
+    await FirebaseFirestore.instance
+        .collection('app_notifications')
+        .add(<String, dynamic>{
+          'targetApp': targetApp,
+          'recipientUid': toUid,
+          'orderId': orderId,
+          'title': title,
+          'body': body,
+          'read': false,
+          'createdAt': FieldValue.serverTimestamp(),
+          'source': 'van1_shop',
+          'sourceApp': 'van1',
+          'action': action,
+        });
+  }
+
+  void _openOrderManagement([String? orderId]) {
+    final navigator = MyApp.navigatorKey.currentState;
+    final context = navigator?.overlay?.context;
+    if (navigator == null || context == null) {
+      return;
+    }
+
+    navigator.push(
+      MaterialPageRoute<void>(
+        builder: (_) => OrderManagementScreen(focusOrderId: orderId),
+      ),
+    );
   }
 
   void _setupCallIntentBridge() {
@@ -460,8 +936,8 @@ class NotificationService {
 
   Future<void> _drainPendingAndroidIntents() async {
     try {
-      final List<dynamic>? pending =
-          await _callIntentChannel.invokeListMethod<dynamic>(_methodDrainPending);
+      final List<dynamic>? pending = await _callIntentChannel
+          .invokeListMethod<dynamic>(_methodDrainPending);
       if (pending == null) return;
       for (final dynamic rawPayload in pending) {
         _handleIncomingCallPayload(rawPayload);
@@ -471,9 +947,46 @@ class NotificationService {
     }
   }
 
+  Future<bool> _showIncomingCallActivity({
+    required String channelId,
+    required String? token,
+    required String callerId,
+    required String callerName,
+    String? callerPhotoUrl,
+    required bool isVideo,
+  }) async {
+    if (!Platform.isAndroid ||
+        channelId.isEmpty ||
+        token == null ||
+        token.isEmpty) {
+      return false;
+    }
+    try {
+      await _appStateChannel.invokeMethod<void>(
+        _methodShowIncomingCallActivity,
+        <String, dynamic>{
+          'extra_channel_id': channelId,
+          'extra_call_token': token,
+          'extra_caller_id': callerId,
+          'extra_caller_name': callerName,
+          'extra_caller_photo': callerPhotoUrl,
+          'extra_is_video': isVideo,
+        },
+      );
+      return true;
+    } catch (error) {
+      debugPrint('Unable to open native incoming call activity: $error');
+      return false;
+    }
+  }
+
   void _handleIncomingCallPayload(dynamic payloadData) {
     final payload = _normalizePlatformPayload(payloadData);
     if (payload == null) {
+      return;
+    }
+    if (payload['orderDecision'] == true) {
+      unawaited(_showIncomingOrderDecisionPrompt(payload));
       return;
     }
     if (payload['cancelOnly'] == true) {
@@ -483,6 +996,7 @@ class NotificationService {
     final bool minimizeOnEnd = payload['appWasForeground'] == false;
     _navigateToIncomingCall(
       channelId: payload['channelId'] as String? ?? '',
+      appId: payload['appId'] as String?,
       token: payload['token'] as String?,
       callerId: payload['callerId'] as String? ?? '',
       callerName: payload['callerName'] as String? ?? 'ผู้โทร',
@@ -503,7 +1017,9 @@ class NotificationService {
     if (!_incomingCallVisible) {
       return;
     }
-    if (_activeIncomingChannelId != null && channelId != null && _activeIncomingChannelId != channelId) {
+    if (_activeIncomingChannelId != null &&
+        channelId != null &&
+        _activeIncomingChannelId != channelId) {
       return;
     }
     final navigatorState = MyApp.navigatorKey.currentState;
@@ -517,16 +1033,19 @@ class NotificationService {
 
   void _navigateToIncomingCall({
     required String channelId,
+    required String? appId,
     required String? token,
     required String callerId,
     required String callerName,
     String? callerPhotoUrl,
     required bool isVideo,
-    int retryCount = 8,
+    int retryCount = 40,
     bool minimizeOnEnd = false,
   }) {
     if (channelId.isEmpty || token == null || token.isEmpty) {
-      debugPrint('Incoming call payload missing channel/token, skip UI presentation');
+      debugPrint(
+        'Incoming call payload missing channel/token, skip UI presentation',
+      );
       return;
     }
     if (_cancelledChannelIds.contains(channelId)) {
@@ -547,6 +1066,7 @@ class NotificationService {
       Future.delayed(const Duration(milliseconds: 300), () {
         _navigateToIncomingCall(
           channelId: channelId,
+          appId: appId,
           token: token,
           callerId: callerId,
           callerName: callerName,
@@ -565,31 +1085,31 @@ class NotificationService {
       _backgroundReturnChannelId = channelId;
       _shouldReturnAppToBackground = true;
     }
-    navigatorState!.push(
-      MaterialPageRoute(
-        fullscreenDialog: true,
-        builder: (_) => CallScreen(
-          channelName: channelId,
-          targetProfile: UserProfile.fromMap(
-            callerId,
-            {
-              'displayName': callerName,
-              'photoUrl': callerPhotoUrl,
-            },
+    navigatorState!
+        .push(
+          MaterialPageRoute(
+            fullscreenDialog: true,
+            builder: (_) => CallScreen(
+              channelName: channelId,
+              targetProfile: UserProfile.fromMap(callerId, {
+                'displayName': callerName,
+                'photoUrl': callerPhotoUrl,
+              }),
+              isVideo: isVideo,
+              isIncoming: true,
+              appIdOverride: appId,
+              tokenOverride: token,
+            ),
           ),
-          isVideo: isVideo,
-          isIncoming: true,
-          tokenOverride: token,
-        ),
-      ),
-    ).whenComplete(() {
-      _incomingCallVisible = false;
-      if (_activeIncomingChannelId == channelId) {
-        _activeIncomingChannelId = null;
-      }
-      _cancelledChannelIds.remove(channelId);
-      _maybeReturnAppToBackground(channelId: channelId);
-    });
+        )
+        .whenComplete(() {
+          _incomingCallVisible = false;
+          if (_activeIncomingChannelId == channelId) {
+            _activeIncomingChannelId = null;
+          }
+          _cancelledChannelIds.remove(channelId);
+          _maybeReturnAppToBackground(channelId: channelId);
+        });
   }
 
   bool _resolveIsVideoFlag(Map<String, dynamic> data) {
@@ -614,7 +1134,9 @@ class NotificationService {
     if (!_shouldReturnAppToBackground) {
       return;
     }
-    if (_backgroundReturnChannelId != null && channelId != null && _backgroundReturnChannelId != channelId) {
+    if (_backgroundReturnChannelId != null &&
+        channelId != null &&
+        _backgroundReturnChannelId != channelId) {
       return;
     }
     _shouldReturnAppToBackground = false;
@@ -652,18 +1174,12 @@ class NotificationService {
 
     final senderIdRaw = data['senderId'] ?? data['sender_id'];
     final String? senderId = senderIdRaw?.toString();
-    final senderName = (data['senderName'] ?? data['title'] ?? 'คู่สนทนา').toString();
+    final senderName = (data['senderName'] ?? data['title'] ?? 'คู่สนทนา')
+        .toString();
 
     UserProfile? profile;
     if (senderId != null && senderId.isNotEmpty) {
-      try {
-        final doc = await FirebaseFirestore.instance.collection('users').doc(senderId).get();
-        if (doc.exists) {
-          profile = UserProfile.fromSnapshot(doc);
-        }
-      } catch (error) {
-        debugPrint('Failed to load chat profile for $senderId: $error');
-      }
+      profile = await _resolveChatProfile(senderId);
     }
 
     profile ??= UserProfile(
@@ -678,6 +1194,33 @@ class NotificationService {
     );
   }
 
+  Future<UserProfile?> _resolveChatProfile(String uid) async {
+    for (final collection in _chatProfileCollections) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection(collection)
+            .doc(uid)
+            .get();
+        if (!doc.exists) {
+          continue;
+        }
+
+        final data = doc.data();
+        if (data == null) {
+          continue;
+        }
+
+        return UserProfile.fromMap(uid, data);
+      } catch (error) {
+        debugPrint(
+          'Failed to load chat profile for $uid from $collection: $error',
+        );
+      }
+    }
+
+    return null;
+  }
+
   // ฟังก์ชันสำหรับโทรจริง (voice/video call)
   // เรียก Cloud Function callUser
   Future<void> callUser({
@@ -688,7 +1231,9 @@ class NotificationService {
     required String calleeFCMToken,
     required String callType, // 'voice' หรือ 'video'
   }) async {
-    final callable = FirebaseFunctions.instanceFor().httpsCallable('callUser');
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'asia-southeast1',
+    ).httpsCallable('callUser');
     final result = await callable.call({
       'callerId': callerId,
       'callerName': callerName,
@@ -705,8 +1250,9 @@ class NotificationService {
     required String calleeId,
   }) async {
     try {
-      final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
-          .httpsCallable('cancelCallInvite');
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'asia-southeast1',
+      ).httpsCallable('cancelCallInvite');
       await callable.call({
         'channelId': channelId,
         'calleeId': calleeId,
@@ -723,12 +1269,17 @@ class NotificationService {
     required UserProfile callee,
     required bool isVideo,
   }) async {
-    const List<String> preferredRegions = <String>['asia-southeast1', 'us-central1'];
+    const List<String> preferredRegions = <String>[
+      'asia-southeast1',
+      'us-central1',
+    ];
     FirebaseFunctionsException? lastError;
 
     for (final region in preferredRegions) {
       try {
-        final callable = FirebaseFunctions.instanceFor(region: region).httpsCallable('initiateCall');
+        final callable = FirebaseFunctions.instanceFor(
+          region: region,
+        ).httpsCallable('initiateCall');
         final result = await callable.call(<String, dynamic>{
           'calleeId': callee.uid,
           'callerId': caller.uid,
@@ -741,7 +1292,9 @@ class NotificationService {
         return Map<String, dynamic>.from(result.data);
       } on FirebaseFunctionsException catch (e) {
         lastError = e;
-        debugPrint('Error initiating call via $region: ${e.code} - ${e.message}');
+        debugPrint(
+          'Error initiating call via $region: ${e.code} - ${e.message}',
+        );
         if (e.code != 'not-found') {
           rethrow;
         }
@@ -751,13 +1304,18 @@ class NotificationService {
     if (lastError != null) {
       throw lastError;
     }
-    throw FirebaseFunctionsException(code: 'unknown', message: 'Unknown error initiating call');
+    throw FirebaseFunctionsException(
+      code: 'unknown',
+      message: 'Unknown error initiating call',
+    );
   }
 }
 
 /// Background message handler (ต้องเป็น top-level function)
 @pragma('vm:entry-point')
-Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+Future<void> firebaseMessagingBackgroundHandlerVan1(
+  RemoteMessage message,
+) async {
   debugPrint('Background message received: ${message.messageId}');
   // ไม่ต้องทำอะไร เพราะ Cloud Functions จะจัดการให้
 }

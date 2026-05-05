@@ -32,6 +32,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoAcceptOrders = false;
+  String _accountSectionTitle = 'บัญชีร้านค้า';
 
   static const List<String> _registrationCollections = <String>[
     'market_registrations',
@@ -404,7 +405,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: <Widget>[
                   if (user != null)
                     _buildSection(
-                      title: 'บัญชีร้านค้า',
+                      title: _accountSectionTitle,
                       children: [
                         FutureBuilder<_ResolvedShopDoc?>(
                           future: _loadShopData(user),
@@ -444,6 +445,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 lat = (loc['latitude'] as num?)?.toDouble();
                                 lng = (loc['longitude'] as num?)?.toDouble();
                               }
+                            }
+
+                            final String resolvedSectionTitle =
+                                'บัญชี${(shopType != null && shopType.trim().isNotEmpty) ? shopType.trim() : 'ร้านค้า'}';
+                            if (_accountSectionTitle != resolvedSectionTitle) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (!mounted) return;
+                                setState(() => _accountSectionTitle = resolvedSectionTitle);
+                              });
                             }
 
                             final hasBookBankImage = bookBankImageUrl?.isNotEmpty ?? false;

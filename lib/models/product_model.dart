@@ -5,6 +5,10 @@ class Product {
   final String name;
   final String description;
   final String? toppings;
+  final String? productCategory;
+  final bool isFreshProduct;
+  final bool isProcessed;
+  final String? taxStatus;
   final double price;
   final int stock;
   final List<String> imageUrls;
@@ -21,6 +25,10 @@ class Product {
     required this.name,
     required this.description,
     this.toppings,
+    this.productCategory,
+    this.isFreshProduct = false,
+    this.isProcessed = false,
+    this.taxStatus,
     required this.price,
     required this.stock,
     required this.imageUrls,
@@ -39,6 +47,10 @@ class Product {
       'name': name,
       'description': description,
       'toppings': toppings,
+      'productCategory': productCategory,
+      'isFreshProduct': isFreshProduct,
+      'isProcessed': isProcessed,
+      'taxStatus': taxStatus,
       'price': price,
       'stock': stock,
       'imageUrls': imageUrls,
@@ -68,6 +80,10 @@ class Product {
       name: map['name'] ?? '',
       description: map['description'] ?? '',
       toppings: map['toppings'] as String?,
+      productCategory: map['productCategory'] as String?,
+      isFreshProduct: (map['isFreshProduct'] as bool?) ?? false,
+      isProcessed: (map['isProcessed'] as bool?) ?? false,
+      taxStatus: map['taxStatus'] as String?,
       price: (map['price'] as num?)?.toDouble() ?? 0.0,
       stock: (map['stock'] as num?)?.toInt() ?? 0,
       imageUrls: List<String>.from(map['imageUrls'] ?? []),

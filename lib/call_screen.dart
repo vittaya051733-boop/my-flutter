@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
@@ -17,6 +16,7 @@ class CallScreen extends StatefulWidget {
   final bool isVideo;
   final UserProfile targetProfile;
   final bool isIncoming;
+  final String? appIdOverride;
   final String? tokenOverride;
   final String? channelOverride;
   const CallScreen({
@@ -25,6 +25,7 @@ class CallScreen extends StatefulWidget {
     required this.isVideo,
     required this.targetProfile,
     this.isIncoming = false,
+    this.appIdOverride,
     this.tokenOverride,
     this.channelOverride,
   });
@@ -43,7 +44,9 @@ class _CallScreenState extends State<CallScreen> {
   late final String _activeToken;
   late final String _activeChannelId;
   bool _incomingAccepted = false;
+  bool _acceptingIncoming = false;
   bool _remoteConnected = false;
+  bool _remoteAccepted = false;
   DateTime? _callStart;
   bool _resultSent = false;
   Timer? _durationTimer;
@@ -60,6 +63,14 @@ class _CallScreenState extends State<CallScreen> {
 
   // Agora App ID
   static const String appId = '37050f5308fd450ba070b53c01596c06';
+
+  String get _effectiveAppId {
+    final override = widget.appIdOverride?.trim();
+    if (override != null && override.isNotEmpty) {
+      return override;
+    }
+    return appId;
+  }
 
   @override
   void initState() {
@@ -123,16 +134,18 @@ class _CallScreenState extends State<CallScreen> {
 
   Future<void> _initAgora() async {
     if (_engine != null) return;
+    RtcEngine? engine;
     try {
-      final engine = createAgoraRtcEngine();
+      engine = createAgoraRtcEngine();
       await engine.initialize(RtcEngineContext(
-        appId: appId,
+        appId: _effectiveAppId,
         channelProfile: ChannelProfileType.channelProfileCommunication,
       ));
       engine.registerEventHandler(
       RtcEngineEventHandler(
         onJoinChannelSuccess: (connection, elapsed) {
           print('Agora: onJoinChannelSuccess channel=${connection.channelId} uid=${connection.localUid}');
+          if (!mounted) return;
           setState(() {
             _joined = true;
           });
@@ -140,6 +153,7 @@ class _CallScreenState extends State<CallScreen> {
         onUserJoined: (connection, remoteUid, elapsed) {
           if (connection.channelId != _activeChannelId) return;
           print('Agora: onUserJoined remoteUid=$remoteUid in channel ${connection.channelId}');
+          if (!mounted) return;
           setState(() {
             _remoteUid = remoteUid;
             _remoteConnected = true;
@@ -164,6 +178,13 @@ class _CallScreenState extends State<CallScreen> {
         },
         onError: (err, msg) {
           print('Agora: onError code=$err msg=$msg');
+          if (err == ErrorCodeType.errInvalidToken) {
+            if (!mounted) return;
+            setState(() {
+              _fatalError = 'Agora token ไม่ถูกต้องหรือไม่ตรงกับ App ID';
+            });
+            unawaited(_endCall(declined: true));
+          }
         },
       ),
     );
@@ -185,11 +206,22 @@ class _CallScreenState extends State<CallScreen> {
           publishMicrophoneTrack: true,
         ),
       );
+      if (!mounted) {
+        await engine.leaveChannel();
+        await engine.release();
+        return;
+      }
       setState(() {
         _engine = engine;
       });
     } catch (error) {
       print('Agora init error: $error');
+      if (!mounted) {
+        if (engine != null) {
+          await engine.release();
+        }
+        return;
+      }
       if (!mounted) return;
       setState(() {
         _fatalError = 'ไม่สามารถเชื่อมต่อบริการโทรได้ ($error)';
@@ -228,6 +260,26 @@ class _CallScreenState extends State<CallScreen> {
     final data = snapshot.data();
     if (data == null) return;
     final status = data['status'] as String?;
+    if (status == 'accepted') {
+      if (!mounted) return;
+      setState(() {
+        _remoteAccepted = true;
+      });
+      if (!widget.isIncoming) {
+        _stopRingback();
+      }
+      return;
+    }
+    if (status == 'connected') {
+      if (!mounted) return;
+      setState(() {
+        _remoteAccepted = true;
+      });
+      if (!widget.isIncoming) {
+        _stopRingback();
+      }
+      return;
+    }
     if (status == 'ended') {
       final endedBy = data['endedBy'] as String?;
       if (endedBy != null && endedBy == _currentUserId) return;
@@ -358,16 +410,26 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _acceptIncomingCall() async {
-    if (!await _ensurePermissions()) return;
+    if (_acceptingIncoming) return;
     setState(() {
+      _acceptingIncoming = true;
       _incomingAccepted = true;
     });
+    _stopRingback();
     unawaited(_updateCallSessionStatus('accepted', extra: {
       'acceptedAt': FieldValue.serverTimestamp(),
       if (_currentUserId != null) 'acceptedBy': _currentUserId,
     }));
-    _stopRingback();
+    if (!await _ensurePermissions()) {
+      if (!mounted) return;
+      await _endCall(declined: true);
+      return;
+    }
     await _initAgora();
+    if (!mounted) return;
+    setState(() {
+      _acceptingIncoming = false;
+    });
   }
 
   Widget _buildIncomingContent() {
@@ -692,6 +754,9 @@ class _CallScreenState extends State<CallScreen> {
   String _statusText({required bool isVideo}) {
     if (!_joined) return 'กำลังเชื่อมต่อ...';
     if (!_remoteConnected) {
+      if (_remoteAccepted) {
+        return 'อีกฝ่ายรับสายแล้ว กำลังเชื่อมต่อ...';
+      }
       return isVideo ? 'กำลังโทรหา (วิดีโอ)' : 'กำลังโทรหา';
     }
     return 'กำลังสนทนากับ';

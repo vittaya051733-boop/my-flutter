@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../utils/shop_profile_resolver.dart';
+
 /// Minimal profile information stored in the top-level `users` collection
 /// so other services (chat/friends) can reference a shop quickly.
 class UserProfile {
@@ -27,11 +29,15 @@ class UserProfile {
 
   factory UserProfile.fromMap(String uid, Map<String, dynamic>? data) {
     final map = data ?? const <String, dynamic>{};
+    final resolvedName = ShopProfileResolver.resolveName(map);
+    final resolvedImageUrl = ShopProfileResolver.resolveImageUrl(map);
     return UserProfile(
       uid: uid,
-      displayName: (map['displayName'] ?? map['name'] ?? 'ผู้ใช้ใหม่').toString(),
+      displayName:
+          (resolvedName ?? map['displayName'] ?? map['name'] ?? 'ผู้ใช้ใหม่').toString(),
       phoneNumber: (map['phoneNumber'] ?? map['phone']) as String?,
-      photoUrl: (map['photoUrl'] ?? map['imageUrl'] ?? map['shopImageUrl']) as String?,
+      photoUrl: (resolvedImageUrl ?? map['photoUrl'] ?? map['imageUrl'] ?? map['shopImageUrl'])
+          as String?,
       serviceType: (map['serviceType'] ?? map['type']) as String?,
       isOfficial: (map['isOfficial'] as bool?) ?? false,
       profileCompleted: (map['profileCompleted'] as bool?) ?? false,
