@@ -128,10 +128,6 @@ async function _sendChatNotification({
   collectionName,
 }) {
   const payload = {
-    notification: {
-      title,
-      body: previewText,
-    },
     data: {
       chatId,
       senderId: senderId || '',
@@ -139,16 +135,12 @@ async function _sendChatNotification({
       message: previewText,
       orderId: orderId || '',
       type: 'chat',
+      title,
+      body: previewText,
       click_action: 'FLUTTER_NOTIFICATION_CLICK',
     },
     android: {
       priority: 'high',
-      notification: {
-        channelId: 'order_channel',
-        sound: 'default',
-        defaultSound: true,
-        defaultVibrateTimings: true,
-      },
     },
     apns: {
       payload: {

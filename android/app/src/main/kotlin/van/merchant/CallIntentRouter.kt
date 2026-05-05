@@ -55,6 +55,7 @@ object CallIntentRouter {
             MainActivity.ACTION_SHOW_INCOMING_CALL -> buildIncomingPayload(intent)
             MainActivity.ACTION_CANCEL_INCOMING_CALL -> buildCancelPayload(intent)
             MainActivity.ACTION_SHOW_ORDER_DECISION -> buildOrderDecisionPayload(intent)
+            MainActivity.ACTION_SHOW_CHAT_NOTIFICATION -> buildChatPayload(intent)
             else -> null
         }
     }
@@ -91,6 +92,18 @@ object CallIntentRouter {
             "notificationId" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_ID),
             "title" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_TITLE),
             "body" to intent.getStringExtra(MainActivity.EXTRA_NOTIFICATION_BODY)
+        )
+    }
+
+    private fun buildChatPayload(intent: Intent): Map<String, Any?>? {
+        val chatId = intent.getStringExtra(MainActivity.EXTRA_CHAT_ID) ?: return null
+        return mapOf(
+            "type" to "chat",
+            "chatId" to chatId,
+            "senderId" to intent.getStringExtra(MainActivity.EXTRA_SENDER_ID),
+            "senderName" to intent.getStringExtra(MainActivity.EXTRA_SENDER_NAME),
+            "message" to intent.getStringExtra(MainActivity.EXTRA_MESSAGE),
+            "orderId" to intent.getStringExtra(MainActivity.EXTRA_ORDER_ID)
         )
     }
 

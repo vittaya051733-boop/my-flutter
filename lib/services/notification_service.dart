@@ -989,6 +989,10 @@ class NotificationService {
       unawaited(_showIncomingOrderDecisionPrompt(payload));
       return;
     }
+    if (payload['type'] == 'chat') {
+      unawaited(_openChatFromNotificationData(payload));
+      return;
+    }
     if (payload['cancelOnly'] == true) {
       _handleCallCancelFromNative(payload['channelId'] as String?);
       return;
