@@ -50,6 +50,20 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Deploy Function verifyTopUpSlip Isolated (van1)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"scripts/deploy-functions-isolated.ps1",
+				"-FunctionName",
+				"verifyTopUpSlip"
+			],
+			"problemMatcher": []
+		},
+		{
 			"label": "Flutter Build APK",
 			"type": "shell",
 			"command": "flutter",

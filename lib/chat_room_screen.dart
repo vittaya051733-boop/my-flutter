@@ -89,6 +89,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   @override
   Widget build(BuildContext context) {
     final profile = _currentProfile;
+    final friendName = widget.friendProfile.displayName.trim();
+    final friendInitial =
+        friendName.isNotEmpty ? friendName.characters.first.toUpperCase() : '?';
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -98,7 +101,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   ? NetworkImage(widget.friendProfile.photoUrl!)
                   : null,
               child: widget.friendProfile.photoUrl == null
-                  ? Text(widget.friendProfile.displayName.characters.first.toUpperCase())
+                  ? Text(friendInitial)
                   : null,
             ),
             const SizedBox(width: 12),

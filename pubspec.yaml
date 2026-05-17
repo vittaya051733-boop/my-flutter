@@ -69,6 +69,7 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.1
   change_app_package_name: ^1.5.0
 
 flutter:
@@ -79,24 +80,24 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+  image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
   remove_alpha_ios: true
   web:
     generate: true
-    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
     background_color: "#ffffff"
     theme_color: "#ffffff"
   windows:
     generate: true
-    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
   macos:
     generate: true
-    image_path: "assets/file_000000008fc872089268acc9b04e5bcf.png"
+    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
 
 dependency_overrides:
   sqflite_android: 2.4.1
 flutter_native_splash:
   color: "#ffffff"
-  image: assets/file_000000008fc872089268acc9b04e5bcf.png
+  image: assets/file_00000000be5472069245fc3bdb122dbb.png
   android: true
   ios: true

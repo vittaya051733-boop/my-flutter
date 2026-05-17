@@ -14,6 +14,7 @@ analyzer:
     - local_packages/file_saver/example/**
     - local_packages/better_player/example/**
     - local_packages/better_player/test/**
+    - local_packages/blue_thermal_printer/**
   errors:
     unnecessary_brace_in_string_interps: ignore
     deprecated_member_use: ignore

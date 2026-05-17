@@ -233,6 +233,140 @@ const SMTP_PORT = defineSecret('SMTP_PORT');
 const SMTP_USER = defineSecret('SMTP_USER');
 const SMTP_PASS = defineSecret('SMTP_PASS');
 const SMTP_FROM = defineSecret('SMTP_FROM');
+const SLIPOK_API_KEY_SECRET = defineSecret('SLIPOK_API_KEY');
+
+const AI_QUEUE_COLLECTION = 'ai_processing_queue';
+const AI_QUEUE_MAX_CONCURRENT = 2;
+const AI_QUEUE_MAX_VISIBLE_POSITION = 5;
+const AI_QUEUE_AVERAGE_SECONDS = 45;
+const AI_QUEUE_POLL_MS = 2500;
+const AI_QUEUE_MAX_WAIT_MS = 60 * 1000;
+const AI_QUEUE_JOB_TTL_MS = 4 * 60 * 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeAiRequestId(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (/^[A-Za-z0-9_-]{8,100}$/.test(value)) {
+    return value;
+  }
+  return crypto.randomUUID();
+}
+
+function formatExternalAiRecommendation(queuePosition, estimatedWaitSeconds) {
+  const minutes = Math.max(1, Math.ceil(estimatedWaitSeconds / 60));
+  return `คิว AI ตอนนี้เยอะมาก (คิวที่ ${queuePosition}, ประมาณ ${minutes} นาที) หากต้องการลงสินค้าเร็ว แนะนำใช้ AI ภายนอกลบ/เปลี่ยนพื้นหลังเป็นสีขาวก่อน แล้วค่อยอัปโหลดรูปเข้าระบบ หรือรอสักครู่แล้วลองใหม่`;
+}
+
+async function acquireAiProcessingSlot({ uid, requestId }) {
+  const jobId = normalizeAiRequestId(requestId);
+  const jobRef = db.collection(AI_QUEUE_COLLECTION).doc(jobId);
+  const createdAtMillis = Date.now();
+
+  await jobRef.set({
+    uid,
+    status: 'queued',
+    position: null,
+    estimatedWaitSeconds: null,
+    activeProcessing: null,
+    createdAtMillis,
+    updatedAt: FieldValue.serverTimestamp(),
+    expiresAtMillis: createdAtMillis + AI_QUEUE_JOB_TTL_MS,
+  }, { merge: true });
+
+  while (Date.now() - createdAtMillis < AI_QUEUE_MAX_WAIT_MS) {
+    const now = Date.now();
+    const snapshot = await db.collection(AI_QUEUE_COLLECTION)
+      .where('expiresAtMillis', '>', now)
+      .get();
+    const jobs = snapshot.docs
+      .map((doc) => ({ id: doc.id, ref: doc.ref, data: doc.data() || {} }))
+      .filter((job) => job.data.status === 'queued' || job.data.status === 'processing')
+      .sort((left, right) => {
+        const leftCreatedAt = Number(left.data.createdAtMillis || 0);
+        const rightCreatedAt = Number(right.data.createdAtMillis || 0);
+        if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt - rightCreatedAt;
+        return left.id.localeCompare(right.id);
+      });
+
+    const currentIndex = jobs.findIndex((job) => job.id === jobId);
+    const activeProcessing = jobs.filter((job) => job.data.status === 'processing').length;
+    const queuePosition = currentIndex >= 0 ? currentIndex + 1 : jobs.length + 1;
+    const estimatedWaitSeconds = Math.max(10, Math.ceil((queuePosition - 1) * AI_QUEUE_AVERAGE_SECONDS));
+
+    if (queuePosition > AI_QUEUE_MAX_VISIBLE_POSITION) {
+      const message = formatExternalAiRecommendation(queuePosition, estimatedWaitSeconds);
+      await jobRef.set({
+        uid,
+        status: 'rejected',
+        position: queuePosition,
+        estimatedWaitSeconds,
+        activeProcessing,
+        message,
+        externalAiRecommended: true,
+        updatedAt: FieldValue.serverTimestamp(),
+        expiresAtMillis: now + AI_QUEUE_JOB_TTL_MS,
+      }, { merge: true });
+      throw new HttpsError('resource-exhausted', message, {
+        queuePosition,
+        estimatedWaitSeconds,
+        externalAiRecommended: true,
+      });
+    }
+
+    await jobRef.set({
+      status: currentIndex >= 0 && currentIndex < AI_QUEUE_MAX_CONCURRENT ? 'processing' : 'queued',
+      position: queuePosition,
+      estimatedWaitSeconds,
+      activeProcessing,
+      message: currentIndex >= 0 && currentIndex < AI_QUEUE_MAX_CONCURRENT
+        ? 'ถึงคิวแล้ว กำลังประมวลผล AI'
+        : `กำลังรอคิว AI ลำดับที่ ${queuePosition}`,
+      updatedAt: FieldValue.serverTimestamp(),
+      expiresAtMillis: now + AI_QUEUE_JOB_TTL_MS,
+    }, { merge: true });
+
+    if (currentIndex >= 0 && currentIndex < AI_QUEUE_MAX_CONCURRENT) {
+      return { jobRef, position: queuePosition, estimatedWaitSeconds };
+    }
+
+    await sleep(AI_QUEUE_POLL_MS);
+  }
+
+  const message = formatExternalAiRecommendation(AI_QUEUE_MAX_VISIBLE_POSITION, AI_QUEUE_MAX_WAIT_MS / 1000);
+  await jobRef.set({
+    status: 'rejected',
+    message,
+    externalAiRecommended: true,
+    updatedAt: FieldValue.serverTimestamp(),
+    expiresAtMillis: Date.now() + AI_QUEUE_JOB_TTL_MS,
+  }, { merge: true });
+  throw new HttpsError('deadline-exceeded', message, {
+    estimatedWaitSeconds: AI_QUEUE_MAX_WAIT_MS / 1000,
+    externalAiRecommended: true,
+  });
+}
+
+async function releaseAiProcessingSlot(queueLease, status, message) {
+  if (!queueLease?.jobRef) return;
+  try {
+    await queueLease.jobRef.set({
+      status,
+      position: 0,
+      estimatedWaitSeconds: 0,
+      message: message || (status === 'completed' ? 'ประมวลผล AI สำเร็จ' : 'ประมวลผล AI ไม่สำเร็จ'),
+      updatedAt: FieldValue.serverTimestamp(),
+      expiresAtMillis: Date.now() + 2 * 60 * 1000,
+    }, { merge: true });
+  } catch (error) {
+    logger.warn('releaseAiProcessingSlot failed', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+const GEMINI_API_KEY = defineSecret('GEMINI_API_KEY');
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RESEND_INTERVAL_MS = 60 * 1000;
@@ -252,6 +386,268 @@ const SHOP_COLLECTIONS = [
 const CUSTOMER_COLLECTIONS = ['users', 'customer_users'];
 const RIDER_COLLECTIONS = ['riders'];
 const PROFILE_COLLECTIONS = [...CUSTOMER_COLLECTIONS, ...RIDER_COLLECTIONS, ...SHOP_COLLECTIONS];
+const PAYMENT_CONFIG_COLLECTION = 'payment_config';
+const PAYMENT_CONFIG_DOC_ID = 'collection';
+const SLIPOK_ENDPOINT = 'https://api.slipok.com/api/line/apikey/64492';
+const SLIPOK_FEEDBACK_COLLECTION = 'slipok_feedback';
+const SHOP_TOPUP_SLIPS_COLLECTION = 'shop_topup_slips';
+const ALLOWED_TOPUP_STORAGE_BUCKETS = new Set([
+  'van-merchant-van1-storage-802503541368',
+  'van-merchant-van2-storage-802503541368',
+  'van-merchant-van3-storage-802503541368',
+]);
+
+function parseNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function amountsMatch(actualAmount, expectedAmount) {
+  if (!Number.isFinite(actualAmount) || !Number.isFinite(expectedAmount)) {
+    return false;
+  }
+  return Math.abs(actualAmount - expectedAmount) < 0.01;
+}
+
+function readRequiredConfiguredSecret(secret, label, purpose) {
+  const value = String(secret.value() || '').trim();
+  if (!value) {
+    throw new HttpsError(
+      'failed-precondition',
+      `ยังไม่ได้ตั้งค่า ${label} สำหรับ${purpose}`,
+    );
+  }
+  return value;
+}
+
+function defaultPaymentCollectionSettings() {
+  return {
+    recipientDisplayName: 'วิทยา ทนหงษา',
+    bankAccountNumber: '1643440349',
+    promptPayPhoneNumber: '',
+    promptPayNationalIdOrTaxId: '1410400168710',
+  };
+}
+
+async function getPaymentCollectionSettings() {
+  const defaults = defaultPaymentCollectionSettings();
+
+  try {
+    const snapshot = await db
+      .collection(PAYMENT_CONFIG_COLLECTION)
+      .doc(PAYMENT_CONFIG_DOC_ID)
+      .get();
+    const data = snapshot.data() || {};
+
+    return {
+      recipientDisplayName: String(data.recipientDisplayName || defaults.recipientDisplayName).trim() || defaults.recipientDisplayName,
+      bankAccountNumber: String(data.bankAccountNumber || defaults.bankAccountNumber).trim() || defaults.bankAccountNumber,
+      promptPayPhoneNumber: String(data.promptPayPhoneNumber || '').trim(),
+      promptPayNationalIdOrTaxId:
+        String(data.promptPayNationalIdOrTaxId || defaults.promptPayNationalIdOrTaxId).trim() || defaults.promptPayNationalIdOrTaxId,
+    };
+  } catch (error) {
+    logger.warn('Failed to read payment config. Falling back to defaults.', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return defaults;
+  }
+}
+
+function normalizeMaskedDigits(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^0-9xX]/g, '')
+    .toUpperCase();
+}
+
+function normalizeDigits(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\D/g, '');
+}
+
+function maskedDigitsMatch(maskedValue, expectedValue) {
+  const masked = normalizeMaskedDigits(maskedValue);
+  const expected = normalizeDigits(expectedValue);
+
+  if (!masked || !expected || masked.length !== expected.length) {
+    return false;
+  }
+
+  for (let index = 0; index < masked.length; index += 1) {
+    const maskedChar = masked[index];
+    if (maskedChar !== 'X' && maskedChar !== expected[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function normalizeNameForComparison(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9ก-๙]/g, '');
+}
+
+function namePartiallyMatches(actualValue, expectedValue) {
+  const actual = normalizeNameForComparison(actualValue);
+  const expected = normalizeNameForComparison(expectedValue);
+
+  if (!actual || !expected) {
+    return false;
+  }
+
+  return actual.includes(expected) || expected.includes(actual);
+}
+
+function buildExpectedReceiverTargets(settings) {
+  return [
+    settings.bankAccountNumber,
+    settings.promptPayPhoneNumber,
+    settings.promptPayNationalIdOrTaxId,
+  ].map((value) => normalizeDigits(value)).filter(Boolean);
+}
+
+function validateSlipReceiver(providerPayload, settings) {
+  const receiver = providerPayload?.data?.receiver || {};
+  const accountValue = String(receiver?.account?.value || '').trim();
+  const proxyValue = String(receiver?.proxy?.value || '').trim();
+  const actualNames = [receiver?.displayName, receiver?.name]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const expectedTargets = buildExpectedReceiverTargets(settings);
+  const actualTargets = [accountValue, proxyValue].filter(Boolean);
+
+  const accountMatched =
+    actualTargets.length > 0 &&
+    expectedTargets.some((expectedTarget) =>
+      actualTargets.some((actualTarget) => maskedDigitsMatch(actualTarget, expectedTarget)),
+    );
+
+  const nameMatched = actualNames.some((actualName) =>
+    namePartiallyMatches(actualName, settings.recipientDisplayName),
+  );
+
+  return {
+    matched: accountMatched || (!actualTargets.length && nameMatched),
+    accountMatched,
+    nameMatched,
+    actualAccountValue: accountValue,
+    actualProxyValue: proxyValue,
+    actualNames,
+    expectedRecipientDisplayName: settings.recipientDisplayName,
+    expectedTargets,
+  };
+}
+
+function buildSlipVerificationMessage(status, providerPayload, fallbackMessage) {
+  const rawCode = Number(providerPayload?.code);
+  const providerMessage = String(
+    providerPayload?.message || providerPayload?.data?.message || fallbackMessage || '',
+  ).trim();
+
+  if (status === 'verified') {
+    return 'ตรวจสอบสลิปถูกต้องแล้ว ระบบเติมเครดิตเรียบร้อย';
+  }
+
+  switch (rawCode) {
+    case 1012:
+      return 'สลิปนี้ถูกใช้ตรวจสอบไปแล้ว กรุณาใช้สลิปที่ยังไม่เคยส่ง';
+    case 1013:
+      return 'ยอดเงินในสลิปไม่ตรงกับยอดที่ต้องเติม กรุณาตรวจสอบแล้วแนบสลิปใหม่';
+    case 1014:
+      return 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน กรุณาตรวจสอบแล้วชำระใหม่';
+    default:
+      break;
+  }
+
+  if (providerMessage.includes('ยอดที่ส่งมาไม่ตรงกับยอดสลิป')) {
+    return 'ยอดเงินในสลิปไม่ตรงกับยอดที่ต้องเติม กรุณาตรวจสอบแล้วแนบสลิปใหม่';
+  }
+  if (providerMessage.includes('สลิปซ้ำ')) {
+    return 'สลิปนี้ถูกใช้ตรวจสอบไปแล้ว กรุณาใช้สลิปที่ยังไม่เคยส่ง';
+  }
+  if (providerMessage.includes('บัญชีผู้รับไม่ตรงกับบัญชีหลักของร้าน')) {
+    return 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน กรุณาตรวจสอบแล้วชำระใหม่';
+  }
+  if (providerMessage.includes('QR Code ไม่ใช่ QR สำหรับตรวจสอบการชำระเงิน')) {
+    return 'สลิปนี้ไม่ใช่สลิปโอนเงินที่ตรวจสอบได้ กรุณาแนบสลิปที่ถูกต้อง';
+  }
+  if (providerMessage.includes('QR Code หมดอายุ') || providerMessage.includes('ไม่มีรายการอยู่จริง')) {
+    return 'สลิปนี้หมดอายุหรือไม่พบรายการ กรุณาแนบสลิปใหม่ที่ถูกต้อง';
+  }
+  if (providerMessage.includes('รูปภาพไม่มี QR Code')) {
+    return 'ระบบอ่าน QR จากสลิปไม่เจอ กรุณาแนบรูปสลิปที่ชัดเจนกว่าเดิม';
+  }
+  if (providerMessage.includes('รูปภาพไม่ถูกต้อง')) {
+    return 'รูปสลิปไม่ถูกต้องหรือไฟล์เสียหาย กรุณาแนบรูปใหม่';
+  }
+  if (providerMessage.includes('Authorization Header ไม่ถูกต้อง')) {
+    return 'ระบบตรวจสลิปมีปัญหาชั่วคราว กรุณาลองใหม่อีกครั้ง';
+  }
+  if (providerMessage.includes('กรุณาใส่ข้อมูล QR Code ให้ครบ')) {
+    return 'ระบบอ่านข้อมูลสลิปไม่ครบ กรุณาแนบสลิปใหม่อีกครั้ง';
+  }
+
+  if (status === 'failed') {
+    return providerMessage || 'สลิปไม่ผ่านการตรวจสอบ กรุณาตรวจสอบแล้วแนบใหม่';
+  }
+
+  return providerMessage || 'ส่งสลิปไปตรวจสอบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง';
+}
+
+async function writeSlipOkFeedbackLog({
+  feedbackId,
+  customerUid,
+  paymentGroupId,
+  storagePath,
+  fileName,
+  contentType,
+  expectedAmount,
+  verifiedAmount,
+  verificationStatus,
+  verificationMessage,
+  responseCode,
+  providerPayload,
+  providerRawText,
+}) {
+  const docId = String(feedbackId || paymentGroupId || '').trim();
+  const feedbackRef = docId
+    ? db.collection(SLIPOK_FEEDBACK_COLLECTION).doc(docId)
+    : db.collection(SLIPOK_FEEDBACK_COLLECTION).doc();
+
+  await feedbackRef.set({
+    provider: 'slipok',
+    providerLabel: 'Slip OK',
+    customerUid,
+    orderIds: [],
+    paymentGroupId,
+    storagePath,
+    fileName,
+    contentType,
+    expectedCombinedAmount: expectedAmount,
+    verifiedSlipAmount: verifiedAmount,
+    status: verificationStatus,
+    message: verificationMessage,
+    responseCode,
+    apiEndpoint: SLIPOK_ENDPOINT,
+    response: providerPayload,
+    rawResponseText: providerRawText,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  return feedbackRef.id;
+}
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -306,6 +702,584 @@ function buildTransport() {
     },
   });
 }
+
+exports.askGeminiFlash = onCall(
+  {
+    region: DEFAULT_REGION,
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 60,
+    memory: '512MiB',
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'กรุณาเข้าสู่ระบบก่อนใช้งาน AI');
+    }
+
+    const prompt = String(request.data?.prompt || '').trim();
+    const productName = String(request.data?.productName || '').trim();
+    const category = String(request.data?.category || '').trim();
+    const price = String(request.data?.price || '').trim();
+    const unit = String(request.data?.unit || '').trim();
+    const stock = String(request.data?.stock || '').trim();
+
+    if (!prompt) {
+      throw new HttpsError('invalid-argument', 'กรุณาระบุคำสั่งที่ต้องการให้ AI ช่วยเขียน');
+    }
+
+    const inputSummary = [
+      productName ? `ชื่อสินค้า: ${productName}` : null,
+      category ? `หมวดหมู่: ${category}` : null,
+      price ? `ราคา: ${price}` : null,
+      unit ? `หน่วย: ${unit}` : null,
+      stock ? `สต็อก: ${stock}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const finalPrompt = [
+      prompt,
+      inputSummary,
+      'ข้อกำหนด: ตอบเป็นภาษาไทยเท่านั้น, ใช้ถ้อยคำสุภาพ, ไม่ใส่ข้อมูลที่ไม่แน่ใจ, ไม่ใส่ markdown',
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+      .slice(0, 4000);
+
+    const apiKey = String(GEMINI_API_KEY.value() || '').trim();
+    if (!apiKey) {
+      throw new HttpsError('failed-precondition', 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY');
+    }
+
+    const queueLease = await acquireAiProcessingSlot({
+      uid: request.auth.uid,
+      requestId: request.data?.requestId,
+    });
+    let queueFinalStatus = 'completed';
+
+    try {
+
+    const apiVersions = ['v1beta', 'v1'];
+    const preferredTextModels = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-1.5-flash',
+    ];
+
+    const discoveredModelNames = new Set();
+    for (const apiVersion of apiVersions) {
+      try {
+        const listResp = await fetch(
+          `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+        );
+        if (!listResp.ok) {
+          const listErr = await listResp.text();
+          logger.warn('askGeminiFlash listModels failed', {
+            uid: request.auth.uid,
+            apiVersion,
+            status: listResp.status,
+            body: listErr.slice(0, 400),
+          });
+          continue;
+        }
+
+        const listPayload = await listResp.json();
+        const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+        for (const model of models) {
+          const name = String(model?.name || '').trim();
+          const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+          const methods = Array.isArray(model?.supportedGenerationMethods)
+            ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+            : [];
+          if (!shortName || !methods.includes('generateContent')) {
+            continue;
+          }
+          discoveredModelNames.add(shortName);
+        }
+      } catch (listError) {
+        logger.warn('askGeminiFlash listModels network error', {
+          uid: request.auth.uid,
+          apiVersion,
+          message: listError instanceof Error ? listError.message : String(listError),
+        });
+      }
+    }
+
+    const discoveredTextModels = [...discoveredModelNames].filter((name) =>
+      !/image|imagen|tts|embedding|embed|aqa/i.test(name),
+    );
+    const textModelCandidates = [
+      ...new Set([
+        ...preferredTextModels,
+        ...discoveredTextModels,
+      ]),
+    ];
+    let payload = null;
+    let selectedModel = null;
+    let selectedApiVersion = null;
+
+    for (const modelName of textModelCandidates) {
+      for (const apiVersion of apiVersions) {
+        const endpoint =
+          `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+
+        let response;
+        try {
+          response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: finalPrompt }],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.7,
+                topP: 0.9,
+                maxOutputTokens: 512,
+              },
+            }),
+          });
+        } catch (error) {
+          logger.error('askGeminiFlash network error', {
+            uid: request.auth.uid,
+            model: modelName,
+            apiVersion,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
+        }
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          logger.error('askGeminiFlash upstream error', {
+            uid: request.auth.uid,
+            model: modelName,
+            apiVersion,
+            status: response.status,
+            body: errorBody.slice(0, 1000),
+          });
+
+          const loweredErrorBody = errorBody.toLowerCase();
+          const canFallback =
+            loweredErrorBody.includes('not found') ||
+            loweredErrorBody.includes('unsupported') ||
+            loweredErrorBody.includes('no longer available') ||
+            loweredErrorBody.includes('model');
+          if (canFallback) {
+            continue;
+          }
+
+          if (
+            loweredErrorBody.includes('resource_exhausted') ||
+            loweredErrorBody.includes('prepayment credits are depleted') ||
+            loweredErrorBody.includes('credits are depleted') ||
+            loweredErrorBody.includes('quota')
+          ) {
+            throw new HttpsError(
+              'resource-exhausted',
+              'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing แล้วลองใหม่อีกครั้ง',
+            );
+          }
+
+          throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
+        }
+
+        payload = await response.json();
+        selectedModel = modelName;
+        selectedApiVersion = apiVersion;
+        break;
+      }
+
+      if (payload != null && selectedModel != null) {
+        break;
+      }
+    }
+
+    if (payload == null || selectedModel == null) {
+      throw new HttpsError('internal', 'ไม่พบโมเดล AI สำหรับสร้างข้อความในโปรเจกต์นี้');
+    }
+
+    const text = String(
+      payload?.candidates?.[0]?.content?.parts
+        ?.map((part) => part?.text || '')
+        .join('') || '',
+    ).trim();
+
+    if (!text) {
+      throw new HttpsError('internal', 'ไม่ได้รับข้อความจาก AI');
+    }
+
+    return {
+      text,
+      model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
+      queuePosition: queueLease.position,
+      estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
+    };
+    } catch (error) {
+      queueFinalStatus = 'failed';
+      throw error;
+    } finally {
+      await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+    }
+  },
+);
+
+exports.replaceImageBackgroundWhite = onCall(
+  {
+    region: DEFAULT_REGION,
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 120,
+    memory: '1GiB',
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'กรุณาเข้าสู่ระบบก่อนใช้งาน AI');
+    }
+
+    const imageBase64 = String(request.data?.imageBase64 || '').trim();
+    const inputMimeType = String(request.data?.mimeType || '').trim().toLowerCase();
+    const allowedMimeTypes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+
+    if (!imageBase64) {
+      throw new HttpsError('invalid-argument', 'ไม่พบรูปภาพที่ต้องการประมวลผล');
+    }
+
+    const normalizedMimeType = inputMimeType === 'image/jpg' ? 'image/jpeg' : inputMimeType;
+    const mimeType = allowedMimeTypes.has(normalizedMimeType)
+      ? normalizedMimeType
+      : 'image/jpeg';
+
+    const estimatedBytes = Math.floor((imageBase64.length * 3) / 4);
+    const maxBytes = 5 * 1024 * 1024;
+    if (estimatedBytes > maxBytes) {
+      throw new HttpsError('invalid-argument', 'รูปมีขนาดใหญ่เกินไป (สูงสุด 5MB)');
+    }
+
+    const apiKey = String(GEMINI_API_KEY.value() || '').trim();
+    if (!apiKey) {
+      throw new HttpsError('failed-precondition', 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY');
+    }
+
+    const queueLease = await acquireAiProcessingSlot({
+      uid: request.auth.uid,
+      requestId: request.data?.requestId,
+    });
+    let queueFinalStatus = 'completed';
+
+    try {
+
+    const apiVersions = ['v1beta', 'v1'];
+    const preferredModels = [
+      'gemini-2.5-flash-image',
+      'gemini-2.5-flash-image-preview',
+      'gemini-2.0-flash-preview-image-generation',
+      'gemini-2.0-flash-exp-image-generation',
+    ];
+
+    const productName = String(request.data?.productName || '').trim();
+    const category = String(request.data?.category || '').trim();
+    const unit = String(request.data?.unit || '').trim();
+    const price = String(request.data?.price || '').trim();
+
+    const whiteBackgroundEditPrompt = [
+      'You are processing one Thai product image for a merchant app. Do all tasks in this single response.',
+      'The response MUST include an edited image part. Output the edited image first, then one text part containing JSON.',
+      'Task 1 is mandatory: Edit the provided image. Remove or replace the entire original background.',
+      'Keep the main product/object exactly as the subject, preserving its shape, color, texture, text, packaging, and edges.',
+      'Place the subject on a clean pure white #FFFFFF background only.',
+      'Do not keep any original background, floor, wall, table, shadow pattern, scenery, or colored backdrop.',
+      'Do not add text, logos, frames, decorations, watermark, props, or new objects.',
+      'Even if the product is hard to identify, still return the edited image with a pure white background.',
+      'Task 2: Analyze what the product appears to be in Thailand and write a concise Thai product description for selling online.',
+      'Task 3: Classify whether the product is likely Thai VAT taxable or VAT-exempt for this app.',
+      'Use this app rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
+      'Task 4: Evaluate whether this product can reasonably be shipped nationwide across Thailand by normal parcel delivery.',
+      'Products that are dry, sealed, shelf-stable, non-fragile, and legal to ship are usually suitable. Fresh, highly perishable, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
+      'Return a newly edited image and also a TEXT JSON object only for the analysis. JSON schema:',
+      '{"description":"Thai product description","taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason"}',
+      `Known merchant-entered fields: productName=${productName || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}.`,
+      'If uncertain, choose taxable and explain uncertainty briefly in Thai.',
+    ].join(' ');
+
+    const discoveredModelNames = new Set();
+    for (const apiVersion of apiVersions) {
+      try {
+        const listResp = await fetch(
+          `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+        );
+        if (!listResp.ok) {
+          const listErr = await listResp.text();
+          logger.warn('replaceImageBackgroundWhite listModels failed', {
+            uid: request.auth.uid,
+            apiVersion,
+            status: listResp.status,
+            body: listErr.slice(0, 400),
+          });
+          continue;
+        }
+
+        const listPayload = await listResp.json();
+        const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+        for (const model of models) {
+          const name = String(model?.name || '').trim();
+          const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+          const methods = Array.isArray(model?.supportedGenerationMethods)
+            ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+            : [];
+          if (!shortName || !methods.includes('generateContent')) {
+            continue;
+          }
+          discoveredModelNames.add(shortName);
+        }
+      } catch (listError) {
+        logger.warn('replaceImageBackgroundWhite listModels network error', {
+          uid: request.auth.uid,
+          apiVersion,
+          message: listError instanceof Error ? listError.message : String(listError),
+        });
+      }
+    }
+
+    const discoveredImageModels = [...discoveredModelNames].filter((name) =>
+      /image|imagen/i.test(name),
+    );
+    const modelCandidates = [
+      ...new Set([
+        ...preferredModels,
+        ...discoveredImageModels,
+        ...discoveredModelNames,
+      ]),
+    ];
+
+    let payload = null;
+    let selectedModel = null;
+    let selectedApiVersion = null;
+    let lastErrorStatus = null;
+    let lastErrorBody = '';
+    let fallbackAnalysis = {};
+
+    const parseAnalysisFromParts = (partsForAnalysis) => {
+      const textOutput = Array.isArray(partsForAnalysis)
+        ? partsForAnalysis.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
+        : '';
+      if (!textOutput) {
+        return {};
+      }
+
+      try {
+        const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          return JSON.parse(jsonMatch[0]);
+        }
+      } catch (parseError) {
+        logger.warn('replaceImageBackgroundWhite analysis JSON parse failed', {
+          uid: request.auth.uid,
+          message: parseError instanceof Error ? parseError.message : String(parseError),
+          text: textOutput.slice(0, 800),
+        });
+      }
+      return {};
+    };
+
+    for (const modelName of modelCandidates) {
+      for (const apiVersion of apiVersions) {
+        const endpoint =
+          `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+
+        let response;
+        try {
+          const generationConfig = {
+            temperature: 0.2,
+          };
+          if (apiVersion === 'v1beta') {
+            generationConfig.responseModalities = ['IMAGE', 'TEXT'];
+          }
+
+          response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: whiteBackgroundEditPrompt,
+                    },
+                    {
+                      inlineData: {
+                        mimeType,
+                        data: imageBase64,
+                      },
+                    },
+                  ],
+                },
+              ],
+              generationConfig,
+            }),
+          });
+        } catch (error) {
+          logger.error('replaceImageBackgroundWhite network error', {
+            uid: request.auth.uid,
+            model: modelName,
+            apiVersion,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
+        }
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          const loweredErrorBody = errorBody.toLowerCase();
+          logger.error('replaceImageBackgroundWhite upstream error', {
+            uid: request.auth.uid,
+            model: modelName,
+            apiVersion,
+            status: response.status,
+            body: errorBody.slice(0, 1000),
+          });
+
+          if (loweredErrorBody.includes('api_key_invalid') || loweredErrorBody.includes('api key not valid')) {
+            throw new HttpsError(
+              'failed-precondition',
+              'GEMINI_API_KEY ไม่ถูกต้องหรือถูกจำกัดสิทธิ์ กรุณาตั้งค่า key ใหม่ใน Secret Manager',
+            );
+          }
+
+          if (loweredErrorBody.includes('permission_denied')) {
+            throw new HttpsError(
+              'permission-denied',
+              'บัญชีหรือ API key ยังไม่ได้เปิดสิทธิ์ใช้งาน Generative Language API',
+            );
+          }
+
+          if (
+            loweredErrorBody.includes('resource_exhausted') ||
+            loweredErrorBody.includes('prepayment credits are depleted') ||
+            loweredErrorBody.includes('credits are depleted') ||
+            loweredErrorBody.includes('quota')
+          ) {
+            throw new HttpsError(
+              'resource-exhausted',
+              'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing ใน AI Studio แล้วลองใหม่อีกครั้ง',
+            );
+          }
+
+          lastErrorStatus = response.status;
+          lastErrorBody = errorBody;
+
+          const isModelUnavailable =
+            loweredErrorBody.includes('not found') ||
+            loweredErrorBody.includes('unsupported') ||
+            loweredErrorBody.includes('method not found') ||
+            loweredErrorBody.includes('model');
+
+          const isPayloadMismatch =
+            loweredErrorBody.includes('invalid json payload') ||
+            loweredErrorBody.includes('unknown name') ||
+            loweredErrorBody.includes('cannot find field');
+
+          if (isModelUnavailable || isPayloadMismatch) {
+            continue;
+          }
+
+          throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
+        }
+
+        const candidatePayload = await response.json();
+        const candidateParts = candidatePayload?.candidates?.[0]?.content?.parts;
+        const hasImageOutput = Array.isArray(candidateParts) && candidateParts.some((part) => part?.inlineData?.data);
+        if (!hasImageOutput) {
+          const candidateAnalysis = parseAnalysisFromParts(candidateParts);
+          if (candidateAnalysis.description || candidateAnalysis.taxStatus || candidateAnalysis.taxReason) {
+            fallbackAnalysis = candidateAnalysis;
+          }
+          logger.warn('replaceImageBackgroundWhite text-only response skipped', {
+            uid: request.auth.uid,
+            model: modelName,
+            apiVersion,
+            payloadPreview: JSON.stringify(candidatePayload).slice(0, 1200),
+          });
+          lastErrorStatus = 200;
+          lastErrorBody = 'Gemini returned text only without inline image data';
+          continue;
+        }
+
+        payload = candidatePayload;
+        selectedModel = modelName;
+        selectedApiVersion = apiVersion;
+        break;
+      }
+
+      if (payload && selectedModel) {
+        break;
+      }
+    }
+
+    if (!payload || !selectedModel) {
+      logger.error('replaceImageBackgroundWhite no available model', {
+        uid: request.auth.uid,
+        lastErrorStatus,
+        lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
+        discoveredModels: [...discoveredModelNames].slice(0, 20),
+      });
+      throw new HttpsError(
+        'unimplemented',
+        'โมเดล AI สำหรับแก้ไขภาพยังไม่พร้อมใช้งานในโปรเจกต์นี้ กรุณาเปิดสิทธิ์ Gemini image generation',
+      );
+    }
+
+    const parts = payload?.candidates?.[0]?.content?.parts;
+    const imagePart = Array.isArray(parts)
+      ? parts.find((part) => part?.inlineData?.data)
+      : null;
+
+    const outputBase64 = String(imagePart?.inlineData?.data || '').trim();
+    const outputMimeType = String(imagePart?.inlineData?.mimeType || 'image/png').trim();
+    const imageResponseAnalysis = parseAnalysisFromParts(parts);
+    const analysis = Object.keys(imageResponseAnalysis).length > 0
+      ? imageResponseAnalysis
+      : fallbackAnalysis;
+
+    if (!outputBase64) {
+      logger.error('replaceImageBackgroundWhite missing image output', {
+        uid: request.auth.uid,
+        payloadPreview: JSON.stringify(payload).slice(0, 1200),
+      });
+      throw new HttpsError('internal', 'AI ไม่ได้ส่งรูปภาพกลับมา');
+    }
+
+    return {
+      imageBase64: outputBase64,
+      mimeType: outputMimeType,
+      description: String(analysis.description || '').trim(),
+      taxStatus: String(analysis.taxStatus || '').trim(),
+      taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
+      taxReason: String(analysis.taxReason || '').trim(),
+      productCategory: String(analysis.productCategory || '').trim(),
+      isFreshProduct: analysis.isFreshProduct === true,
+      isProcessed: analysis.isProcessed === true,
+      canShipNationwide: analysis.canShipNationwide === true,
+      nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+      model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
+      queuePosition: queueLease.position,
+      estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
+    };
+    } catch (error) {
+      queueFinalStatus = 'failed';
+      throw error;
+    } finally {
+      await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+    }
+  },
+);
 
 exports.sendEmailOtp = onCall(
   {
@@ -513,14 +1487,19 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
         const preparingStart = order.preparingStartTime.toDate();
         const elapsed = now.toDate() - preparingStart;
         const elapsedMinutes = elapsed / 1000 / 60;
+        const preparingDurationMs = Number(order.preparingDuration || 600000);
+        const preparingDurationMinutes = Math.max(1, preparingDurationMs / 1000 / 60);
+        const firstWarningMinutes = Number(order.notifications?.firstWarning?.timeInMinutes || (preparingDurationMinutes * 0.5));
+        const secondWarningMinutes = Number(order.notifications?.secondWarning?.timeInMinutes || (preparingDurationMinutes * 0.75));
+        const finalWarningMinutes = Number(order.notifications?.finalWarning?.timeInMinutes || preparingDurationMinutes);
 
-        // ตรวจสอบแจ้งเตือนที่ 5 นาที
-        if (elapsedMinutes >= 5 && !order.notifications?.firstWarning?.sent) {
+        if (elapsedMinutes >= firstWarningMinutes && !order.notifications?.firstWarning?.sent) {
+          const remainingMinutes = Math.max(0, preparingDurationMinutes - elapsedMinutes);
           promises.push(
             sendNotification(
               order.shopFCMToken,
               'แจ้งเตือนเวลาเตรียมออเดอร์',
-              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป 5 นาทีแล้ว เหลืออีก 5 นาที`,
+              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป ${elapsedMinutes.toFixed(1)} นาทีแล้ว เหลืออีก ${remainingMinutes.toFixed(1)} นาที`,
               orderId
             ),
             doc.ref.update({
@@ -530,13 +1509,13 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
           );
         }
 
-        // ตรวจสอบแจ้งเตือนที่ 7.5 นาที
-        if (elapsedMinutes >= 7.5 && !order.notifications?.secondWarning?.sent) {
+        if (elapsedMinutes >= secondWarningMinutes && !order.notifications?.secondWarning?.sent) {
+          const remainingMinutes = Math.max(0, preparingDurationMinutes - elapsedMinutes);
           promises.push(
             sendNotification(
               order.shopFCMToken,
               'แจ้งเตือนเวลาเตรียมออเดอร์ (เร่งด่วน)',
-              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป 7.5 นาทีแล้ว เหลืออีก 2.5 นาที`,
+              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป ${elapsedMinutes.toFixed(1)} นาทีแล้ว เหลืออีก ${remainingMinutes.toFixed(1)} นาที`,
               orderId
             ),
             doc.ref.update({
@@ -546,9 +1525,8 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
           );
         }
 
-        // ตรวจสอบแจ้งเตือนที่ 10 นาที (หมดเวลา)
-        if (elapsedMinutes >= 10 && !order.notifications?.finalWarning?.sent) {
-          const overtimeMinutes = elapsedMinutes - 10;
+        if (elapsedMinutes >= finalWarningMinutes && !order.notifications?.finalWarning?.sent) {
+          const overtimeMinutes = elapsedMinutes - preparingDurationMinutes;
           const penalty = calculatePenalty(overtimeMinutes);
 
           promises.push(
@@ -566,9 +1544,8 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
           );
         }
 
-        // อัพเดทค่าปรับถ้าเกิน 10 นาทีและยังไม่เสร็จ
-        if (elapsedMinutes > 10) {
-          const overtimeMinutes = elapsedMinutes - 10;
+        if (elapsedMinutes > preparingDurationMinutes) {
+          const overtimeMinutes = elapsedMinutes - preparingDurationMinutes;
           const penalty = calculatePenalty(overtimeMinutes);
           
           promises.push(
@@ -587,18 +1564,10 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
 
 /**
  * คำนวณค่าปรับ
- * - เกิน 10-15 นาที: 20 บาท
- * - เกิน 15-20 นาที: 50 บาท
- * - เกิน 20 นาทีขึ้นไป: 100 บาท
+ * - เกินเวลาเตรียมที่ร้านระบุ: นาทีละ 1 บาท
  */
 function calculatePenalty(overtimeMinutes) {
-  if (overtimeMinutes <= 5) {
-    return 20;
-  } else if (overtimeMinutes <= 10) {
-    return 50;
-  } else {
-    return 100;
-  }
+  return Math.max(0, Math.ceil(Number(overtimeMinutes || 0)));
 }
 
 /**
@@ -1624,5 +2593,283 @@ exports.signInWithPhonePassword = onCall(
 
     const customToken = await admin.auth().createCustomToken(String(data.uid));
     return { customToken };
+  },
+);
+
+exports.verifyTopUpSlip = onCall(
+  {
+    region: DEFAULT_REGION,
+    secrets: [SLIPOK_API_KEY_SECRET],
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'กรุณาเข้าสู่ระบบก่อนส่งสลิป');
+    }
+
+    const uid = request.auth.uid;
+    const requestedUid = String(request.data?.uid || '').trim();
+    const expectedAmount = parseNumber(request.data?.expectedAmount);
+    const storagePath = String(request.data?.storagePath || '').trim();
+    const storageBucket = String(request.data?.bucket || '').trim();
+    const paymentGroupId = String(request.data?.paymentGroupId || '').trim();
+    const fileName = String(request.data?.fileName || 'slip.jpg').trim() || 'slip.jpg';
+    const contentType = String(request.data?.contentType || 'image/jpeg').trim() || 'image/jpeg';
+    const sourceApp = String(request.data?.sourceApp || 'van1_merchant').trim() || 'van1_merchant';
+
+    if (requestedUid && requestedUid !== uid) {
+      throw new HttpsError('permission-denied', 'ไม่สามารถส่งสลิปแทนผู้ใช้อื่นได้');
+    }
+    if (!Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+      throw new HttpsError('invalid-argument', 'กรุณาระบุ expectedAmount ให้ถูกต้อง');
+    }
+    if (!storagePath) {
+      throw new HttpsError('invalid-argument', 'กรุณาระบุ storagePath');
+    }
+    if (!paymentGroupId) {
+      throw new HttpsError('invalid-argument', 'กรุณาระบุ paymentGroupId');
+    }
+    if (storageBucket && !ALLOWED_TOPUP_STORAGE_BUCKETS.has(storageBucket)) {
+      throw new HttpsError('invalid-argument', 'ไม่รองรับ bucket ที่ระบุ');
+    }
+
+    const topUpRef = db
+      .collection(SHOP_TOPUP_SLIPS_COLLECTION)
+      .doc(uid)
+      .collection('items')
+      .doc(paymentGroupId);
+    await topUpRef.set({
+      uid,
+      expectedAmount,
+      storagePath,
+      bucket: storageBucket || null,
+      paymentGroupId,
+      fileName,
+      contentType,
+      sourceApp,
+      status: 'checking',
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    const paymentCollectionSettings = await getPaymentCollectionSettings();
+    const bucket = storageBucket ? admin.storage().bucket(storageBucket) : admin.storage().bucket();
+    const file = bucket.file(storagePath);
+    const [exists] = await file.exists();
+    if (!exists) {
+      await topUpRef.set({
+        status: 'not_found',
+        message: 'ไม่พบไฟล์สลิปใน Firebase Storage',
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      throw new HttpsError('not-found', 'ไม่พบไฟล์สลิปใน Firebase Storage');
+    }
+
+    let verificationStatus = 'error';
+    let verificationMessage = 'ส่งสลิปไปตรวจไม่สำเร็จ';
+    let responseCode = 0;
+    let providerPayload = null;
+    let providerRawText = '';
+    let verifiedSlipAmount = null;
+
+    try {
+      const [buffer] = await file.download();
+      const apiKey = readRequiredConfiguredSecret(
+        SLIPOK_API_KEY_SECRET,
+        'SLIPOK_API_KEY',
+        'ระบบตรวจสลิป Slip OK',
+      );
+
+      const formData = new FormData();
+      formData.append('files', new Blob([buffer], { type: contentType }), fileName);
+      formData.append('log', 'true');
+      formData.append('amount', expectedAmount.toString());
+
+      const slipResponse = await fetch(SLIPOK_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'x-authorization': apiKey,
+        },
+        body: formData,
+      });
+
+      responseCode = slipResponse.status;
+      providerRawText = await slipResponse.text();
+      try {
+        providerPayload = providerRawText ? JSON.parse(providerRawText) : null;
+      } catch (_) {
+        providerPayload = { raw: providerRawText };
+      }
+
+      const rawCode = Number(providerPayload?.code);
+      const requestSucceeded = providerPayload?.success === true;
+      const dataSucceeded = providerPayload?.data?.success === true;
+      verifiedSlipAmount = parseNumber(providerPayload?.data?.amount);
+      const hasValidAmount = Number.isFinite(verifiedSlipAmount) && verifiedSlipAmount > 0;
+      const receiverValidation = validateSlipReceiver(providerPayload, paymentCollectionSettings);
+      const hasMatchingReceiver = receiverValidation.matched;
+      const hasMatchingAmount = amountsMatch(verifiedSlipAmount, expectedAmount);
+
+      if (rawCode === 1012) {
+        verificationStatus = 'failed';
+        verificationMessage = buildSlipVerificationMessage(
+          verificationStatus,
+          providerPayload,
+          'สลิปนี้ถูกใช้ตรวจสอบไปแล้ว',
+        );
+      } else if (
+        slipResponse.ok &&
+        requestSucceeded &&
+        dataSucceeded &&
+        hasMatchingReceiver &&
+        hasValidAmount
+      ) {
+        verificationStatus = 'verified';
+        if (hasMatchingAmount) {
+          verificationMessage = 'ตรวจสอบสลิปสำเร็จ เติมเครดิตเรียบร้อย';
+        } else if (verifiedSlipAmount < expectedAmount) {
+          const remaining = expectedAmount - verifiedSlipAmount;
+          verificationMessage = `ตรวจสอบสลิปสำเร็จ แต่ยอดจ่ายไม่ครบ (ขาด ${remaining.toFixed(2)} บาท) เติมเครดิตตามยอดที่จ่ายแล้ว`;
+        } else {
+          const overpaid = verifiedSlipAmount - expectedAmount;
+          verificationMessage = `ตรวจสอบสลิปสำเร็จ แต่ยอดจ่ายเกิน (เกิน ${overpaid.toFixed(2)} บาท) เติมเครดิตตามยอดที่จ่ายแล้ว`;
+        }
+      } else if (slipResponse.ok && requestSucceeded && dataSucceeded && !hasMatchingReceiver) {
+        verificationStatus = 'failed';
+        providerPayload = {
+          ...(providerPayload && typeof providerPayload === 'object' ? providerPayload : {}),
+          code: Number(providerPayload?.code) || 1014,
+          data: {
+            ...(providerPayload?.data && typeof providerPayload.data === 'object' ? providerPayload.data : {}),
+            receiverValidation,
+            expectedRecipientDisplayName: paymentCollectionSettings.recipientDisplayName,
+            expectedReceiverTargets: buildExpectedReceiverTargets(paymentCollectionSettings),
+            message: providerPayload?.data?.message || 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
+          },
+          message: providerPayload?.message || 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
+        };
+        verificationMessage = buildSlipVerificationMessage(
+          verificationStatus,
+          providerPayload,
+          'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
+        );
+      } else {
+        verificationStatus = 'failed';
+        verificationMessage = buildSlipVerificationMessage(
+          verificationStatus,
+          providerPayload,
+          `Slip OK responded with status ${slipResponse.status}`,
+        );
+      }
+    } catch (error) {
+      verificationStatus = 'error';
+      providerPayload = {
+        message: error instanceof Error ? error.message : String(error),
+      };
+      verificationMessage = buildSlipVerificationMessage(
+        verificationStatus,
+        providerPayload,
+        'ส่งสลิปไปตรวจสอบไม่สำเร็จ',
+      );
+      logger.error('verifyTopUpSlip failed', {
+        uid,
+        paymentGroupId,
+        storagePath,
+        message: verificationMessage,
+      });
+    }
+
+    const slipOkFeedbackId = await writeSlipOkFeedbackLog({
+      feedbackId: paymentGroupId,
+      customerUid: uid,
+      paymentGroupId,
+      storagePath,
+      fileName,
+      contentType,
+      expectedAmount,
+      verifiedAmount: verifiedSlipAmount,
+      verificationStatus,
+      verificationMessage,
+      responseCode,
+      providerPayload,
+      providerRawText,
+    });
+
+    const creditedAmount = Number.isFinite(verifiedSlipAmount) ? verifiedSlipAmount : 0;
+    const remainingAmount = Math.max(0, expectedAmount - creditedAmount);
+    const overpaidAmount = Math.max(0, creditedAmount - expectedAmount);
+    const baseTopUpUpdate = {
+      status: verificationStatus,
+      message: verificationMessage,
+      expectedAmount,
+      verifiedAmount: creditedAmount,
+      remainingAmount,
+      overpaidAmount,
+      slipFeedbackId: slipOkFeedbackId,
+      responseCode,
+      provider: 'slipok',
+      providerLabel: 'Slip OK',
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+
+    if (verificationStatus !== 'verified') {
+      await topUpRef.set(baseTopUpUpdate, { merge: true });
+      return {
+        success: false,
+        status: verificationStatus,
+        message: verificationMessage,
+        expectedAmount,
+        verifiedAmount: creditedAmount,
+        remainingAmount,
+        overpaidAmount,
+        slipFeedbackId: slipOkFeedbackId,
+        paymentGroupId,
+      };
+    }
+
+    const creditDocId = `slipok_topup_${slipOkFeedbackId}`;
+    const creditRef = db.collection('credits').doc(creditDocId);
+
+    await db.runTransaction(async (tx) => {
+      const existing = await tx.get(creditRef);
+      if (!existing.exists) {
+        tx.set(creditRef, {
+          uid,
+          amount: creditedAmount,
+          timestamp: FieldValue.serverTimestamp(),
+          provider: 'slipok',
+          providerLabel: 'Slip OK',
+          status: 'verified',
+          type: 'top_up',
+          creditedByCloudFunction: true,
+          slipFeedbackId: slipOkFeedbackId,
+          paymentGroupId,
+          storagePath,
+          expectedAmount,
+          verifiedAmount: creditedAmount,
+          remainingAmount,
+          overpaidAmount,
+          sourceApp,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      tx.set(topUpRef, {
+        ...baseTopUpUpdate,
+        status: 'verified',
+        creditId: creditDocId,
+      }, { merge: true });
+    });
+
+    return {
+      success: true,
+      status: verificationStatus,
+      message: verificationMessage,
+      expectedAmount,
+      verifiedAmount: creditedAmount,
+      remainingAmount,
+      overpaidAmount,
+      slipFeedbackId: slipOkFeedbackId,
+      paymentGroupId,
+      creditId: creditDocId,
+    };
   },
 );

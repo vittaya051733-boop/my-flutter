@@ -11,6 +11,7 @@ class Product {
   final String? taxStatus;
   final double price;
   final int stock;
+  final int preparationTimeMinutes;
   final List<String> imageUrls;
   final List<String> thumbnailUrls;
   final List<String> colors;
@@ -19,6 +20,11 @@ class Product {
   final double? weight;
   final String? videoUrl;
   final String? videoThumbnailUrl;
+  final bool aiDescriptionRequested;
+  final bool aiWhiteBackgroundRequested;
+  final String? taxAiReason;
+  final bool? canShipNationwide;
+  final String? nationwideShippingReason;
 
   Product({
     this.id, // Add to constructor
@@ -31,6 +37,7 @@ class Product {
     this.taxStatus,
     required this.price,
     required this.stock,
+    this.preparationTimeMinutes = 10,
     required this.imageUrls,
     required this.thumbnailUrls,
     required this.colors,
@@ -39,6 +46,11 @@ class Product {
     this.weight,
     this.videoUrl,
     this.videoThumbnailUrl,
+    this.aiDescriptionRequested = false,
+    this.aiWhiteBackgroundRequested = false,
+    this.taxAiReason,
+    this.canShipNationwide,
+    this.nationwideShippingReason,
   });
 
   // Method to convert a Product instance to a map.
@@ -53,6 +65,8 @@ class Product {
       'taxStatus': taxStatus,
       'price': price,
       'stock': stock,
+      'preparationTimeMinutes': preparationTimeMinutes,
+      'preparingDuration': preparationTimeMinutes * 60 * 1000,
       'imageUrls': imageUrls,
       'thumbnailUrls': thumbnailUrls,
       'colors': colors,
@@ -61,6 +75,11 @@ class Product {
       'weight': weight,
       'videoUrl': videoUrl,
       'videoThumbnailUrl': videoThumbnailUrl,
+      'aiDescriptionRequested': aiDescriptionRequested,
+      'aiWhiteBackgroundRequested': aiWhiteBackgroundRequested,
+      'taxAiReason': taxAiReason,
+      'canShipNationwide': canShipNationwide,
+      'nationwideShippingReason': nationwideShippingReason,
       'createdAt': FieldValue.serverTimestamp(), // Automatically add a timestamp
     };
   }
@@ -86,6 +105,8 @@ class Product {
       taxStatus: map['taxStatus'] as String?,
       price: (map['price'] as num?)?.toDouble() ?? 0.0,
       stock: (map['stock'] as num?)?.toInt() ?? 0,
+        preparationTimeMinutes: (map['preparationTimeMinutes'] as num?)?.toInt() ??
+          (((map['preparingDuration'] as num?)?.toInt() ?? 600000) / 60000).round(),
       imageUrls: List<String>.from(map['imageUrls'] ?? []),
       thumbnailUrls: List<String>.from(
         (map['thumbnailUrls'] ?? map['imageUrls']) ?? [],
@@ -96,6 +117,11 @@ class Product {
       weight: parsedWeight,
       videoUrl: map['videoUrl'] as String?,
       videoThumbnailUrl: map['videoThumbnailUrl'] as String?,
+      aiDescriptionRequested: (map['aiDescriptionRequested'] as bool?) ?? false,
+      aiWhiteBackgroundRequested: (map['aiWhiteBackgroundRequested'] as bool?) ?? false,
+      taxAiReason: map['taxAiReason'] as String?,
+      canShipNationwide: map['canShipNationwide'] as bool?,
+      nationwideShippingReason: map['nationwideShippingReason'] as String?,
     );
   }
 }

@@ -66,210 +66,228 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen> {
     );
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('ออเดอร์ #$shortOrderId'),
-        backgroundColor: AppColors.accent,
-        foregroundColor: Colors.white,
-        automaticallyImplyLeading: !_isSubmitting,
-      ),
-      backgroundColor: const Color(0xFFF8FAFC),
+      backgroundColor: Colors.black.withOpacity(0.38),
       body: SafeArea(
-        child: Column(
-          children: <Widget>[
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                children: <Widget>[
-                  _SectionCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 430, maxHeight: 720),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(22),
+                child: Material(
+                  color: Colors.white,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+                        color: AppColors.accent,
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: <Widget>[
-                            Container(
-                              width: 54,
-                              height: 54,
-                              decoration: BoxDecoration(
-                                color: AppColors.accent.withOpacity(0.12),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: const Icon(
-                                Icons.receipt_long_rounded,
-                                color: AppColors.accent,
-                                size: 30,
+                            Text(
+                              'ออเดอร์ #$shortOrderId',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
                               ),
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
+                            const SizedBox(height: 4),
+                            Text(
+                              title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Flexible(
+                        child: ListView(
+                          shrinkWrap: true,
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+                          children: <Widget>[
+                            _SectionCard(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: <Widget>[
-                                  Text(
-                                    title,
-                                    style: const TextStyle(
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w800,
-                                    ),
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Container(
+                                        width: 54,
+                                        height: 54,
+                                        decoration: BoxDecoration(
+                                          color: AppColors.accent.withOpacity(
+                                            0.12,
+                                          ),
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        ),
+                                        child: const Icon(
+                                          Icons.receipt_long_rounded,
+                                          color: AppColors.accent,
+                                          size: 30,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: <Widget>[
+                                            Text(
+                                              title,
+                                              style: const TextStyle(
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              'Order ID: ${order.orderId}',
+                                              style: const TextStyle(
+                                                color: Color(0xFF64748B),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    'Order ID: ${order.orderId}',
-                                    style: const TextStyle(
-                                      color: Color(0xFF64748B),
+                                  if (widget.message?.trim().isNotEmpty ==
+                                      true) ...<Widget>[
+                                    const SizedBox(height: 14),
+                                    Text(
+                                      widget.message!.trim(),
+                                      style: const TextStyle(
+                                        color: Color(0xFF475569),
+                                      ),
                                     ),
+                                  ],
+                                  const SizedBox(height: 16),
+                                  Wrap(
+                                    spacing: 10,
+                                    runSpacing: 10,
+                                    children: <Widget>[
+                                      _InfoChip(
+                                        label: 'ยอดรวม',
+                                        value:
+                                            '฿${order.totalAmount.toStringAsFixed(2)}',
+                                      ),
+                                      _InfoChip(
+                                        label: 'ค่าส่ง',
+                                        value:
+                                            '฿${order.shippingFee.toStringAsFixed(2)}',
+                                      ),
+                                      _InfoChip(
+                                        label: 'จำนวนสินค้า',
+                                        value: '${order.totalItems} รายการ',
+                                      ),
+                                      _InfoChip(
+                                        label: 'สถานะ',
+                                        value: order.preparingStartTime == null
+                                            ? 'รอร้านยืนยัน'
+                                            : order.status,
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
                             ),
-                          ],
-                        ),
-                        if (widget.message?.trim().isNotEmpty ==
-                            true) ...<Widget>[
-                          const SizedBox(height: 14),
-                          Text(
-                            widget.message!.trim(),
-                            style: const TextStyle(color: Color(0xFF475569)),
-                          ),
-                        ],
-                        const SizedBox(height: 16),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: <Widget>[
-                            _InfoChip(
-                              label: 'ยอดรวม',
-                              value: '฿${order.totalAmount.toStringAsFixed(2)}',
+                            const SizedBox(height: 14),
+                            _SectionCard(
+                              title: 'รายการสินค้า',
+                              child: order.items.isEmpty
+                                  ? const Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: Text('ไม่พบรายละเอียดสินค้า'),
+                                    )
+                                  : Column(
+                                      children: order.items
+                                          .map(
+                                            (item) => _ProductTile(item: item),
+                                          )
+                                          .toList(growable: false),
+                                    ),
                             ),
-                            _InfoChip(
-                              label: 'ค่าส่ง',
-                              value: '฿${order.shippingFee.toStringAsFixed(2)}',
-                            ),
-                            _InfoChip(
-                              label: 'จำนวนสินค้า',
-                              value: '${order.totalItems} รายการ',
-                            ),
-                            _InfoChip(
-                              label: 'สถานะ',
-                              value: order.preparingStartTime == null
-                                  ? 'รอร้านยืนยัน'
-                                  : order.status,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'ลูกค้าและจุดส่ง',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        _DetailRow(
-                          icon: Icons.person_outline_rounded,
-                          label: 'ลูกค้า',
-                          value: order.customerName.isNotEmpty
-                              ? order.customerName
-                              : '-',
-                        ),
-                        _DetailRow(
-                          icon: Icons.phone_outlined,
-                          label: 'เบอร์โทร',
-                          value: order.customerPhone.isNotEmpty
-                              ? order.customerPhone
-                              : '-',
-                        ),
-                        _DetailRow(
-                          icon: Icons.location_on_outlined,
-                          label: 'จุดส่ง',
-                          value: order.customerAddress.isNotEmpty
-                              ? order.customerAddress
-                              : '-',
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  _SectionCard(
-                    title: 'รายการสินค้า',
-                    child: order.items.isEmpty
-                        ? const Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text('ไม่พบรายละเอียดสินค้า'),
-                          )
-                        : Column(
-                            children: order.items
-                                .map((item) => _ProductTile(item: item))
-                                .toList(growable: false),
-                          ),
-                  ),
-                  if (order.driverName?.trim().isNotEmpty == true ||
-                      order.driverId?.trim().isNotEmpty == true) ...<Widget>[
-                    const SizedBox(height: 14),
-                    _SectionCard(
-                      title: 'ไรเดอร์',
-                      child: _RiderContactPanel(order: order),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                boxShadow: <BoxShadow>[
-                  BoxShadow(
-                    color: Color(0x14000000),
-                    blurRadius: 18,
-                    offset: Offset(0, -4),
-                  ),
-                ],
-              ),
-              child: Row(
-                children: <Widget>[
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => _submit(accept: false),
-                      icon: const Icon(Icons.close_rounded),
-                      label: const Text('ปฏิเสธออเดอร์'),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => _submit(accept: true),
-                      icon: _isSubmitting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
+                            if (order.driverName?.trim().isNotEmpty == true ||
+                                order.driverId?.trim().isNotEmpty ==
+                                    true) ...<Widget>[
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'ไรเดอร์',
+                                child: _RiderContactPanel(order: order),
                               ),
-                            )
-                          : const Icon(Icons.check_circle_outline_rounded),
-                      label: Text(
-                        _isSubmitting ? 'กำลังบันทึก...' : 'รับออเดอร์',
+                            ],
+                          ],
+                        ),
                       ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                        child: Row(
+                          children: <Widget>[
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: _isSubmitting
+                                    ? null
+                                    : () => _submit(accept: false),
+                                icon: const Icon(Icons.close_rounded),
+                                label: const Text('ปฏิเสธออเดอร์'),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: _isSubmitting
+                                    ? null
+                                    : () => _submit(accept: true),
+                                icon: _isSubmitting
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : const Icon(
+                                        Icons.check_circle_outline_rounded,
+                                      ),
+                                label: Text(
+                                  _isSubmitting
+                                      ? 'กำลังบันทึก...'
+                                      : 'รับออเดอร์',
+                                ),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-          ],
+          ),
         ),
       ),
     );

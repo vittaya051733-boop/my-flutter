@@ -38,8 +38,27 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   bool _isAwaitingShopDecision(DetailedOrder order) {
-    return order.status == 'pending' ||
-        (order.status == 'accepted' && order.preparingStartTime == null);
+    return order.status == 'accepted' &&
+        order.preparingStartTime == null &&
+        (order.driverId?.trim().isNotEmpty ?? false);
+  }
+
+  bool _hasRiderAcceptedOrder(Map<String, dynamic> data) {
+    final status = (data['status'] as String?)?.trim() ?? '';
+    final driverId = (data['driverId'] as String?)?.trim() ?? '';
+    return driverId.isNotEmpty &&
+        <String>{
+          'accepted',
+          'preparing',
+          'ready',
+          'delivering',
+        }.contains(status);
+  }
+
+  bool _hasShopRejected(Map<String, dynamic> data) {
+    final shopDecisionStatus =
+        (data['shopDecisionStatus'] as String?)?.trim() ?? '';
+    return shopDecisionStatus == 'rejected' || data['shopRejectedAt'] != null;
   }
 
   bool _isShopOrderForCurrentUser(Map<String, dynamic> data) {
@@ -127,7 +146,10 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       ),
       backgroundColor: Colors.white,
       body: StreamBuilder<QuerySnapshot>(
-        stream: FirebaseFirestore.instance.collection('orders').snapshots(),
+        stream: FirebaseFirestore.instance
+            .collection('orders')
+            .where('shopOwnerId', isEqualTo: _shopId)
+            .snapshots(),
         builder: (context, snapshot) {
           // Debug: แสดง error ถ้ามี
           if (snapshot.hasError) {
@@ -186,17 +208,10 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
               snapshot.data!.docs
                   .where((doc) {
                     final data = doc.data() as Map<String, dynamic>;
-                    final status = (data['status'] as String?)?.trim() ?? '';
-                    final allowedStatus = <String>{
-                      'pending',
-                      'accepted',
-                      'preparing',
-                      'ready',
-                      'delivering',
-                    };
                     return _isShopOrderForCurrentUser(data) &&
                         !_shouldHideUnverifiedPromptPayOrder(data) &&
-                        allowedStatus.contains(status);
+                        !_hasShopRejected(data) &&
+                        _hasRiderAcceptedOrder(data);
                   })
                   .map(
                     (doc) => DetailedOrder.fromSnapshot(
@@ -220,7 +235,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
             });
           }
 
-          _maybeAutoAcceptPendingOrders(orders);
+          _maybeAutoAcceptAwaitingShopDecisionOrders(orders);
 
           final hasPauseBanner = _operationsSettings.pauseNewOrders;
           final itemCount = orders.length + (hasPauseBanner ? 1 : 0);
@@ -264,11 +279,15 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
             const Divider(height: 24),
             _buildOrderItems(order),
             const SizedBox(height: 16),
+            _buildAmountSummary(order),
+            const SizedBox(height: 16),
             _buildOrderStatus(order),
             if (order.status == 'accepted' || order.status == 'preparing')
               _buildPreparingTimer(order),
             const SizedBox(height: 12),
             _buildOrderContactActions(order),
+            const SizedBox(height: 12),
+            _buildQrActions(order),
             const SizedBox(height: 16),
             _buildActionButtons(order),
           ],
@@ -311,15 +330,16 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     );
   }
 
-  void _maybeAutoAcceptPendingOrders(List<DetailedOrder> orders) {
+  void _maybeAutoAcceptAwaitingShopDecisionOrders(List<DetailedOrder> orders) {
     if (!_operationsSettings.autoAcceptOrders ||
         _operationsSettings.pauseNewOrders) {
       return;
     }
     for (final order in orders) {
-      if (order.status != 'pending' ||
-          _autoAcceptingOrders.contains(order.orderId))
+      if (!_isAwaitingShopDecision(order) ||
+          _autoAcceptingOrders.contains(order.orderId)) {
         continue;
+      }
       _autoAcceptingOrders.add(order.orderId);
       _acceptOrder(order, silent: true)
           .then((_) {
@@ -400,22 +420,103 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         ),
         const SizedBox(height: 8),
         ...order.items.map(
-          (item) => Padding(
-            padding: const EdgeInsets.only(bottom: 4),
+          (item) => Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '• ${item.productName}',
-                  style: const TextStyle(fontSize: 14),
+                _OrderItemImage(imageUrl: item.imageUrl),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.productName.isNotEmpty ? item.productName : '-',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      if (item.toppings?.trim().isNotEmpty == true) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          'ท็อปปิ้ง: ${item.toppings!.trim()}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 3),
+                      Text(
+                        'ราคาต่อชิ้น ฿${item.price.toStringAsFixed(2)}',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      ),
+                    ],
+                  ),
                 ),
-                const Spacer(),
-                Text('x${item.quantity}', style: const TextStyle(fontSize: 14)),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'x${item.quantity}',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '฿${(item.price * item.quantity).toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
         ),
       ],
     );
+  }
+
+  Widget _buildAmountSummary(DetailedOrder order) {
+    final productSubtotal = _productSubtotal(order);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Column(
+        children: [
+          _AmountRow(label: 'ค่าสินค้า', value: productSubtotal),
+          const SizedBox(height: 6),
+          _AmountRow(label: 'ค่าส่ง', value: order.shippingFee),
+          const Divider(height: 18),
+          _AmountRow(label: 'ยอดรวม', value: order.totalAmount, isTotal: true),
+        ],
+      ),
+    );
+  }
+
+  double _productSubtotal(DetailedOrder order) {
+    final itemTotal = order.items.fold<double>(
+      0,
+      (runningTotal, item) => runningTotal + (item.price * item.quantity),
+    );
+    if (itemTotal > 0) return itemTotal;
+    final fromGrandTotal = order.totalAmount - order.shippingFee;
+    return fromGrandTotal > 0 ? fromGrandTotal : order.totalAmount;
   }
 
   Widget _buildOrderStatus(DetailedOrder order) {
@@ -587,6 +688,73 @@ class _CountdownTimerWidgetState extends State<_CountdownTimerWidget> {
   }
 }
 
+class _OrderItemImage extends StatelessWidget {
+  const _OrderItemImage({required this.imageUrl});
+
+  final String? imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = imageUrl?.trim();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 58,
+        height: 58,
+        color: const Color(0xFFE2E8F0),
+        child: url == null || url.isEmpty
+            ? const Icon(Icons.fastfood_outlined, color: Color(0xFF94A3B8))
+            : Image.network(
+                url,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const Icon(
+                  Icons.fastfood_outlined,
+                  color: Color(0xFF94A3B8),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _AmountRow extends StatelessWidget {
+  const _AmountRow({
+    required this.label,
+    required this.value,
+    this.isTotal = false,
+  });
+
+  final String label;
+  final double value;
+  final bool isTotal;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: isTotal ? 15 : 14,
+              fontWeight: isTotal ? FontWeight.w800 : FontWeight.w600,
+              color: isTotal ? Colors.black : const Color(0xFF92400E),
+            ),
+          ),
+        ),
+        Text(
+          '฿${value.toStringAsFixed(2)}',
+          style: TextStyle(
+            fontSize: isTotal ? 16 : 14,
+            fontWeight: FontWeight.w800,
+            color: isTotal ? AppColors.accent : const Color(0xFF92400E),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 // ย้าย _buildActionButtons กลับไปที่ _OrderManagementScreenState
 extension on _OrderManagementScreenState {
   Future<_RiderContactState> _loadRiderContactState(DetailedOrder order) async {
@@ -646,42 +814,141 @@ extension on _OrderManagementScreenState {
         final hasRider = order.driverId?.trim().isNotEmpty ?? false;
         final canChat = hasRider && state?.profile != null;
         final canCall = hasRider || (state?.phone?.trim().isNotEmpty ?? false);
+        final riderName = state?.profile?.displayName.trim().isNotEmpty == true
+            ? state!.profile!.displayName.trim()
+            : (order.driverName?.trim().isNotEmpty == true
+                  ? order.driverName!.trim()
+                  : 'ไรเดอร์');
+        final riderPhone = state?.phone?.trim().isNotEmpty == true
+            ? state!.phone!.trim()
+            : (order.driverPhone?.trim().isNotEmpty == true
+                  ? order.driverPhone!.trim()
+                  : '-');
 
-        return Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: !canChat
-                    ? null
-                    : () async {
-                        await Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) =>
-                                ChatRoomScreen(friendProfile: state!.profile!),
+        return Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0FDF4),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFBBF7D0)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.delivery_dining_rounded,
+                    color: Colors.green,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'รายละเอียดไรเดอร์',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
                           ),
-                        );
-                      },
-                icon: const Icon(Icons.chat_bubble_outline_rounded),
-                label: const Text('แชทไรเดอร์'),
+                        ),
+                        const SizedBox(height: 4),
+                        Text('ชื่อ: $riderName'),
+                        Text('เบอร์โทร: $riderPhone'),
+                        if (order.driverId?.trim().isNotEmpty == true)
+                          Text(
+                            'รหัสไรเดอร์: ${order.driverId!.trim()}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: !canCall
-                    ? null
-                    : () => RiderCallLauncher.startVoiceCall(
-                        context: context,
-                        riderProfile: state?.profile,
-                        fallbackPhone: state?.phone,
-                      ),
-                icon: const Icon(Icons.phone_in_talk_outlined),
-                label: Text(canCall ? 'โทรไรเดอร์' : 'โทรไรเดอร์ไม่ได้'),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: !canChat
+                          ? null
+                          : () async {
+                              await Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => ChatRoomScreen(
+                                    friendProfile: state!.profile!,
+                                  ),
+                                ),
+                              );
+                            },
+                      icon: const Icon(Icons.chat_bubble_outline_rounded),
+                      label: const Text('แชทไรเดอร์'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: !canCall
+                          ? null
+                          : () => RiderCallLauncher.startVoiceCall(
+                              context: context,
+                              riderProfile: state?.profile,
+                              fallbackPhone: state?.phone,
+                            ),
+                      icon: const Icon(Icons.phone_in_talk_outlined),
+                      label: Text(canCall ? 'โทรไรเดอร์' : 'โทรไรเดอร์ไม่ได้'),
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
+            ],
+          ),
         );
       },
+    );
+  }
+
+  Widget _buildQrActions(DetailedOrder order) {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => OrderQRScreen(order: order),
+                ),
+              );
+            },
+            icon: const Icon(Icons.qr_code_2_rounded),
+            label: const Text('แสดง QR'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.accent,
+              side: const BorderSide(color: AppColors.accent),
+              minimumSize: const Size(double.infinity, 46),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: FilledButton.icon(
+            onPressed: () => printOrderQr(context, order),
+            icon: const Icon(Icons.print_outlined),
+            label: const Text('พิมพ์ QR'),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+              minimumSize: const Size(double.infinity, 46),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -758,36 +1025,14 @@ extension on _OrderManagementScreenState {
           ),
         );
       case 'ready':
-        return Column(
-          children: [
-            ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => OrderQRScreen(order: order),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.qr_code),
-              label: const Text('แสดง QR Code'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.accent,
-                foregroundColor: Colors.white,
-                minimumSize: const Size(double.infinity, 48),
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'รอพนักงานขนส่งมารับสินค้า',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey,
-                fontStyle: FontStyle.italic,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ],
+        return const Text(
+          'รอพนักงานขนส่งมารับสินค้า',
+          style: TextStyle(
+            fontSize: 14,
+            color: Colors.grey,
+            fontStyle: FontStyle.italic,
+          ),
+          textAlign: TextAlign.center,
         );
       case 'delivering':
         return const Text(
@@ -807,21 +1052,43 @@ extension on _OrderManagementScreenState {
   Future<void> _acceptOrder(DetailedOrder order, {bool silent = false}) async {
     try {
       final now = DateTime.now();
+      final preparationMinutes = (order.preparingDuration / 60000)
+          .ceil()
+          .clamp(1, 240)
+          .toDouble();
       final updatedOrder = order.copyWith(
         status: 'preparing',
         acceptedAt: now,
         preparingStartTime: now,
         notifications: {
-          'firstWarning': NotificationStatus(sent: false, timeInMinutes: 5),
-          'secondWarning': NotificationStatus(sent: false, timeInMinutes: 7.5),
-          'finalWarning': NotificationStatus(sent: false, timeInMinutes: 10),
+          'firstWarning': NotificationStatus(
+            sent: false,
+            timeInMinutes: preparationMinutes * 0.5,
+          ),
+          'secondWarning': NotificationStatus(
+            sent: false,
+            timeInMinutes: preparationMinutes * 0.75,
+          ),
+          'finalWarning': NotificationStatus(
+            sent: false,
+            timeInMinutes: preparationMinutes,
+          ),
         },
       );
 
       await FirebaseFirestore.instance
           .collection('orders')
           .doc(order.orderId)
-          .update(updatedOrder.toMap());
+          .update({
+            ...updatedOrder.toMap(),
+            'shopDecisionStatus': 'accepted',
+            'shopAcceptedAt': Timestamp.fromDate(now),
+            'shopRejectedAt': FieldValue.delete(),
+            'shopRejectedBy': FieldValue.delete(),
+            'customerShopChoice': FieldValue.delete(),
+            'customerShopWaitUntil': FieldValue.delete(),
+            'customerShopWaitRequestedAt': FieldValue.delete(),
+          });
 
       await _sendOrderAppNotification(
         targetApp: 'van3',
@@ -836,7 +1103,9 @@ extension on _OrderManagementScreenState {
       if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('รับออเดอร์เรียบร้อยแล้ว! เริ่มจับเวลา 10 นาที'),
+            content: Text(
+              'รับออเดอร์เรียบร้อยแล้ว! เริ่มจับเวลาตามเวลาที่ตั้งไว้',
+            ),
             backgroundColor: Colors.green,
           ),
         );
@@ -878,14 +1147,31 @@ extension on _OrderManagementScreenState {
         await FirebaseFirestore.instance
             .collection('orders')
             .doc(order.orderId)
-            .update({'status': 'cancelled', 'updatedAt': Timestamp.now()});
+            .update({
+              'status': order.status == 'accepted' ? 'accepted' : 'pending',
+              'shopDecisionStatus': 'rejected',
+              'shopRejectedAt': FieldValue.serverTimestamp(),
+              'shopRejectedBy': FirebaseAuth.instance.currentUser?.uid,
+              'cancelReason': 'shop_rejected_waiting_customer_decision',
+              'updatedAt': FieldValue.serverTimestamp(),
+            });
 
         await _sendOrderAppNotification(
           targetApp: 'van3',
           recipientUid: order.driverId,
           orderId: order.orderId,
           title: 'ร้านปฏิเสธออเดอร์',
-          body: 'ออเดอร์ #${order.orderId.substring(0, 8)} ถูกยกเลิกโดยร้านค้า',
+          body:
+              'ออเดอร์ #${order.orderId.substring(0, 8)} รอลูกค้าเลือกรอหรือแคนเซิล',
+          action: 'shop_rejected_order',
+        );
+
+        await _sendOrderAppNotification(
+          targetApp: 'van2',
+          recipientUid: order.customerId,
+          orderId: order.orderId,
+          title: 'ร้านค้าปฏิเสธออเดอร์',
+          body: 'เลือกรออีก 15 นาทีหรือแคนเซิลออเดอร์ได้ในการ์ดออเดอร์',
           action: 'shop_rejected_order',
         );
 

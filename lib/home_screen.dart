@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -27,20 +27,26 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
   static const String _shopOperationsCollection = 'shop_operations';
   static const String _notificationTargetApp = 'van1';
 
   int _notificationCount = 0;
   String? _activeNotification;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _notificationSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _notificationSubscription;
   Set<String> _knownNotificationIds = <String>{};
   bool _didPrimeNotifications = false;
   static const int _tabCount = 9;
 
   late final TabController _tabController;
   int _currentIndex = 0;
-  late final List<Widget?> _pages = List<Widget?>.filled(_tabCount, null, growable: false);
+  late final List<Widget?> _pages = List<Widget?>.filled(
+    _tabCount,
+    null,
+    growable: false,
+  );
   String? _shopImageUrl;
   String? _shopName;
   Set<String> _homeProductIds = <String>{};
@@ -73,12 +79,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     _listenUnreadAppNotifications();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
-    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-      systemNavigationBarColor: Colors.white,
-      systemNavigationBarIconBrightness: Brightness.dark,
-      systemNavigationBarDividerColor: Colors.white,
-      systemNavigationBarContrastEnforced: false,
-    ));
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        systemNavigationBarColor: Colors.white,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarDividerColor: Colors.white,
+        systemNavigationBarContrastEnforced: false,
+      ),
+    );
   }
 
   Future<void> _loadShopDetails() async {
@@ -94,7 +102,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       if (collectionsToCheck.isEmpty) return;
 
       final futures = collectionsToCheck.map((collectionName) async {
-        final docRef = FirebaseFirestore.instance.collection(collectionName).doc(user.uid);
+        final docRef = FirebaseFirestore.instance
+            .collection(collectionName)
+            .doc(user.uid);
         final snapshot = await docRef.get();
         return MapEntry(docRef, snapshot);
       }).toList();
@@ -109,9 +119,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         final String? imageUrl = ShopProfileResolver.resolveImageUrl(data);
         final String? name = ShopProfileResolver.resolveName(data);
         final bool isOpen = data['isOpen'] as bool? ?? true;
-        final Set<String> homeIds = ((data['homeProductIds'] as List?) ?? const [])
-            .whereType<String>()
-            .toSet();
+        final Set<String> homeIds =
+            ((data['homeProductIds'] as List?) ?? const [])
+                .whereType<String>()
+                .toSet();
 
         if (!mounted) return;
         setState(() {
@@ -151,23 +162,23 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         .where('participants', arrayContains: user.uid)
         .snapshots()
         .listen((snapshot) {
-      int totalUnread = 0;
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final unreadMap = data['unreadCounts'] as Map<String, dynamic>?;
-        if (unreadMap != null) {
-          final userCount = unreadMap[user.uid];
-          if (userCount is int) {
-            totalUnread += userCount;
-          } else if (userCount is num) {
-            totalUnread += userCount.toInt();
+          int totalUnread = 0;
+          for (final doc in snapshot.docs) {
+            final data = doc.data();
+            final unreadMap = data['unreadCounts'] as Map<String, dynamic>?;
+            if (unreadMap != null) {
+              final userCount = unreadMap[user.uid];
+              if (userCount is int) {
+                totalUnread += userCount;
+              } else if (userCount is num) {
+                totalUnread += userCount.toInt();
+              }
+            }
           }
-        }
-      }
-      if (mounted) {
-        setState(() => _unreadChatCount = totalUnread);
-      }
-    });
+          if (mounted) {
+            setState(() => _unreadChatCount = totalUnread);
+          }
+        });
   }
 
   void _listenUnreadAppNotifications() {
@@ -183,43 +194,54 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         .where('recipientUid', isEqualTo: user.uid)
         .where('read', isEqualTo: false)
         .snapshots()
-        .listen((snapshot) {
-      final docs = snapshot.docs.toList(growable: false)
-        ..sort((a, b) {
-          final aTime = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-          final bTime = (b.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-          return bTime.compareTo(aTime);
-        });
+        .listen(
+          (snapshot) {
+            final docs = snapshot.docs.toList(growable: false)
+              ..sort((a, b) {
+                final aTime =
+                    (a.data()['createdAt'] as Timestamp?)
+                        ?.millisecondsSinceEpoch ??
+                    0;
+                final bTime =
+                    (b.data()['createdAt'] as Timestamp?)
+                        ?.millisecondsSinceEpoch ??
+                    0;
+                return bTime.compareTo(aTime);
+              });
 
-      final currentIds = docs.map((doc) => doc.id).toSet();
-      final newDocs = _didPrimeNotifications
-          ? docs.where((doc) => !_knownNotificationIds.contains(doc.id)).toList(growable: false)
-          : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+            final currentIds = docs.map((doc) => doc.id).toSet();
+            final newDocs = _didPrimeNotifications
+                ? docs
+                      .where((doc) => !_knownNotificationIds.contains(doc.id))
+                      .toList(growable: false)
+                : const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
 
-      if (mounted) {
-        setState(() {
-          _notificationCount = docs.length;
-        });
-      }
+            if (mounted) {
+              setState(() {
+                _notificationCount = docs.length;
+              });
+            }
 
-      if (newDocs.isNotEmpty) {
-        final latest = newDocs.first.data();
-        final title = (latest['title'] as String?)?.trim();
-        final body = (latest['body'] as String?)?.trim();
-        final overlayMessage = [
-          if (title != null && title.isNotEmpty) title,
-          if (body != null && body.isNotEmpty) body,
-        ].join(' - ');
-        if (overlayMessage.isNotEmpty) {
-          showOverlayNotification(overlayMessage);
-        }
-      }
+            if (newDocs.isNotEmpty) {
+              final latest = newDocs.first.data();
+              final title = (latest['title'] as String?)?.trim();
+              final body = (latest['body'] as String?)?.trim();
+              final overlayMessage = [
+                if (title != null && title.isNotEmpty) title,
+                if (body != null && body.isNotEmpty) body,
+              ].join(' - ');
+              if (overlayMessage.isNotEmpty) {
+                showOverlayNotification(overlayMessage);
+              }
+            }
 
-      _knownNotificationIds = currentIds;
-      _didPrimeNotifications = true;
-    }, onError: (error) {
-      debugPrint('Failed to listen app notifications: $error');
-    });
+            _knownNotificationIds = currentIds;
+            _didPrimeNotifications = true;
+          },
+          onError: (error) {
+            debugPrint('Failed to listen app notifications: $error');
+          },
+        );
   }
 
   Future<void> _hydrateCachedProducts(String userId) async {
@@ -231,7 +253,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     });
   }
 
-  Future<List<CachedProduct>> _fetchHomeProducts(String userId, Set<String> ids) async {
+  Future<List<CachedProduct>> _fetchHomeProducts(
+    String userId,
+    Set<String> ids,
+  ) async {
     if (ids.isEmpty) {
       return const <CachedProduct>[];
     }
@@ -241,15 +266,22 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       for (var i = 0; i < orderedIds.length; i++) orderedIds[i]: i,
     };
     const int chunkSize = 10;
-    final productsCollection = FirebaseFirestore.instance.collection('products');
+    final productsCollection = FirebaseFirestore.instance.collection(
+      'products',
+    );
     final futures = <Future<QuerySnapshot<Map<String, dynamic>>>>[];
 
     for (var start = 0; start < orderedIds.length; start += chunkSize) {
-      final end = (start + chunkSize) > orderedIds.length ? orderedIds.length : start + chunkSize;
+      final end = (start + chunkSize) > orderedIds.length
+          ? orderedIds.length
+          : start + chunkSize;
       futures.add(
         productsCollection
-          .where(FieldPath.documentId, whereIn: orderedIds.sublist(start, end))
-          .get(),
+            .where(
+              FieldPath.documentId,
+              whereIn: orderedIds.sublist(start, end),
+            )
+            .get(),
       );
     }
 
@@ -302,7 +334,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Future<List<String>> _collectionsToCheck(User user) async {
     final List<String> collections = [];
     try {
-      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
+      final contractDoc = await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(user.uid)
+          .get();
       final String? serviceType = contractDoc.data()?['serviceType'] as String?;
       if (serviceType != null && serviceType.trim().isNotEmpty) {
         final resolved = _collectionForServiceType(serviceType);
@@ -380,20 +415,21 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Future<void> _syncShopOperationsStatus(String shopId, bool isOpen) async {
-    final List<String> openProductIds =
-        isOpen ? await _fetchCurrentShopProductIds(shopId) : <String>[];
+    final List<String> openProductIds = isOpen
+        ? await _fetchCurrentShopProductIds(shopId)
+        : <String>[];
 
     await FirebaseFirestore.instance
         .collection(_shopOperationsCollection)
         .doc(shopId)
         .set({
-      'shopId': shopId,
-      'isOpen': isOpen,
-      'openProductIds': openProductIds,
-      'openProductCount': openProductIds.length,
-      'openProductsUpdatedAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+          'shopId': shopId,
+          'isOpen': isOpen,
+          'openProductIds': openProductIds,
+          'openProductCount': openProductIds.length,
+          'openProductsUpdatedAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
   }
 
   Future<List<String>> _fetchCurrentShopProductIds(String shopId) async {
@@ -482,7 +518,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
-  Future<DocumentReference<Map<String, dynamic>>?> _getOrFindShopDocRef() async {
+  Future<DocumentReference<Map<String, dynamic>>?>
+  _getOrFindShopDocRef() async {
     if (_shopDocRef != null) return _shopDocRef;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return null;
@@ -534,15 +571,17 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               _isShopOpen = value;
               _pages[0] = _buildPage(0);
             });
-            
+
             // บันทึกสถานะลง Firestore
             await _saveShopOpenStatus(value);
-            
+
             final messenger = ScaffoldMessenger.of(context);
             messenger.hideCurrentSnackBar();
             messenger.showSnackBar(
               SnackBar(
-                content: Text(value ? 'ร้านเปิดให้บริการแล้ว' : 'ร้านถูกปิดชั่วคราว'),
+                content: Text(
+                  value ? 'ร้านเปิดให้บริการแล้ว' : 'ร้านถูกปิดชั่วคราว',
+                ),
                 duration: const Duration(seconds: 2),
               ),
             );
@@ -601,7 +640,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           Scaffold(
             body: IndexedStack(
               index: _currentIndex,
-              children: _pages.map((page) => page ?? const SizedBox.shrink()).toList(),
+              children: _pages
+                  .map((page) => page ?? const SizedBox.shrink())
+                  .toList(),
             ),
             bottomNavigationBar: SafeArea(
               top: false,
@@ -619,11 +660,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _buildNavButton(icon: Icons.home_outlined, index: 0),
-                            _buildNavButton(icon: Icons.store_outlined, index: 1),
+                            _buildNavButton(
+                              icon: Icons.home_outlined,
+                              index: 0,
+                            ),
+                            _buildNavButton(
+                              icon: Icons.store_outlined,
+                              index: 1,
+                            ),
                             _buildNavButton(icon: Icons.receipt_long, index: 2),
                             // Hidden QR scanner button (index 3) – feature paused for shop app UX
-                            _buildNavButton(icon: Icons.delivery_dining, index: 4),
+                            _buildNavButton(
+                              icon: Icons.insights_outlined,
+                              index: 4,
+                            ),
                             _buildNavButton(icon: Icons.wallet, index: 5),
                             _buildNavButton(
                               icon: Icons.notifications_outlined,
@@ -635,7 +685,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               index: 7,
                               badgeCount: _unreadChatCount,
                             ),
-                            _buildNavButton(icon: Icons.settings_outlined, index: 8),
+                            _buildNavButton(
+                              icon: Icons.settings_outlined,
+                              index: 8,
+                            ),
                           ],
                         ),
                       ),
@@ -654,27 +707,39 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 color: Colors.transparent,
                 child: Container(
                   margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.orange.shade700,
                     borderRadius: BorderRadius.circular(12),
-                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                    boxShadow: [
+                      BoxShadow(color: Colors.black26, blurRadius: 8),
+                    ],
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.notifications_active, color: Colors.white),
+                      const Icon(
+                        Icons.notifications_active,
+                        color: Colors.white,
+                      ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
                           _activeNotification ?? '',
-                          style: const TextStyle(color: Colors.white, fontSize: 16),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, color: Colors.white),
-                        onPressed: () => setState(() => _activeNotification = null),
+                        onPressed: () =>
+                            setState(() => _activeNotification = null),
                       ),
                     ],
                   ),
@@ -692,8 +757,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     int badgeCount = 0,
   }) {
     final bool isSelected = _currentIndex == index;
-    final Color circleColor = isSelected ? AppColors.accentLight : const Color(0xFFE6E6E6);
-    final Color iconColor = isSelected ? AppColors.accent : AppColors.neutralIcon;
+    final Color circleColor = isSelected
+        ? AppColors.accentLight
+        : const Color(0xFFE6E6E6);
+    final Color iconColor = isSelected
+        ? AppColors.accent
+        : AppColors.neutralIcon;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -730,7 +799,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     right: -4,
                     top: -4,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.red,
                         borderRadius: BorderRadius.circular(12),
@@ -752,7 +824,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         ),
       ),
     );
-
   }
 }
 
@@ -777,20 +848,27 @@ class _HomeDashboard extends StatelessWidget {
   final Future<List<CachedProduct>>? homeProductsFuture;
   final List<CachedProduct> cachedProducts;
 
-
   void _showProductGallery(BuildContext context, Map<String, dynamic> data) {
-    final List<String> allImages = _extractImages(data, preferThumbnails: false);
+    final List<String> allImages = _extractImages(
+      data,
+      preferThumbnails: false,
+    );
     // Always show the selected imageUrl (from grid) as the first image
     final selectedImageUrl = allImages.isNotEmpty ? allImages.first : null;
     final List<String> imageUrls = selectedImageUrl != null
-      ? [selectedImageUrl, ...allImages.where((url) => url != selectedImageUrl)]
-      : allImages;
+        ? [
+            selectedImageUrl,
+            ...allImages.where((url) => url != selectedImageUrl),
+          ]
+        : allImages;
     final videoUrl = data['videoUrl'] as String?;
     final name = (data['name'] ?? '').toString();
     final price = (data['price'] ?? '').toString();
     final stock = data['stock']?.toString() ?? '0';
     final description = (data['description'] ?? '').toString();
-    final videoThumbnailUrl = (data['videoThumbnailUrl'] ?? '').toString().trim();
+    final videoThumbnailUrl = (data['videoThumbnailUrl'] ?? '')
+        .toString()
+        .trim();
 
     showDialog(
       context: context,
@@ -802,7 +880,9 @@ class _HomeDashboard extends StatelessWidget {
         child: _ProductGalleryContent(
           images: imageUrls,
           videoUrl: videoUrl,
-          videoThumbnailUrl: videoThumbnailUrl.isNotEmpty ? videoThumbnailUrl : null,
+          videoThumbnailUrl: videoThumbnailUrl.isNotEmpty
+              ? videoThumbnailUrl
+              : null,
           name: name,
           price: price,
           stock: stock,
@@ -812,8 +892,12 @@ class _HomeDashboard extends StatelessWidget {
     );
   }
 
-  List<String> _extractImages(Map<String, dynamic> data, {bool preferThumbnails = false}) {
-    List<String> readList(String key) => (data[key] as List?)
+  List<String> _extractImages(
+    Map<String, dynamic> data, {
+    bool preferThumbnails = false,
+  }) {
+    List<String> readList(String key) =>
+        (data[key] as List?)
             ?.whereType<String>()
             .where((url) => url.trim().isNotEmpty)
             .toList() ??
@@ -837,14 +921,16 @@ class _HomeDashboard extends StatelessWidget {
     }
 
     final Set<String> urls = <String>{};
-    final String? current = (docs[selectedIndex].data['videoUrl'] as String?)?.trim();
+    final String? current = (docs[selectedIndex].data['videoUrl'] as String?)
+        ?.trim();
     if (current != null && current.isNotEmpty) {
       urls.add(current);
     }
 
     int offset = 1;
     int neighborCount = 0;
-    while (neighborCount < 5 && (selectedIndex - offset >= 0 || selectedIndex + offset < docs.length)) {
+    while (neighborCount < 5 &&
+        (selectedIndex - offset >= 0 || selectedIndex + offset < docs.length)) {
       final prevIndex = selectedIndex - offset;
       if (prevIndex >= 0) {
         final prevUrl = (docs[prevIndex].data['videoUrl'] as String?)?.trim();
@@ -871,8 +957,9 @@ class _HomeDashboard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ImageProvider? avatarImage = (shopImageUrl != null && shopImageUrl!.isNotEmpty)
-      ? CachedNetworkImageProvider(shopImageUrl!)
+    final ImageProvider? avatarImage =
+        (shopImageUrl != null && shopImageUrl!.isNotEmpty)
+        ? CachedNetworkImageProvider(shopImageUrl!)
         : null;
     final String displayName = (shopName != null && shopName!.isNotEmpty)
         ? shopName!
@@ -915,7 +1002,11 @@ class _HomeDashboard extends StatelessWidget {
                   backgroundColor: AppColors.accent,
                   backgroundImage: avatarImage,
                   child: avatarImage == null
-                      ? const Icon(Icons.account_circle, color: Colors.white, size: 42)
+                      ? const Icon(
+                          Icons.account_circle,
+                          color: Colors.white,
+                          size: 42,
+                        )
                       : null,
                 ),
               ),
@@ -936,7 +1027,11 @@ class _HomeDashboard extends StatelessWidget {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.store_mall_directory_outlined, size: 80, color: Colors.grey[400]),
+                    Icon(
+                      Icons.store_mall_directory_outlined,
+                      size: 80,
+                      color: Colors.grey[400],
+                    ),
                     const SizedBox(height: 24),
                     Text(
                       'ร้านปิดชั่วคราว',
@@ -950,186 +1045,259 @@ class _HomeDashboard extends StatelessWidget {
                     Text(
                       'ขออภัยค่ะ ร้านค้าปิดทำการในขณะนี้\nกรุณากลับมาใหม่ภายหลัง',
                       textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 16, color: Colors.grey[600], height: 1.5),
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey[600],
+                        height: 1.5,
+                      ),
                     ),
                   ],
                 ),
               ),
             )
           : homeProductIds == null || homeProductIds!.isEmpty
-              ? const Center(child: Text('ยังไม่มีสินค้าที่เลือกแสดงบนหน้าโฮม', style: TextStyle(fontSize: 18)))
-              : FutureBuilder<List<CachedProduct>>(
-                  future: homeProductsFuture,
-                  builder: (context, snapshot) {
-                    final List<CachedProduct> docs = snapshot.data ?? cachedProducts;
-                    final bool showLoading =
-                        snapshot.connectionState == ConnectionState.waiting && docs.isEmpty;
+          ? const Center(
+              child: Text(
+                'ยังไม่มีสินค้าที่เลือกแสดงบนหน้าโฮม',
+                style: TextStyle(fontSize: 18),
+              ),
+            )
+          : FutureBuilder<List<CachedProduct>>(
+              future: homeProductsFuture,
+              builder: (context, snapshot) {
+                final List<CachedProduct> docs =
+                    snapshot.data ?? cachedProducts;
+                final bool showLoading =
+                    snapshot.connectionState == ConnectionState.waiting &&
+                    docs.isEmpty;
 
-                    if (showLoading) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
+                if (showLoading) {
+                  return const Center(child: CircularProgressIndicator());
+                }
 
-                    if (snapshot.hasError && docs.isEmpty) {
-                      return Center(
-                        child: Text(
-                          'เกิดข้อผิดพลาดในการโหลดสินค้า: ${snapshot.error}',
-                          textAlign: TextAlign.center,
-                        ),
-                      );
-                    }
+                if (snapshot.hasError && docs.isEmpty) {
+                  return Center(
+                    child: Text(
+                      'เกิดข้อผิดพลาดในการโหลดสินค้า: ${snapshot.error}',
+                      textAlign: TextAlign.center,
+                    ),
+                  );
+                }
 
-                    if (docs.isEmpty) {
-                      return const Center(child: Text('ไม่พบสินค้าที่เลือก', style: TextStyle(fontSize: 18)));
-                    }
-                    return GridView.builder(
-                      padding: const EdgeInsets.all(16),
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
-                        mainAxisSpacing: 16,
-                        crossAxisSpacing: 16,
-                      ),
-                      itemCount: docs.length,
-                      itemBuilder: (context, index) {
-                        final doc = docs[index];
-                        final data = doc.data;
-                        final List<String> thumbnailImages = _extractImages(data, preferThumbnails: true);
-                        final String? imageUrl = thumbnailImages.isNotEmpty ? thumbnailImages.first : null;
-                        final name = (data['name'] ?? '').toString();
-                        final price = (data['price'] ?? '').toString();
-                        final stock = data['stock']?.toString() ?? '0';
-                        final description = (data['description'] ?? '').toString();
+                if (docs.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'ไม่พบสินค้าที่เลือก',
+                      style: TextStyle(fontSize: 18),
+                    ),
+                  );
+                }
+                return GridView.builder(
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 16,
+                    crossAxisSpacing: 16,
+                  ),
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    final doc = docs[index];
+                    final data = doc.data;
+                    final List<String> thumbnailImages = _extractImages(
+                      data,
+                      preferThumbnails: true,
+                    );
+                    final String? imageUrl = thumbnailImages.isNotEmpty
+                        ? thumbnailImages.first
+                        : null;
+                    final name = (data['name'] ?? '').toString();
+                    final price = (data['price'] ?? '').toString();
+                    final stock = data['stock']?.toString() ?? '0';
+                    final description = (data['description'] ?? '').toString();
 
-                        return GestureDetector(
-                          onTap: () {
-                            _prefetchProductVideos(docs, index);
-                            // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
-                            final List<String> allImages = _extractImages(data, preferThumbnails: false);
-                            // กรอง videoUrl ออกจาก imageUrls
-                            final videoUrl = data['videoUrl'] as String?;
-                            final filteredImages = videoUrl != null
-                                ? allImages.where((url) => url != videoUrl).toList()
-                                : allImages;
-                            final selectedImageUrl = imageUrl;
-                            final List<String> galleryImages = selectedImageUrl != null
-                              ? [selectedImageUrl, ...filteredImages.where((url) => url != selectedImageUrl)]
-                              : filteredImages;
-                            final modalData = Map<String, dynamic>.from(data);
-                            modalData['imageUrls'] = galleryImages;
-                            _showProductGallery(context, modalData);
-                          },
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(16),
-                              boxShadow: const [
-                                BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 3)),
-                              ],
+                    return GestureDetector(
+                      onTap: () {
+                        _prefetchProductVideos(docs, index);
+                        // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
+                        final List<String> allImages = _extractImages(
+                          data,
+                          preferThumbnails: false,
+                        );
+                        // กรอง videoUrl ออกจาก imageUrls
+                        final videoUrl = data['videoUrl'] as String?;
+                        final filteredImages = videoUrl != null
+                            ? allImages.where((url) => url != videoUrl).toList()
+                            : allImages;
+                        final selectedImageUrl = imageUrl;
+                        final List<String> galleryImages =
+                            selectedImageUrl != null
+                            ? [
+                                selectedImageUrl,
+                                ...filteredImages.where(
+                                  (url) => url != selectedImageUrl,
+                                ),
+                              ]
+                            : filteredImages;
+                        final modalData = Map<String, dynamic>.from(data);
+                        modalData['imageUrls'] = galleryImages;
+                        _showProductGallery(context, modalData);
+                      },
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black12,
+                              blurRadius: 6,
+                              offset: Offset(0, 3),
                             ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(16),
-                              child: Stack(
-                                children: [
-                                  Positioned.fill(
-                                    child: imageUrl != null
-                                        ? Stack(
-                                            children: [
-                                              Positioned.fill(
-                                                child: CachedNetworkImage(
-                                                  imageUrl: imageUrl,
-                                                  fit: BoxFit.cover,
-                                                  memCacheWidth: 500, // Optimize memory usage
-                                                  maxWidthDiskCache: 800, // Optimize disk storage
-                                                  placeholder: (context, url) => Container(
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: imageUrl != null
+                                    ? Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: CachedNetworkImage(
+                                              imageUrl: imageUrl,
+                                              fit: BoxFit.cover,
+                                              memCacheWidth:
+                                                  500, // Optimize memory usage
+                                              maxWidthDiskCache:
+                                                  800, // Optimize disk storage
+                                              placeholder: (context, url) =>
+                                                  Container(
                                                     color: Colors.grey[100],
                                                     alignment: Alignment.center,
                                                     child: const SizedBox(
                                                       width: 24,
                                                       height: 24,
-                                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                            strokeWidth: 2,
+                                                          ),
                                                     ),
                                                   ),
-                                                  errorWidget: (context, url, error) => Container(
-                                                    color: Colors.grey[200],
-                                                    alignment: Alignment.center,
-                                                    child: const Icon(Icons.broken_image, size: 36, color: Colors.grey),
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          )
-                                        : Container(
-                                            color: Colors.grey[200],
-                                            alignment: Alignment.center,
-                                            child: const Icon(Icons.image, size: 40, color: Colors.grey),
+                                              errorWidget:
+                                                  (context, url, error) =>
+                                                      Container(
+                                                        color: Colors.grey[200],
+                                                        alignment:
+                                                            Alignment.center,
+                                                        child: const Icon(
+                                                          Icons.broken_image,
+                                                          size: 36,
+                                                          color: Colors.grey,
+                                                        ),
+                                                      ),
+                                            ),
                                           ),
-                                  ),
-                                  Positioned(
-                                    left: 0,
-                                    right: 0,
-                                    bottom: 0,
-                                    child: Container(
-                                      padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
-                                      decoration: const BoxDecoration(
-                                        gradient: LinearGradient(
-                                          begin: Alignment.bottomCenter,
-                                          end: Alignment.topCenter,
-                                          colors: [
-                                            Color(0xCC000000),
-                                            Color(0x66000000),
-                                            Color(0x00000000),
-                                          ],
+                                        ],
+                                      )
+                                    : Container(
+                                        color: Colors.grey[200],
+                                        alignment: Alignment.center,
+                                        child: const Icon(
+                                          Icons.image,
+                                          size: 40,
+                                          color: Colors.grey,
                                         ),
                                       ),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            name,
-                                            style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w700,
-                                              color: Colors.white,
-                                              shadows: [Shadow(color: Colors.black54, offset: Offset(0, 1), blurRadius: 2)],
-                                            ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                            'ราคา: $price บาท',
-                                            style: const TextStyle(fontSize: 13, color: Colors.white70),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                          Text(
-                                            'สต๊อก: $stock',
-                                            style: const TextStyle(fontSize: 13, color: Colors.white70),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                          if (description.isNotEmpty) ...[
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              description,
-                                              style: const TextStyle(fontSize: 12, color: Colors.white70, fontStyle: FontStyle.italic),
-                                              maxLines: 2,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
-                                          ],
-                                        ],
-                                      ),
+                              ),
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                child: Container(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    14,
+                                    12,
+                                    12,
+                                  ),
+                                  decoration: const BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.bottomCenter,
+                                      end: Alignment.topCenter,
+                                      colors: [
+                                        Color(0xCC000000),
+                                        Color(0x66000000),
+                                        Color(0x00000000),
+                                      ],
                                     ),
                                   ),
-                                ],
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        name,
+                                        style: const TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.white,
+                                          shadows: [
+                                            Shadow(
+                                              color: Colors.black54,
+                                              offset: Offset(0, 1),
+                                              blurRadius: 2,
+                                            ),
+                                          ],
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        'ราคา: $price บาท',
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.white70,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      Text(
+                                        'สต๊อก: $stock',
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.white70,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      if (description.isNotEmpty) ...[
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          description,
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.white70,
+                                            fontStyle: FontStyle.italic,
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
                               ),
-                            ),
+                            ],
                           ),
-                        );
-                      },
+                        ),
+                      ),
                     );
                   },
-                ),
+                );
+              },
+            ),
     );
   }
 }
@@ -1159,7 +1327,6 @@ class _ProductGalleryContent extends StatefulWidget {
 }
 
 class _ProductGalleryContentState extends State<_ProductGalleryContent> {
-
   late final PageController _pageController;
   int _currentIndex = 0;
 
@@ -1183,7 +1350,9 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
     final hasImages = widget.images.isNotEmpty;
     final theme = Theme.of(context);
     final hasVideo = widget.videoUrl != null && widget.videoUrl!.isNotEmpty;
-    final totalPages = hasImages ? widget.images.length + (hasVideo ? 1 : 0) : (hasVideo ? 1 : 0);
+    final totalPages = hasImages
+        ? widget.images.length + (hasVideo ? 1 : 0)
+        : (hasVideo ? 1 : 0);
 
     return SizedBox(
       width: MediaQuery.of(context).size.width * 0.85,
@@ -1196,7 +1365,9 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
               Expanded(
                 child: Text(
                   widget.name.isNotEmpty ? widget.name : 'รายละเอียดสินค้า',
-                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -1214,7 +1385,8 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                 ? PageView.builder(
                     controller: _pageController,
                     itemCount: totalPages,
-                    onPageChanged: (index) => setState(() => _currentIndex = index),
+                    onPageChanged: (index) =>
+                        setState(() => _currentIndex = index),
                     itemBuilder: (context, index) {
                       // Always show images first, video last
                       if (hasImages && index < widget.images.length) {
@@ -1226,11 +1398,17 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                             fit: BoxFit.cover,
                             memCacheWidth: 800, // Optimize memory usage
                             maxWidthDiskCache: 1000, // Optimize disk storage
-                            placeholder: (context, _) => const Center(child: CircularProgressIndicator()),
+                            placeholder: (context, _) => const Center(
+                              child: CircularProgressIndicator(),
+                            ),
                             errorWidget: (context, _, __) => Container(
                               color: Colors.grey[200],
                               alignment: Alignment.center,
-                              child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+                              child: const Icon(
+                                Icons.broken_image,
+                                size: 48,
+                                color: Colors.grey,
+                              ),
                             ),
                           ),
                         );
@@ -1250,7 +1428,11 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                             borderRadius: BorderRadius.circular(12),
                           ),
                           alignment: Alignment.center,
-                          child: const Icon(Icons.image_not_supported, size: 64, color: Colors.grey),
+                          child: const Icon(
+                            Icons.image_not_supported,
+                            size: 64,
+                            color: Colors.grey,
+                          ),
                         );
                       }
                     },
@@ -1261,7 +1443,11 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     alignment: Alignment.center,
-                    child: const Icon(Icons.image_not_supported, size: 64, color: Colors.grey),
+                    child: const Icon(
+                      Icons.image_not_supported,
+                      size: 64,
+                      color: Colors.grey,
+                    ),
                   ),
           ),
           if (totalPages > 1)
@@ -1291,14 +1477,34 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('ราคา: ${widget.price} บาท', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  Text(
+                    'ราคา: ${widget.price} บาท',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   const SizedBox(height: 4),
-                  Text('สต๊อก: ${widget.stock}', style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                  Text(
+                    'สต๊อก: ${widget.stock}',
+                    style: const TextStyle(fontSize: 14, color: Colors.black87),
+                  ),
                   if (widget.description.isNotEmpty) ...[
                     const SizedBox(height: 12),
-                    Text('คำอธิบาย', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                    Text(
+                      'คำอธิบาย',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     const SizedBox(height: 4),
-                    Text(widget.description, style: const TextStyle(fontSize: 14, color: Colors.black87)),
+                    Text(
+                      widget.description,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: Colors.black87,
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -1309,11 +1515,9 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
     );
   }
 }
+
 class _ShopStatusToggle extends StatefulWidget {
-  const _ShopStatusToggle({
-    required this.isOpen,
-    required this.onToggle,
-  });
+  const _ShopStatusToggle({required this.isOpen, required this.onToggle});
 
   final bool isOpen;
   final ValueChanged<bool> onToggle;
@@ -1378,9 +1582,7 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
   void _handleDragEnd([DragEndDetails? details]) {
     final fraction = _currentFraction;
     final velocity = details?.velocity.pixelsPerSecond.dx ?? 0;
-    final shouldOpen = velocity.abs() > 200
-        ? velocity < 0
-        : fraction < 0.5;
+    final shouldOpen = velocity.abs() > 200 ? velocity < 0 : fraction < 0.5;
     widget.onToggle(shouldOpen);
     setState(() {
       _localOpen = shouldOpen;
@@ -1392,7 +1594,7 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
   @override
   Widget build(BuildContext context) {
     final fraction = _currentFraction;
-  final bool highlightOpen = _localOpen;
+    final bool highlightOpen = _localOpen;
     final alignment = Alignment(fraction * 2 - 1, 0);
 
     return Tooltip(
@@ -1412,16 +1614,25 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
             borderRadius: BorderRadius.circular(24),
             border: Border.all(color: Colors.white70),
             boxShadow: const [
-              BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2)),
+              BoxShadow(
+                color: Colors.black12,
+                blurRadius: 6,
+                offset: Offset(0, 2),
+              ),
             ],
           ),
           child: Stack(
             children: [
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: _padding, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: _padding,
+                  vertical: 4,
+                ),
                 child: AnimatedAlign(
                   alignment: alignment,
-                  duration: Duration(milliseconds: _dragFraction != null ? 0 : 220),
+                  duration: Duration(
+                    milliseconds: _dragFraction != null ? 0 : 220,
+                  ),
                   curve: Curves.easeOut,
                   child: FractionallySizedBox(
                     widthFactor: 0.5,
@@ -1431,7 +1642,11 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
                         color: highlightOpen ? Colors.green : AppColors.accent,
                         borderRadius: BorderRadius.circular(18),
                         boxShadow: const [
-                          BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 3)),
+                          BoxShadow(
+                            color: Colors.black26,
+                            blurRadius: 6,
+                            offset: Offset(0, 3),
+                          ),
                         ],
                       ),
                     ),
@@ -1445,7 +1660,9 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
                       child: Text(
                         'เปิดร้าน',
                         style: TextStyle(
-                          color: highlightOpen ? Colors.white : Colors.grey[700],
+                          color: highlightOpen
+                              ? Colors.white
+                              : Colors.grey[700],
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -1456,7 +1673,9 @@ class _ShopStatusToggleState extends State<_ShopStatusToggle> {
                       child: Text(
                         'ปิดร้าน',
                         style: TextStyle(
-                          color: highlightOpen ? Colors.grey[700] : Colors.white,
+                          color: highlightOpen
+                              ? Colors.grey[700]
+                              : Colors.white,
                           fontWeight: FontWeight.w700,
                         ),
                       ),

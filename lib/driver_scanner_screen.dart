@@ -141,9 +141,12 @@ class _DriverScannerScreenState extends State<DriverScannerScreen> {
     } catch (e) {
       _showError('เกิดข้อผิดพลาด: $e');
     } finally {
-      setState(() => _isProcessing = false);
+      if (mounted) {
+        setState(() => _isProcessing = false);
+      }
       // รอ 2 วิก่อนให้สแกนใหม่ได้
       Future.delayed(const Duration(seconds: 2), () {
+        if (!mounted) return;
         _lastScannedCode = null;
       });
     }

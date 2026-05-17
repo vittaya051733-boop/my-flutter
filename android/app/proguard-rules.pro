@@ -14,3 +14,38 @@
 
 # Keep plugin bridge classes used by Flutter ML Kit plugin
 -keep class com.google_mlkit_text_recognition.** { *; }
+
+# Flutter / Plugins generic safety
+-keep class io.flutter.** { *; }
+-keep class io.flutter.plugins.** { *; }
+-keep class io.flutter.plugin.** { *; }
+-dontwarn io.flutter.embedding.**
+
+# Firebase
+-keep class com.google.firebase.** { *; }
+-dontwarn com.google.firebase.**
+
+# Printing plugin (uses reflection)
+-keep class net.nfet.flutter.printing.** { *; }
+-dontwarn net.nfet.flutter.printing.**
+
+# Agora RTC
+-keep class io.agora.** { *; }
+-dontwarn io.agora.**
+
+# Mobile scanner / ML Kit
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.google.android.gms.**
+
+# Google Maps
+-keep class com.google.android.libraries.maps.** { *; }
+-dontwarn com.google.android.libraries.maps.**
+
+# Keep Parcelables / Serializables
+-keepclassmembers class * implements android.os.Parcelable {
+    public static final ** CREATOR;
+}
+-keepnames class * implements java.io.Serializable
+
+# Keep annotations
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod

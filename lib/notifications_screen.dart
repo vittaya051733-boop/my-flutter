@@ -39,8 +39,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 
   bool _isAwaitingShopDecisionData(Map<String, dynamic> data) {
     final status = (data['status'] as String?)?.trim() ?? '';
-    return status == 'pending' ||
-        (status == 'accepted' && data['preparingStartTime'] == null);
+    final driverId = (data['driverId'] as String?)?.trim() ?? '';
+    return status == 'accepted' &&
+        driverId.isNotEmpty &&
+        data['preparingStartTime'] == null;
   }
 
   bool _isShopOrderForCurrentUser(Map<String, dynamic> data) {

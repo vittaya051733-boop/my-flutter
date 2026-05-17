@@ -139,6 +139,7 @@ class Order {
 
 class DetailedOrder {
   final String orderId;
+  final String? orderCode;
   final String customerId;
   final String shopId;
   final DateTime createdAt;
@@ -185,6 +186,7 @@ class DetailedOrder {
 
   DetailedOrder({
     required this.orderId,
+    this.orderCode,
     required this.customerId,
     required this.shopId,
     required this.createdAt,
@@ -225,6 +227,7 @@ class DetailedOrder {
   Map<String, dynamic> toMap() {
     return {
       'orderId': orderId,
+      if (orderCode != null) 'orderCode': orderCode,
       'customerId': customerId,
       'shopId': shopId,
       'createdAt': Timestamp.fromDate(createdAt),
@@ -286,6 +289,7 @@ class DetailedOrder {
     );
     return DetailedOrder(
       orderId: map['orderId'] ?? '',
+      orderCode: (map['orderCode'] ?? map['orderNumber'])?.toString(),
       customerId: map['customerId'] ?? '',
       shopId: map['shopId'] ?? '',
       createdAt: (map['createdAt'] as Timestamp).toDate(),
@@ -426,6 +430,7 @@ class DetailedOrder {
   }
 
   DetailedOrder copyWith({
+    String? orderCode,
     String? status,
     DateTime? acceptedAt,
     DateTime? preparingStartTime,
@@ -442,6 +447,7 @@ class DetailedOrder {
   }) {
     return DetailedOrder(
       orderId: orderId,
+      orderCode: orderCode ?? this.orderCode,
       customerId: customerId,
       shopId: shopId,
       createdAt: createdAt,

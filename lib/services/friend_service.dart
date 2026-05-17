@@ -11,8 +11,10 @@ class FriendService {
   static const Duration _cacheTtl = Duration(minutes: 5);
   static const int _perCollectionSearchLimit = 40;
   static const int _perCollectionSuggestionLimit = 25;
-  final Map<String, _ProfileCacheEntry> _searchCache = <String, _ProfileCacheEntry>{};
-  final Map<String, _ProfileCacheEntry> _suggestionCache = <String, _ProfileCacheEntry>{};
+  final Map<String, _ProfileCacheEntry> _searchCache =
+      <String, _ProfileCacheEntry>{};
+  final Map<String, _ProfileCacheEntry> _suggestionCache =
+      <String, _ProfileCacheEntry>{};
 
   static const List<String> _shopCollections = <String>[
     'market_registrations',
@@ -28,11 +30,19 @@ class FriendService {
         .collection('friends')
         .orderBy('lastActivity', descending: true);
 
-    return ref.snapshots().asyncMap(
-      (snapshot) async => Future.wait(
-        snapshot.docs.map((doc) => _buildFriendPreview(ownerId, doc)),
-      ),
-    );
+    return ref.snapshots().asyncMap((snapshot) async {
+      final previews = <FriendPreview>[];
+      for (final doc in snapshot.docs) {
+        try {
+          previews.add(await _buildFriendPreview(ownerId, doc));
+        } catch (_) {
+          try {
+            previews.add(FriendPreview.fromSnapshot(doc));
+          } catch (_) {}
+        }
+      }
+      return previews;
+    });
   }
 
   Future<UserProfile?> ensureCurrentUserProfile(User user) async {
@@ -54,7 +64,10 @@ class FriendService {
 
   Future<UserProfile?> getProfile(String uid) async {
     final snapshot = await _firestore.collection('users').doc(uid).get();
-    final profile = await _resolveCanonicalProfile(uid, userData: snapshot.data());
+    final profile = await _resolveCanonicalProfile(
+      uid,
+      userData: snapshot.data(),
+    );
     if (profile == null) {
       return null;
     }
@@ -94,20 +107,20 @@ class FriendService {
         profileCompleted: (data['isProfileCompleted'] as bool?) ?? false,
       );
 
-      await _firestore.collection('users').doc(doc.id).set(
-            <String, dynamic>{
-              ...profile.toFirestore(),
-              'phoneNumber': normalized,
-              'createdAt': FieldValue.serverTimestamp(),
-            },
-            SetOptions(merge: true),
-          );
+      await _firestore.collection('users').doc(doc.id).set(<String, dynamic>{
+        ...profile.toFirestore(),
+        'phoneNumber': normalized,
+        'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
       return profile;
     }
     return null;
   }
 
-  Future<List<UserProfile>> searchProfilesByName(String keyword, {int limit = 20}) async {
+  Future<List<UserProfile>> searchProfilesByName(
+    String keyword, {
+    int limit = 20,
+  }) async {
     final normalized = keyword.trim().toLowerCase();
     if (normalized.isEmpty) return const <UserProfile>[];
     final cached = _readCache(_searchCache, normalized);
@@ -143,8 +156,9 @@ class FriendService {
           UserProfile(
             uid: doc.id,
             displayName: name,
-            phoneNumber:
-                _normalizePhone((data['phone'] ?? data['phoneNumber'] ?? '') as String),
+            phoneNumber: _normalizePhone(
+              (data['phone'] ?? data['phoneNumber'] ?? '') as String,
+            ),
             photoUrl: _readPhotoUrl(data),
             serviceType: (data['serviceType'] as String?) ?? collection,
             isOfficial: (data['isOfficialAccount'] as bool?) ?? false,
@@ -192,13 +206,17 @@ class FriendService {
       ownerId,
       ownerServiceType: ownerServiceType,
     );
-    final preferredCollection = baseCollections.length == 1 ? baseCollections.first : null;
+    final preferredCollection = baseCollections.length == 1
+        ? baseCollections.first
+        : null;
     final collectionsToQuery = <String>[
       ...baseCollections,
       ..._shopCollections.where((c) => !baseCollections.contains(c)),
     ];
 
-    final limitedCollections = collectionsToQuery.take(4).toList(growable: false);
+    final limitedCollections = collectionsToQuery
+        .take(4)
+        .toList(growable: false);
     final futures = limitedCollections
         .map(
           (collection) => _firestore
@@ -216,10 +234,13 @@ class FriendService {
         final data = doc.data();
         final shopOwnerId = (data['ownerId'] as String?) ?? doc.id;
         if (shopOwnerId.isEmpty) continue;
-        if (exclude.contains(shopOwnerId) || seen.contains(shopOwnerId)) continue;
+        if (exclude.contains(shopOwnerId) || seen.contains(shopOwnerId))
+          continue;
 
         final email = (data['email'] as String?)?.toLowerCase().trim();
-        if (lowerOwnerEmail != null && email != null && email == lowerOwnerEmail) {
+        if (lowerOwnerEmail != null &&
+            email != null &&
+            email == lowerOwnerEmail) {
           continue;
         }
 
@@ -231,9 +252,13 @@ class FriendService {
         final profile = UserProfile(
           uid: shopOwnerId,
           displayName: _readDisplayName(data, fallback: 'ร้านค้า'),
-          phoneNumber: _normalizePhone((data['phone'] ?? data['phoneNumber'] ?? '') as String),
+          phoneNumber: _normalizePhone(
+            (data['phone'] ?? data['phoneNumber'] ?? '') as String,
+          ),
           photoUrl: photoUrl,
-          serviceType: (data['serviceType'] as String?) ?? _serviceTypeFromCollection(collection),
+          serviceType:
+              (data['serviceType'] as String?) ??
+              _serviceTypeFromCollection(collection),
           isOfficial: (data['isOfficialAccount'] as bool?) ?? false,
           profileCompleted: (data['isProfileCompleted'] as bool?) ?? true,
         );
@@ -246,7 +271,9 @@ class FriendService {
     }
 
     if (suggestions.length < limit) {
-      final fallbackLimit = ((limit - suggestions.length) * 3).clamp(12, 60).toInt();
+      final fallbackLimit = ((limit - suggestions.length) * 3)
+          .clamp(12, 60)
+          .toInt();
       final userSnapshot = await _firestore
           .collection('users')
           .orderBy('updatedAt', descending: true)
@@ -270,12 +297,16 @@ class FriendService {
       void takeCandidates({required bool sameServiceOnly}) {
         for (final profile in candidates) {
           if (suggestions.length >= limit) break;
-          if (exclude.contains(profile.uid) || seen.contains(profile.uid)) continue;
+          if (exclude.contains(profile.uid) || seen.contains(profile.uid))
+            continue;
 
           if (sameServiceOnly) {
             if (matchingCollection == null) continue;
-            final profileCollection = _collectionFromServiceType(profile.serviceType);
-            if (profileCollection == null || profileCollection != matchingCollection) {
+            final profileCollection = _collectionFromServiceType(
+              profile.serviceType,
+            );
+            if (profileCollection == null ||
+                profileCollection != matchingCollection) {
               continue;
             }
           }
@@ -336,8 +367,12 @@ class FriendService {
     } catch (_) {}
 
     try {
-      final contractDoc = await _firestore.collection('contracts').doc(ownerId).get();
-      final serviceType = (contractDoc.data()?['serviceType'] as String?)?.trim();
+      final contractDoc = await _firestore
+          .collection('contracts')
+          .doc(ownerId)
+          .get();
+      final serviceType = (contractDoc.data()?['serviceType'] as String?)
+          ?.trim();
       if (serviceType != null && serviceType.isNotEmpty) {
         return serviceType;
       }
@@ -397,8 +432,11 @@ class FriendService {
       throw const FriendException('ไม่สามารถเพิ่มตัวเองเป็นเพื่อนได้');
     }
 
-    final ownerFriendRef =
-        _firestore.collection('users').doc(ownerId).collection('friends').doc(friend.uid);
+    final ownerFriendRef = _firestore
+        .collection('users')
+        .doc(ownerId)
+        .collection('friends')
+        .doc(friend.uid);
     final already = await ownerFriendRef.get();
     if (already.exists) {
       throw const FriendException('คุณเพิ่มเพื่อนคนนี้ไว้แล้ว');
@@ -410,8 +448,11 @@ class FriendService {
     }
 
     final now = FieldValue.serverTimestamp();
-    final reverseRef =
-        _firestore.collection('users').doc(friend.uid).collection('friends').doc(ownerId);
+    final reverseRef = _firestore
+        .collection('users')
+        .doc(friend.uid)
+        .collection('friends')
+        .doc(ownerId);
 
     final batch = _firestore.batch();
     batch.set(ownerFriendRef, <String, dynamic>{
@@ -439,33 +480,40 @@ class FriendService {
 
   Future<Map<String, dynamic>?> _loadShopData(String uid) async {
     for (final collection in _shopCollections) {
-      final directSnapshot = await _firestore.collection(collection).doc(uid).get();
-      if (directSnapshot.exists) {
-        final data = directSnapshot.data();
-        if (data != null) {
-          return <String, dynamic>{
-            ...data,
-            'collection': collection,
-            'registrationDocId': directSnapshot.id,
-          };
+      try {
+        final directSnapshot = await _firestore
+            .collection(collection)
+            .doc(uid)
+            .get();
+        if (directSnapshot.exists) {
+          final data = directSnapshot.data();
+          if (data != null) {
+            return <String, dynamic>{
+              ...data,
+              'collection': collection,
+              'registrationDocId': directSnapshot.id,
+            };
+          }
         }
-      }
 
-      final ownerQuery = await _firestore
-          .collection(collection)
-          .where('ownerId', isEqualTo: uid)
-          .limit(1)
-          .get();
-      if (ownerQuery.docs.isNotEmpty) {
-        final ownerDoc = ownerQuery.docs.first;
-        final data = ownerDoc.data();
-        if (data.isNotEmpty) {
-          return <String, dynamic>{
-            ...data,
-            'collection': collection,
-            'registrationDocId': ownerDoc.id,
-          };
+        final ownerQuery = await _firestore
+            .collection(collection)
+            .where('ownerId', isEqualTo: uid)
+            .limit(1)
+            .get();
+        if (ownerQuery.docs.isNotEmpty) {
+          final ownerDoc = ownerQuery.docs.first;
+          final data = ownerDoc.data();
+          if (data.isNotEmpty) {
+            return <String, dynamic>{
+              ...data,
+              'collection': collection,
+              'registrationDocId': ownerDoc.id,
+            };
+          }
         }
+      } catch (_) {
+        continue;
       }
     }
     return null;
@@ -477,12 +525,17 @@ class FriendService {
   ) async {
     final data = doc.data() ?? const <String, dynamic>{};
     final Timestamp? ts = data['lastActivity'] as Timestamp?;
-    final profile = await _resolveCanonicalProfile(
+    final profile =
+        await _resolveCanonicalProfile(
           data['uid']?.toString() ?? doc.id,
           userData: data,
-          fallbackDisplayName: (data['displayName'] ?? data['name'] ?? 'ผู้ใช้ใหม่').toString(),
-          fallbackPhotoUrl: (data['photoUrl'] ?? data['imageUrl'] ?? data['shopImageUrl']) as String?,
-          fallbackPhoneNumber: (data['phoneNumber'] ?? data['phone']) as String?,
+          fallbackDisplayName:
+              (data['displayName'] ?? data['name'] ?? 'ผู้ใช้ใหม่').toString(),
+          fallbackPhotoUrl:
+              (data['photoUrl'] ?? data['imageUrl'] ?? data['shopImageUrl'])
+                  as String?,
+          fallbackPhoneNumber:
+              (data['phoneNumber'] ?? data['phone']) as String?,
         ) ??
         UserProfile.fromMap(data['uid']?.toString() ?? doc.id, data);
 
@@ -517,7 +570,10 @@ class FriendService {
         fallback: fallbackDisplayName ?? 'ผู้ใช้ใหม่',
       ),
     );
-    final photoUrl = _readPhotoUrl(shopData) ?? _readPhotoUrl(resolvedUserData) ?? fallbackPhotoUrl;
+    final photoUrl =
+        _readPhotoUrl(shopData) ??
+        _readPhotoUrl(resolvedUserData) ??
+        fallbackPhotoUrl;
     final phoneNumber = _normalizePhone(
       (shopData?['phone'] ??
               shopData?['phoneNumber'] ??
@@ -527,7 +583,8 @@ class FriendService {
               '')
           .toString(),
     );
-    final serviceType = (shopData?['serviceType'] as String?) ??
+    final serviceType =
+        (shopData?['serviceType'] as String?) ??
         (resolvedUserData?['serviceType'] as String?) ??
         (shopData?['collection'] as String?);
 
@@ -537,10 +594,12 @@ class FriendService {
       phoneNumber: phoneNumber.isEmpty ? null : phoneNumber,
       photoUrl: photoUrl,
       serviceType: serviceType,
-      isOfficial: (shopData?['isOfficialAccount'] as bool?) ??
+      isOfficial:
+          (shopData?['isOfficialAccount'] as bool?) ??
           (resolvedUserData?['isOfficial'] as bool?) ??
           false,
-      profileCompleted: (shopData?['isProfileCompleted'] as bool?) ??
+      profileCompleted:
+          (shopData?['isProfileCompleted'] as bool?) ??
           (resolvedUserData?['profileCompleted'] as bool?) ??
           false,
     );
@@ -559,15 +618,12 @@ class FriendService {
     if (!_shouldSyncProfile(existingData, profile)) {
       return;
     }
-    await docRef.set(
-      <String, dynamic>{
-        ...profile.toFirestore(),
-        if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
-          'phoneNumber': profile.phoneNumber,
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+    await docRef.set(<String, dynamic>{
+      ...profile.toFirestore(),
+      if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
+        'phoneNumber': profile.phoneNumber,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Future<void> _syncFriendPreviewDocIfNeeded(
@@ -579,31 +635,43 @@ class FriendService {
     if (!_shouldSyncProfile(existingData, profile)) {
       return;
     }
-    await _firestore
-        .collection('users')
-        .doc(ownerId)
-        .collection('friends')
-        .doc(friendId)
-        .set(
-      <String, dynamic>{
-        ...profile.toFirestore(),
-        'uid': profile.uid,
-        if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
-          'phoneNumber': profile.phoneNumber,
-      },
-      SetOptions(merge: true),
-    );
+    try {
+      await _firestore
+          .collection('users')
+          .doc(ownerId)
+          .collection('friends')
+          .doc(friendId)
+          .set(<String, dynamic>{
+            ...profile.toFirestore(),
+            'uid': profile.uid,
+            if (profile.phoneNumber != null && profile.phoneNumber!.isNotEmpty)
+              'phoneNumber': profile.phoneNumber,
+          }, SetOptions(merge: true));
+    } catch (_) {}
   }
 
-  bool _shouldSyncProfile(Map<String, dynamic>? existingData, UserProfile profile) {
+  bool _shouldSyncProfile(
+    Map<String, dynamic>? existingData,
+    UserProfile profile,
+  ) {
     if (existingData == null || existingData.isEmpty) {
       return true;
     }
-    final existingDisplayName = (existingData['displayName'] ?? existingData['name'] ?? '').toString().trim();
-    final existingPhotoUrl = (existingData['photoUrl'] ?? existingData['imageUrl'] ?? existingData['shopImageUrl'] ?? '')
-        .toString()
-        .trim();
-    final existingServiceType = (existingData['serviceType'] ?? existingData['type'] ?? '').toString().trim();
+    final existingDisplayName =
+        (existingData['displayName'] ?? existingData['name'] ?? '')
+            .toString()
+            .trim();
+    final existingPhotoUrl =
+        (existingData['photoUrl'] ??
+                existingData['imageUrl'] ??
+                existingData['shopImageUrl'] ??
+                '')
+            .toString()
+            .trim();
+    final existingServiceType =
+        (existingData['serviceType'] ?? existingData['type'] ?? '')
+            .toString()
+            .trim();
     final existingPhone = _normalizePhone(
       (existingData['phoneNumber'] ?? existingData['phone'] ?? '').toString(),
     );
@@ -614,7 +682,10 @@ class FriendService {
         existingPhone != (profile.phoneNumber ?? '');
   }
 
-  static String _readDisplayName(Map<String, dynamic>? data, {required String fallback}) {
+  static String _readDisplayName(
+    Map<String, dynamic>? data, {
+    required String fallback,
+  }) {
     final resolved = ShopProfileResolver.resolveName(data);
     if (resolved != null && resolved.trim().isNotEmpty) {
       return resolved.trim();
@@ -648,8 +719,8 @@ class FriendService {
 
 class _ProfileCacheEntry {
   _ProfileCacheEntry(List<UserProfile> items)
-      : data = List<UserProfile>.unmodifiable(items),
-        insertedAt = DateTime.now();
+    : data = List<UserProfile>.unmodifiable(items),
+      insertedAt = DateTime.now();
 
   final List<UserProfile> data;
   final DateTime insertedAt;
@@ -670,7 +741,9 @@ class FriendPreview {
   final DateTime? lastActivity;
   final bool isMuted;
 
-  factory FriendPreview.fromSnapshot(DocumentSnapshot<Map<String, dynamic>> doc) {
+  factory FriendPreview.fromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
     final data = doc.data() ?? const <String, dynamic>{};
     final Timestamp? ts = data['lastActivity'] as Timestamp?;
     return FriendPreview(

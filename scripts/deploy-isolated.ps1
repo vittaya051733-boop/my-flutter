@@ -1,7 +1,8 @@
 param(
   [switch]$FunctionsOnly,
   [switch]$HostingOnly,
-  [switch]$BuildWeb
+  [switch]$BuildWeb,
+  [string[]]$FunctionName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +37,30 @@ $config = Get-Content 'firebase.json' -Raw | ConvertFrom-Json
 $targets = @()
 
 if ($FunctionsOnly -and -not $HostingOnly) {
-  $targets += "functions:$functionsCodebase"
+  if (-not $FunctionName -or $FunctionName.Count -eq 0) {
+    Write-Error "Functions deploy is locked to explicit function names. Use: scripts/deploy-isolated.ps1 -FunctionsOnly -FunctionName verifyTopUpSlip"
+    exit 1
+  }
+
+  foreach ($name in $FunctionName) {
+    $cleanName = [string]$name
+    $cleanName = $cleanName.Trim()
+    if (-not $cleanName) {
+      continue
+    }
+    if ($cleanName -notmatch '^[A-Za-z0-9_-]+$') {
+      Write-Error "Invalid function name '$cleanName'."
+      exit 1
+    }
+    $targets += "functions:${functionsCodebase}:${cleanName}"
+  }
+
+  if ($targets.Count -eq 0) {
+    Write-Error 'No valid function names were provided.'
+    exit 1
+  }
+
+  $env:FUNCTIONS_DISCOVERY_TIMEOUT = '30000'
 } elseif ($HostingOnly -and -not $FunctionsOnly) {
   $targets += "hosting:$hostingTarget"
 } else {

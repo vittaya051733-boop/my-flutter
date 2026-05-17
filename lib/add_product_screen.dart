@@ -1,4 +1,6 @@
-﻿import 'dart:io';
+﻿import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'widgets/cached_app_image.dart';
@@ -10,6 +12,8 @@ import 'package:video_compress/video_compress.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:http/http.dart' as http;
 import '../models/product_model.dart'; // Import the model
 import 'utils/app_colors.dart';
 import 'utils/shop_profile_resolver.dart';
@@ -45,6 +49,30 @@ class _ProductVideoUploadResult {
   });
 }
 
+class _AiProductImageResult {
+  const _AiProductImageResult({
+    required this.imageBytes,
+    this.description,
+    this.taxStatus,
+    this.taxReason,
+    this.productCategory,
+    this.isFreshProduct,
+    this.isProcessed,
+    this.canShipNationwide,
+    this.nationwideShippingReason,
+  });
+
+  final Uint8List imageBytes;
+  final String? description;
+  final String? taxStatus;
+  final String? taxReason;
+  final String? productCategory;
+  final bool? isFreshProduct;
+  final bool? isProcessed;
+  final bool? canShipNationwide;
+  final String? nationwideShippingReason;
+}
+
 class AddProductScreen extends StatefulWidget {
   final Product? productToEdit;
   const AddProductScreen({super.key, this.productToEdit});
@@ -54,15 +82,19 @@ class AddProductScreen extends StatefulWidget {
 }
 
 class AddProductScreenState extends State<AddProductScreen> {
+  static const double _gpRate = 0.18;
+
   // Controllers to get text from TextFields
   final _nameController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _productDescriptionController = TextEditingController();
   final _priceController = TextEditingController();
   final _stockController = TextEditingController();
+  final _preparationTimeController = TextEditingController(text: '10');
   final _colorsController = TextEditingController();
   final _sizesController = TextEditingController();
   final _weightController = TextEditingController();
+  final FocusNode _priceFocusNode = FocusNode();
   String _weightUnit = 'g';
   final _otherUnitController = TextEditingController();
 
@@ -78,6 +110,25 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   bool _isSaving = false;
   bool _isResolvingServiceType = true;
+  bool _showPriceGuidance = false;
+  bool _showPreparationTimeGuidance = false;
+  bool _priceGuidanceDismissedWhileFocused = false;
+  bool _isGeneratingAiDescription = false;
+  bool _hasUsedAiDescriptionForProduct = false;
+  bool _hasUsedAiWhiteBgForProduct = false;
+  String? _aiTaxAnalysisReason;
+  bool _hasAiTaxAnalysis = false;
+  bool? _aiCanShipNationwide;
+  String? _aiNationwideShippingReason;
+  bool _manualCanShipNationwide = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _aiQueueSubscription;
+  String? _aiQueueStatusText;
+  bool _aiQueueExternalRecommendation = false;
+  final Map<String, Uint8List> _aiWhiteBgImagesByKey = {};
+  final Set<String> _aiWhiteBgProcessingKeys = {};
+  Uint8List? _videoAiOriginalPreviewBytes;
+  Uint8List? _videoAiWhiteBgBytes;
+  bool _isProcessingVideoAiWhiteBg = false;
   double? _uploadProgress;
   String? _uploadStatusText;
 
@@ -97,6 +148,7 @@ class AddProductScreenState extends State<AddProductScreen> {
   String? _selectedProductCategory;
   bool _isFreshProduct = false;
   bool _isProcessed = false;
+  bool _pharmacyIsTaxable = true;
   final List<String> _productCategories = [
     'ของสด',
     'อาหารแปรรูป',
@@ -108,6 +160,17 @@ class AddProductScreenState extends State<AddProductScreen> {
   @override
   void initState() {
     super.initState();
+    _priceFocusNode.addListener(() {
+      if (!mounted) return;
+      setState(() {
+        if (_priceFocusNode.hasFocus) {
+          _showPriceGuidance = !_priceGuidanceDismissedWhileFocused;
+        } else {
+          _priceGuidanceDismissedWhileFocused = false;
+          _showPriceGuidance = false;
+        }
+      });
+    });
     _loadCurrentServiceType();
     if (widget.productToEdit != null) {
       final p = widget.productToEdit!;
@@ -120,6 +183,7 @@ class AddProductScreenState extends State<AddProductScreen> {
           : p.description;
       _priceController.text = p.price.toString();
       _stockController.text = p.stock.toString();
+      _preparationTimeController.text = p.preparationTimeMinutes.toString();
       _colorsController.text = p.colors.join(', ');
       _sizesController.text = p.sizes.join(', ');
       _weightController.text = p.weight?.toString() ?? '';
@@ -134,6 +198,14 @@ class AddProductScreenState extends State<AddProductScreen> {
           : null;
       _isFreshProduct = p.isFreshProduct;
       _isProcessed = p.isProcessed;
+        _pharmacyIsTaxable = p.taxStatus != 'exempt';
+      _hasUsedAiDescriptionForProduct = p.aiDescriptionRequested;
+      _hasUsedAiWhiteBgForProduct = p.aiWhiteBackgroundRequested;
+      _aiTaxAnalysisReason = p.taxAiReason;
+      _hasAiTaxAnalysis = (p.taxAiReason ?? '').trim().isNotEmpty;
+      _aiCanShipNationwide = p.canShipNationwide;
+      _aiNationwideShippingReason = p.nationwideShippingReason;
+      _manualCanShipNationwide = p.canShipNationwide ?? false;
         _existingImageUrls = List<String>.from(p.imageUrls);
         _existingThumbnailUrls = p.thumbnailUrls.isNotEmpty
           ? List<String>.from(p.thumbnailUrls)
@@ -151,12 +223,38 @@ class AddProductScreenState extends State<AddProductScreen> {
     _descriptionController.dispose();
     _productDescriptionController.dispose();
     _priceController.dispose();
+    _priceFocusNode.dispose();
     _stockController.dispose();
+    _preparationTimeController.dispose();
     _colorsController.dispose();
     _sizesController.dispose();
     _weightController.dispose();
     _otherUnitController.dispose();
+    _aiQueueSubscription?.cancel();
     super.dispose();
+  }
+
+  double? get _enteredPrice {
+    final rawValue = _priceController.text.trim().replaceAll(',', '');
+    if (rawValue.isEmpty) {
+      return null;
+    }
+    return double.tryParse(rawValue);
+  }
+
+  double? get _netPriceAfterGp {
+    final enteredPrice = _enteredPrice;
+    if (enteredPrice == null) {
+      return null;
+    }
+    return enteredPrice * (1 - _gpRate);
+  }
+
+  String _formatPriceDisplay(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(2);
   }
 
   void _showSnack(String message) {
@@ -164,11 +262,89 @@ class AddProductScreenState extends State<AddProductScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  void _hideFieldGuidance() {
+    if (!_showPriceGuidance && !_showPreparationTimeGuidance) return;
+    setState(() {
+      _showPriceGuidance = false;
+      _showPreparationTimeGuidance = false;
+    });
+  }
+
+  Widget _buildDismissibleGuidance({
+    required String message,
+    Widget? footer,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: AppColors.accentLight,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.accent.withValues(alpha: 0.35)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            message,
+            textAlign: TextAlign.start,
+            softWrap: true,
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.35,
+              color: Color(0xFF7C2D12),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (footer != null) ...[
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: footer,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuidedFieldOverlay({
+    required Widget field,
+    required bool showGuidance,
+    required String guidanceMessage,
+    Widget? footer,
+  }) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        field,
+        if (showGuidance)
+          Positioned(
+            left: 2,
+            right: 2,
+            bottom: 58,
+            child: _buildDismissibleGuidance(
+              message: guidanceMessage,
+              footer: footer,
+            ),
+          ),
+      ],
+    );
+  }
+
   bool get _isPharmacyCategory => _selectedProductCategory == 'ร้านขายยาและเวชภัณฑ์';
 
   String get _computedTaxStatus {
     if (_isPharmacyCategory) {
-      return 'taxable';
+      return _pharmacyIsTaxable ? 'taxable' : 'exempt';
     }
     return (_isFreshProduct && !_isProcessed) ? 'exempt' : 'taxable';
   }
@@ -182,8 +358,14 @@ class AddProductScreenState extends State<AddProductScreen> {
       : const Color(0xFFC62828);
 
   String get _taxReason {
+    final aiReason = _aiTaxAnalysisReason?.trim();
+    if (aiReason != null && aiReason.isNotEmpty) {
+      return aiReason;
+    }
     if (_isPharmacyCategory) {
-      return 'หมวดยาและเวชภัณฑ์กำหนดให้เสียภาษีทั้งหมด';
+      return _pharmacyIsTaxable
+          ? 'ร้านค้าระบุว่ายาหรือเวชภัณฑ์รายการนี้อยู่ในกลุ่มที่เสียภาษี'
+          : 'ร้านค้าระบุว่ายาหรือเวชภัณฑ์รายการนี้อยู่ในกลุ่มที่ยกเว้นภาษี';
     }
     if (_isFreshProduct && !_isProcessed) {
       return 'ของสดที่ยังไม่ผ่านการแปรรูป';
@@ -192,6 +374,18 @@ class AddProductScreenState extends State<AddProductScreen> {
       return 'ของสดที่ผ่านการแปรรูปแล้ว';
     }
     return 'สินค้าไม่ได้เข้ากลุ่มของสดไม่แปรรูป';
+  }
+
+  bool get _resolvedCanShipNationwide => _aiCanShipNationwide ?? _manualCanShipNationwide;
+
+  String get _resolvedNationwideShippingReason {
+    final aiReason = _aiNationwideShippingReason?.trim();
+    if (_aiCanShipNationwide != null && aiReason != null && aiReason.isNotEmpty) {
+      return aiReason;
+    }
+    return _manualCanShipNationwide
+        ? 'ร้านค้าระบุว่าสินค้านี้เหมาะกับการส่งทั่วประเทศ'
+        : 'ร้านค้าระบุว่าสินค้านี้ไม่เหมาะกับการส่งทั่วประเทศ';
   }
 
   String? _normalizeServiceType(String? rawValue) {
@@ -280,26 +474,33 @@ class AddProductScreenState extends State<AddProductScreen> {
   ) async {
     final col = FirebaseFirestore.instance.collection(collection);
 
-    final directDoc = await col.doc(userId).get();
-    if (directDoc.exists) {
-      return directDoc;
-    }
-
-    final ownerQuery = await col.where('ownerId', isEqualTo: userId).limit(1).get();
-    if (ownerQuery.docs.isNotEmpty) {
-      return ownerQuery.docs.first;
-    }
-
-    final normalizedEmail = email?.trim().toLowerCase();
-    if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
-      final emailQuery = await col.where('email', isEqualTo: normalizedEmail).limit(1).get();
-      if (emailQuery.docs.isNotEmpty) {
-        return emailQuery.docs.first;
+    try {
+      final directDoc = await col.doc(userId).get();
+      if (directDoc.exists) {
+        return directDoc;
       }
-      final rawEmailQuery = await col.where('email', isEqualTo: email).limit(1).get();
-      if (rawEmailQuery.docs.isNotEmpty) {
-        return rawEmailQuery.docs.first;
+
+      final ownerQuery = await col.where('ownerId', isEqualTo: userId).limit(1).get();
+      if (ownerQuery.docs.isNotEmpty) {
+        return ownerQuery.docs.first;
       }
+
+      final normalizedEmail = email?.trim().toLowerCase();
+      if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
+        final emailQuery = await col.where('email', isEqualTo: normalizedEmail).limit(1).get();
+        if (emailQuery.docs.isNotEmpty) {
+          return emailQuery.docs.first;
+        }
+        final rawEmailQuery = await col.where('email', isEqualTo: email).limit(1).get();
+        if (rawEmailQuery.docs.isNotEmpty) {
+          return rawEmailQuery.docs.first;
+        }
+      }
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied') {
+        rethrow;
+      }
+      debugPrint('Skipping inaccessible registration collection $collection: ${e.message ?? e.code}');
     }
 
     return null;
@@ -367,9 +568,16 @@ class AddProductScreenState extends State<AddProductScreen> {
     ];
 
     for (final entry in registrationCollections) {
-      final doc = await FirebaseFirestore.instance.collection(entry.key).doc(userId).get();
-      if (!doc.exists) continue;
-      return _readServiceTypeFromData(doc.data()) ?? entry.value;
+      try {
+        final doc = await FirebaseFirestore.instance.collection(entry.key).doc(userId).get();
+        if (!doc.exists) continue;
+        return _readServiceTypeFromData(doc.data()) ?? entry.value;
+      } on FirebaseException catch (e) {
+        if (e.code != 'permission-denied') {
+          rethrow;
+        }
+        debugPrint('Skipping inaccessible service registration ${entry.key}: ${e.message ?? e.code}');
+      }
     }
 
     return null;
@@ -488,12 +696,17 @@ class AddProductScreenState extends State<AddProductScreen> {
     setState(() {
       _videoFile = video;
       _existingVideoUrl = null;
+      _existingVideoThumbnailUrl = null;
+      _videoAiOriginalPreviewBytes = null;
+      _videoAiWhiteBgBytes = null;
     });
   }
 
   void _removeExistingImageAt(int index) {
     setState(() {
       if (index >= 0 && index < _existingImageUrls.length) {
+        _aiWhiteBgImagesByKey.remove('existing:${_existingImageUrls[index]}');
+        _aiWhiteBgProcessingKeys.remove('existing:${_existingImageUrls[index]}');
         _localMediaPaths.remove(_existingImageUrls[index]);
         _existingImageUrls.removeAt(index);
       }
@@ -505,7 +718,14 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   void _removeNewImageAt(int index) {
-    setState(() => _newImageFiles.removeAt(index));
+    setState(() {
+      if (index >= 0 && index < _newImageFiles.length) {
+        final key = 'new:${_newImageFiles[index].path}';
+        _aiWhiteBgImagesByKey.remove(key);
+        _aiWhiteBgProcessingKeys.remove(key);
+      }
+      _newImageFiles.removeAt(index);
+    });
   }
 
   void _removeVideo() {
@@ -519,6 +739,9 @@ class AddProductScreenState extends State<AddProductScreen> {
       _videoFile = null;
       _existingVideoUrl = null;
       _existingVideoThumbnailUrl = null;
+      _videoAiOriginalPreviewBytes = null;
+      _videoAiWhiteBgBytes = null;
+      _isProcessingVideoAiWhiteBg = false;
     });
   }
 
@@ -641,6 +864,427 @@ class AddProductScreenState extends State<AddProductScreen> {
         return 'image/heif';
       default:
         return 'image/jpeg';
+    }
+  }
+
+  String _mimeTypeFromPathOrUrl(String pathOrUrl) {
+    final normalized = pathOrUrl.toLowerCase();
+    if (normalized.endsWith('.png')) return 'image/png';
+    if (normalized.endsWith('.webp')) return 'image/webp';
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg';
+    return 'image/jpeg';
+  }
+
+  Future<Uint8List> _downloadBytes(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      throw Exception('URL รูปภาพไม่ถูกต้อง');
+    }
+    final response = await http.get(uri);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('ดาวน์โหลดรูปไม่สำเร็จ (${response.statusCode})');
+    }
+    return response.bodyBytes;
+  }
+
+  String _createAiRequestId() {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
+    final millis = DateTime.now().millisecondsSinceEpoch;
+    return '${uid}_${millis}_${DateTime.now().microsecondsSinceEpoch}'.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+  }
+
+  String _formatAiWait(int seconds) {
+    if (seconds <= 0) return 'อีกสักครู่';
+    if (seconds < 60) return 'ประมาณ $seconds วินาที';
+    final minutes = (seconds / 60).ceil();
+    return 'ประมาณ $minutes นาที';
+  }
+
+  String _buildAiQueueText(Map<String, dynamic> data) {
+    final status = (data['status'] ?? '').toString();
+    final position = data['position'] is num ? (data['position'] as num).toInt() : null;
+    final estimatedSeconds = data['estimatedWaitSeconds'] is num
+        ? (data['estimatedWaitSeconds'] as num).toInt()
+        : null;
+    final message = (data['message'] ?? '').toString().trim();
+
+    if (status == 'queued') {
+      final positionText = position != null && position > 0 ? 'คิวที่ $position' : 'กำลังรอคิว';
+      final waitText = estimatedSeconds != null ? ' ${_formatAiWait(estimatedSeconds)}' : '';
+      return '$positionText$waitText';
+    }
+    if (status == 'processing') {
+      return 'ถึงคิวแล้ว กำลังประมวลผล AI...';
+    }
+    if (status == 'rejected') {
+      return message.isNotEmpty
+          ? message
+          : 'คิว AI เยอะมาก แนะนำใช้ AI ภายนอกเปลี่ยนพื้นหลังเป็นสีขาวก่อน แล้วค่อยอัปโหลดรูปเข้าระบบ';
+    }
+    if (status == 'failed') {
+      return message.isNotEmpty ? message : 'AI ประมวลผลไม่สำเร็จ';
+    }
+    if (status == 'completed') {
+      return 'ประมวลผล AI สำเร็จ';
+    }
+    return 'กำลังส่งคำขอ AI...';
+  }
+
+  void _listenAiQueueStatus(String requestId) {
+    _aiQueueSubscription?.cancel();
+    if (mounted) {
+      setState(() {
+        _aiQueueStatusText = 'กำลังส่งคำขอ AI...';
+        _aiQueueExternalRecommendation = false;
+      });
+    }
+
+    _aiQueueSubscription = FirebaseFirestore.instance
+        .collection('ai_processing_queue')
+        .doc(requestId)
+        .snapshots()
+        .listen((snapshot) {
+      if (!mounted || !snapshot.exists) return;
+      final data = snapshot.data() ?? <String, dynamic>{};
+      setState(() {
+        _aiQueueStatusText = _buildAiQueueText(data);
+        _aiQueueExternalRecommendation = data['externalAiRecommended'] == true;
+      });
+    }, onError: (_) {
+      if (!mounted) return;
+      setState(() {
+        _aiQueueStatusText = 'กำลังเข้าคิว AI...';
+        _aiQueueExternalRecommendation = false;
+      });
+    });
+  }
+
+  void _clearAiQueueStatus() {
+    _aiQueueSubscription?.cancel();
+    _aiQueueSubscription = null;
+    if (!mounted) return;
+    setState(() {
+      _aiQueueStatusText = null;
+      _aiQueueExternalRecommendation = false;
+    });
+  }
+
+  String _aiFunctionErrorMessage(FirebaseFunctionsException e) {
+    final details = e.details;
+    if (details is Map && details['externalAiRecommended'] == true) {
+      final position = details['queuePosition'] is num ? (details['queuePosition'] as num).toInt() : null;
+      final estimatedSeconds = details['estimatedWaitSeconds'] is num
+          ? (details['estimatedWaitSeconds'] as num).toInt()
+          : null;
+      final queueText = position != null ? 'คิวที่ $position' : 'คิว AI เยอะมาก';
+      final waitText = estimatedSeconds != null ? ' ${_formatAiWait(estimatedSeconds)}' : '';
+      return '$queueText$waitText แนะนำใช้ AI ภายนอกเปลี่ยนพื้นหลังเป็นสีขาวก่อน แล้วค่อยอัปโหลดรูปเข้าระบบ';
+    }
+    return e.message ?? 'AI ทำพื้นหลังขาวไม่สำเร็จ (${e.code})';
+  }
+
+  Future<_AiProductImageResult> _requestWhiteBackgroundImage({
+    required Uint8List imageBytes,
+    required String mimeType,
+  }) async {
+    final requestId = _createAiRequestId();
+    _listenAiQueueStatus(requestId);
+    final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+        .httpsCallable('replaceImageBackgroundWhite');
+    try {
+      final response = await callable.call(<String, dynamic>{
+        'requestId': requestId,
+        'imageBase64': base64Encode(imageBytes),
+        'mimeType': mimeType,
+        'productName': _nameController.text.trim(),
+        'category': (_selectedProductCategory ?? '').trim(),
+        'price': _priceController.text.trim(),
+        'unit': _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '').trim(),
+      });
+      final data = response.data;
+      if (data is! Map) {
+        throw Exception('รูปแบบข้อมูลจาก AI ไม่ถูกต้อง');
+      }
+      final imageBase64 = (data['imageBase64'] ?? '').toString().trim();
+      if (imageBase64.isEmpty) {
+        throw Exception('AI ไม่ได้ส่งรูปกลับมา');
+      }
+      return _AiProductImageResult(
+        imageBytes: base64Decode(imageBase64),
+        description: (data['description'] ?? '').toString().trim(),
+        taxStatus: (data['taxStatus'] ?? '').toString().trim(),
+        taxReason: (data['taxReason'] ?? '').toString().trim(),
+        productCategory: (data['productCategory'] ?? '').toString().trim(),
+        isFreshProduct: data['isFreshProduct'] is bool ? data['isFreshProduct'] as bool : null,
+        isProcessed: data['isProcessed'] is bool ? data['isProcessed'] as bool : null,
+        canShipNationwide: data['canShipNationwide'] is bool ? data['canShipNationwide'] as bool : null,
+        nationwideShippingReason: (data['nationwideShippingReason'] ?? '').toString().trim(),
+      );
+    } finally {
+      _clearAiQueueStatus();
+    }
+  }
+
+  void _applyAiProductAnalysis(_AiProductImageResult result) {
+    final description = result.description?.trim();
+    final category = result.productCategory?.trim();
+    final taxStatus = result.taxStatus?.trim().toLowerCase();
+    final taxReason = result.taxReason?.trim();
+    final nationwideReason = result.nationwideShippingReason?.trim();
+
+    setState(() {
+      if (description != null && description.isNotEmpty) {
+        _productDescriptionController.text = description;
+        _hasUsedAiDescriptionForProduct = true;
+      }
+
+      if (category != null && category.isNotEmpty && _productCategories.contains(category)) {
+        _selectedProductCategory = category;
+      } else if ((_selectedProductCategory ?? '').isEmpty) {
+        _selectedProductCategory = taxStatus == 'exempt' ? 'ของสด' : 'สินค้าทั่วไป';
+      }
+
+      if (_isPharmacyCategory) {
+        _isFreshProduct = false;
+        _isProcessed = false;
+        if (taxStatus == 'taxable' || taxStatus == 'exempt') {
+          _pharmacyIsTaxable = taxStatus == 'taxable';
+        }
+      } else if (result.isFreshProduct != null || result.isProcessed != null) {
+        _isFreshProduct = result.isFreshProduct ?? _isFreshProduct;
+        _isProcessed = result.isProcessed ?? _isProcessed;
+      } else if (taxStatus == 'exempt') {
+        _isFreshProduct = true;
+        _isProcessed = false;
+      } else if (taxStatus == 'taxable') {
+        _isFreshProduct = false;
+        _isProcessed = true;
+      }
+
+      if (taxReason != null && taxReason.isNotEmpty) {
+        _aiTaxAnalysisReason = taxReason;
+      }
+
+      if (taxStatus == 'taxable' || taxStatus == 'exempt' || (taxReason != null && taxReason.isNotEmpty)) {
+        _hasAiTaxAnalysis = true;
+      }
+
+      if (result.canShipNationwide != null) {
+        _aiCanShipNationwide = result.canShipNationwide;
+      }
+      if (nationwideReason != null && nationwideReason.isNotEmpty) {
+        _aiNationwideShippingReason = nationwideReason;
+      }
+    });
+  }
+
+  Future<void> _persistProductAiUsageFlag(String field) async {
+    final targetId = widget.productToEdit?.id;
+    if (targetId == null || targetId.isEmpty) return;
+
+    try {
+      await FirebaseFirestore.instance.collection('products').doc(targetId).update(<String, dynamic>{
+        field: true,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('Failed to persist $field on product $targetId: $e');
+    }
+  }
+
+  Future<bool> _markAiWhiteBgUsedForProduct() async {
+    if (_hasUsedAiWhiteBgForProduct) {
+      _showSnack('สินค้านี้ใช้ AI เปลี่ยนพื้นหลังไปแล้ว ใช้ได้ 1 ครั้งต่อสินค้า');
+      return false;
+    }
+
+    if (mounted) {
+      setState(() => _hasUsedAiWhiteBgForProduct = true);
+    } else {
+      _hasUsedAiWhiteBgForProduct = true;
+    }
+    await _persistProductAiUsageFlag('aiWhiteBackgroundRequested');
+    return true;
+  }
+
+  Future<void> _applyWhiteBackgroundToExistingImage(int index) async {
+    if (index < 0 || index >= _existingImageUrls.length) return;
+    final imageUrl = _existingImageUrls[index];
+    final key = 'existing:$imageUrl';
+    if (_aiWhiteBgProcessingKeys.contains(key)) return;
+    if (!await _markAiWhiteBgUsedForProduct()) return;
+
+    setState(() => _aiWhiteBgProcessingKeys.add(key));
+    try {
+      final sourceUrl = index < _existingThumbnailUrls.length
+          ? _existingThumbnailUrls[index]
+          : imageUrl;
+      final bytes = await _downloadBytes(sourceUrl);
+      final result = await _requestWhiteBackgroundImage(
+        imageBytes: bytes,
+        mimeType: _mimeTypeFromPathOrUrl(sourceUrl),
+      );
+      if (!mounted) return;
+      setState(() {
+        _aiWhiteBgImagesByKey[key] = result.imageBytes;
+      });
+      _applyAiProductAnalysis(result);
+      await _persistProductAiUsageFlag('aiDescriptionRequested');
+    } on FirebaseFunctionsException catch (e) {
+      _showSnack(_aiFunctionErrorMessage(e));
+    } catch (e) {
+      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _aiWhiteBgProcessingKeys.remove(key));
+      }
+    }
+  }
+
+  Future<void> _selectAiImageForExisting(int index) async {
+    if (index < 0 || index >= _existingImageUrls.length) return;
+    final imageUrl = _existingImageUrls[index];
+    final key = 'existing:$imageUrl';
+    final aiBytes = _aiWhiteBgImagesByKey[key];
+    if (aiBytes == null || aiBytes.isEmpty) {
+      _showSnack('ยังไม่มีรูป AI ให้เลือก');
+      return;
+    }
+
+    try {
+      final aiFile = await _writeBytesToTempFile(
+        aiBytes,
+        suffix: 'ai_white_bg_${DateTime.now().microsecondsSinceEpoch}.png',
+      );
+      if (!mounted) return;
+      setState(() {
+        if (index >= 0 && index < _existingImageUrls.length) {
+          _localMediaPaths.remove(_existingImageUrls[index]);
+          _existingImageUrls.removeAt(index);
+        }
+        if (index >= 0 && index < _existingThumbnailUrls.length) {
+          _localMediaPaths.remove(_existingThumbnailUrls[index]);
+          _existingThumbnailUrls.removeAt(index);
+        }
+        _aiWhiteBgImagesByKey.remove(key);
+        _aiWhiteBgProcessingKeys.remove(key);
+        _newImageFiles.add(XFile(aiFile.path));
+      });
+      _showSnack('เลือกรูปจาก AI แล้ว ระบบจะบันทึกรูปนี้แทนรูปเดิม');
+    } catch (e) {
+      _showSnack('เตรียมรูปลูก AI สำหรับบันทึกไม่สำเร็จ: $e');
+    }
+  }
+
+  Future<void> _applyWhiteBackgroundToNewImage(int index) async {
+    if (index < 0 || index >= _newImageFiles.length) return;
+    final file = _newImageFiles[index];
+    final key = 'new:${file.path}';
+    if (_aiWhiteBgProcessingKeys.contains(key)) return;
+    if (!await _markAiWhiteBgUsedForProduct()) return;
+
+    setState(() => _aiWhiteBgProcessingKeys.add(key));
+    try {
+      final bytes = await File(file.path).readAsBytes();
+      final result = await _requestWhiteBackgroundImage(
+        imageBytes: bytes,
+        mimeType: _mimeTypeFromPathOrUrl(file.path),
+      );
+      if (!mounted) return;
+      setState(() {
+        _aiWhiteBgImagesByKey[key] = result.imageBytes;
+      });
+      _applyAiProductAnalysis(result);
+      await _persistProductAiUsageFlag('aiDescriptionRequested');
+    } on FirebaseFunctionsException catch (e) {
+      _showSnack(_aiFunctionErrorMessage(e));
+    } catch (e) {
+      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _aiWhiteBgProcessingKeys.remove(key));
+      }
+    }
+  }
+
+  Future<void> _selectAiImageForNew(int index) async {
+    if (index < 0 || index >= _newImageFiles.length) return;
+    final file = _newImageFiles[index];
+    final key = 'new:${file.path}';
+    final aiBytes = _aiWhiteBgImagesByKey[key];
+    if (aiBytes == null || aiBytes.isEmpty) {
+      _showSnack('ยังไม่มีรูป AI ให้เลือก');
+      return;
+    }
+
+    try {
+      final aiFile = await _writeBytesToTempFile(
+        aiBytes,
+        suffix: 'ai_white_bg_${DateTime.now().microsecondsSinceEpoch}.png',
+      );
+      if (!mounted) return;
+      setState(() {
+        _newImageFiles[index] = XFile(aiFile.path);
+        _aiWhiteBgImagesByKey.remove(key);
+        _aiWhiteBgProcessingKeys.remove(key);
+      });
+      _showSnack('เลือกรูปจาก AI แล้ว ระบบจะบันทึกรูปนี้แทนรูปเดิม');
+    } catch (e) {
+      _showSnack('เตรียมรูปลูก AI สำหรับบันทึกไม่สำเร็จ: $e');
+    }
+  }
+
+  Future<void> _applyWhiteBackgroundToVideoPreview() async {
+    if (_isProcessingVideoAiWhiteBg) return;
+
+    try {
+      Uint8List? sourceBytes;
+      String mimeType = 'image/jpeg';
+
+      if (_videoFile != null) {
+        sourceBytes = await VideoCompress.getByteThumbnail(
+          _videoFile!.path,
+          quality: 75,
+          position: -1,
+        );
+      } else if ((_existingVideoThumbnailUrl ?? '').isNotEmpty) {
+        sourceBytes = await _downloadBytes(_existingVideoThumbnailUrl!);
+        mimeType = _mimeTypeFromPathOrUrl(_existingVideoThumbnailUrl!);
+      }
+
+      if (sourceBytes == null || sourceBytes.isEmpty) {
+        _showSnack('ยังไม่มีภาพตัวอย่างวิดีโอสำหรับประมวลผล AI');
+        return;
+      }
+
+      if (!await _markAiWhiteBgUsedForProduct()) return;
+
+      setState(() {
+        _isProcessingVideoAiWhiteBg = true;
+      });
+
+      final result = await _requestWhiteBackgroundImage(
+        imageBytes: sourceBytes,
+        mimeType: mimeType,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _videoAiOriginalPreviewBytes = sourceBytes;
+        _videoAiWhiteBgBytes = result.imageBytes;
+      });
+      _applyAiProductAnalysis(result);
+      await _persistProductAiUsageFlag('aiDescriptionRequested');
+    } on FirebaseFunctionsException catch (e) {
+      _showSnack(_aiFunctionErrorMessage(e));
+    } catch (e) {
+      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessingVideoAiWhiteBg = false;
+        });
+      }
     }
   }
 
@@ -827,6 +1471,69 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
+  Future<void> _generateAiDescription() async {
+    if (_hasUsedAiDescriptionForProduct) {
+      _showSnack('สินค้านี้ใช้ AI เขียนคำอธิบายไปแล้ว ใช้ได้ 1 ครั้งต่อสินค้า');
+      return;
+    }
+
+    final productName = _nameController.text.trim();
+    if (productName.isEmpty) {
+      _showSnack('กรุณากรอกชื่อสินค้าก่อนให้ AI ช่วยเขียนคำอธิบาย');
+      return;
+    }
+
+    final category = (_selectedProductCategory ?? '').trim();
+    final price = _priceController.text.trim();
+    final unit = _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '').trim();
+    final stock = _stockController.text.trim();
+
+    setState(() {
+      _isGeneratingAiDescription = true;
+      _hasUsedAiDescriptionForProduct = true;
+    });
+    await _persistProductAiUsageFlag('aiDescriptionRequested');
+
+    final requestId = _createAiRequestId();
+    _listenAiQueueStatus(requestId);
+    try {
+      final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+          .httpsCallable('askGeminiFlash');
+      final response = await callable.call(<String, dynamic>{
+      'requestId': requestId,
+        'prompt':
+            'ช่วยเขียนคำอธิบายสินค้าเป็นภาษาไทยแบบกระชับ น่าเชื่อถือ และเน้นการขาย สำหรับร้านค้าออนไลน์',
+        'productName': productName,
+        'category': category,
+        'price': price,
+        'unit': unit,
+        'stock': stock,
+      });
+
+      final data = response.data;
+      final text = data is Map<String, dynamic>
+          ? (data['text']?.toString().trim() ?? '')
+          : '';
+
+      if (text.isEmpty) {
+        _showSnack('AI ไม่ได้ส่งข้อความกลับมา ลองอีกครั้ง');
+        return;
+      }
+
+      _productDescriptionController.text = text;
+      _showSnack('เติมคำอธิบายสินค้าจาก AI แล้ว');
+    } on FirebaseFunctionsException catch (e) {
+      _showSnack(_aiFunctionErrorMessage(e));
+    } catch (e) {
+      _showSnack('เรียก AI ไม่สำเร็จ: $e');
+    } finally {
+      _clearAiQueueStatus();
+      if (mounted) {
+        setState(() => _isGeneratingAiDescription = false);
+      }
+    }
+  }
+
   Future<void> _saveProduct() async {
     // Basic validation
     if (_currentImageCount == 0) {
@@ -859,6 +1566,14 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     if (_stockController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')));
+      return;
+    }
+
+    final preparationTimeMinutes = int.tryParse(_preparationTimeController.text.trim());
+    if (preparationTimeMinutes == null || preparationTimeMinutes <= 0 || preparationTimeMinutes > 240) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกเวลาเตรียมสินค้า 1-240 นาที')),
+      );
       return;
     }
 
@@ -955,6 +1670,8 @@ class AddProductScreenState extends State<AddProductScreen> {
           .toList();
       final resolvedUnit = _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '');
       final taxStatus = _computedTaxStatus;
+      final canShipNationwide = _resolvedCanShipNationwide;
+      final nationwideShippingReason = _resolvedNationwideShippingReason;
       final normalizedServiceType = _normalizeServiceType(_serviceType);
       final shopProfileData = await _resolveShopProfileData(user.uid, normalizedServiceType, user.email);
       if (shopProfileData == null) {
@@ -977,7 +1694,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       final resolvedProductServiceType =
           _readServiceTypeFromData(shopProfileData) ?? normalizedServiceType ?? '';
 
-      await _backfillShopInfoForOwner(
+      await _upsertPublicShopProfile(
         ownerUid: user.uid,
         shopName: shopName,
         shopImageUrl: shopImageUrl,
@@ -996,6 +1713,8 @@ class AddProductScreenState extends State<AddProductScreen> {
         'taxStatusLabel': _taxStatusLabel,
         'price': double.tryParse(_priceController.text) ?? 0.0,
         'stock': int.tryParse(_stockController.text) ?? 0,
+        'preparationTimeMinutes': preparationTimeMinutes,
+        'preparingDuration': preparationTimeMinutes * 60 * 1000,
         'imageUrls': imageUrls,
         'thumbnailUrls': thumbnailUrls,
         'colors': colors,
@@ -1011,6 +1730,11 @@ class AddProductScreenState extends State<AddProductScreen> {
         },
         'serviceType': resolvedProductServiceType,
         'ownerUid': user.uid,
+        'aiDescriptionRequested': _hasUsedAiDescriptionForProduct,
+        'aiWhiteBackgroundRequested': _hasUsedAiWhiteBgForProduct,
+        if ((_aiTaxAnalysisReason ?? '').trim().isNotEmpty) 'taxAiReason': _aiTaxAnalysisReason!.trim(),
+        'canShipNationwide': canShipNationwide,
+        'nationwideShippingReason': nationwideShippingReason,
         'updatedAt': FieldValue.serverTimestamp(),
       };
 
@@ -1059,6 +1783,10 @@ class AddProductScreenState extends State<AddProductScreen> {
         'taxStatus': taxStatus,
         'taxStatusLabel': _taxStatusLabel,
         'taxReason': _taxReason,
+        'preparationTimeMinutes': preparationTimeMinutes,
+        'preparingDuration': preparationTimeMinutes * 60 * 1000,
+        'canShipNationwide': canShipNationwide,
+        'nationwideShippingReason': nationwideShippingReason,
         'colors': colors,
         'sizes': sizes,
         'unit': resolvedUnit,
@@ -1070,6 +1798,10 @@ class AddProductScreenState extends State<AddProductScreen> {
           'isFreshProduct': 'เป็นของสด',
           'isProcessed': 'ผ่านการแปรรูปแล้ว',
           'taxStatus': 'สถานะภาษี',
+          'preparationTimeMinutes': 'เวลาเตรียมสินค้า (นาที)',
+          'preparingDuration': 'เวลาเตรียมสินค้า (มิลลิวินาที)',
+          'canShipNationwide': 'ส่งได้ทั่วไทย',
+          'nationwideShippingReason': 'เหตุผลการส่งทั่วไทย',
           'colors': 'สี',
           'sizes': 'ขนาด',
           'unit': 'หน่วย',
@@ -1096,6 +1828,13 @@ class AddProductScreenState extends State<AddProductScreen> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('บันทึกสินค้าเรียบร้อยแล้ว')));
         Navigator.pop(context, true);
       }
+    } on FirebaseException catch (e) {
+      final message = e.code == 'permission-denied'
+          ? 'ไม่มีสิทธิ์อ่านข้อมูลร้านหรือบันทึกสินค้า กรุณาตรวจสอบสิทธิ์ Firestore แล้วลองใหม่'
+          : 'เกิดข้อผิดพลาดในการบันทึก: $e';
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการบันทึก: $e')));
@@ -1111,7 +1850,7 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
-  Future<void> _backfillShopInfoForOwner({
+  Future<void> _upsertPublicShopProfile({
     required String ownerUid,
     required String shopName,
     String? shopImageUrl,
@@ -1119,84 +1858,34 @@ class AddProductScreenState extends State<AddProductScreen> {
     required double longitude,
     required String serviceType,
   }) async {
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('products')
-          .where('ownerUid', isEqualTo: ownerUid)
-          .get();
+    final publicData = <String, dynamic>{
+      'ownerUid': ownerUid,
+      'ownerId': ownerUid,
+      'shopName': shopName,
+      'name': shopName,
+      'serviceType': serviceType,
+      'location': <String, double>{
+        'latitude': latitude,
+        'longitude': longitude,
+      },
+      'shopLocation': <String, double>{
+        'latitude': latitude,
+        'longitude': longitude,
+      },
+      'shopLatitude': latitude,
+      'shopLongitude': longitude,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
 
-      if (snapshot.docs.isEmpty) return;
-
-      WriteBatch batch = FirebaseFirestore.instance.batch();
-      int operationCount = 0;
-
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final Map<String, dynamic> updates = <String, dynamic>{};
-
-        final existingShopName = (data['shopName'] ?? '').toString().trim();
-        if (existingShopName != shopName) {
-          updates['shopName'] = shopName;
-        }
-
-        final normalizedShopImageUrl = shopImageUrl?.trim();
-        final existingShopImageUrl = (data['shopImageUrl'] ?? '').toString().trim();
-        if (normalizedShopImageUrl != null && normalizedShopImageUrl.isNotEmpty) {
-          if (existingShopImageUrl != normalizedShopImageUrl) {
-            updates['shopImageUrl'] = normalizedShopImageUrl;
-          }
-        }
-
-        final dynamic rawLocation = data['location'];
-        double? existingLat;
-        double? existingLng;
-        if (rawLocation is GeoPoint) {
-          existingLat = rawLocation.latitude;
-          existingLng = rawLocation.longitude;
-        } else if (rawLocation is Map) {
-          final map = Map<String, dynamic>.from(rawLocation);
-          existingLat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
-          existingLng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
-        }
-
-        final bool needsLocationUpdate =
-            existingLat == null ||
-            existingLng == null ||
-            (existingLat - latitude).abs() > 0.0000001 ||
-            (existingLng - longitude).abs() > 0.0000001;
-        if (needsLocationUpdate) {
-          updates['location'] = <String, double>{
-            'latitude': latitude,
-            'longitude': longitude,
-          };
-        }
-
-        final existingServiceType = (data['serviceType'] ?? '').toString().trim();
-        if (serviceType.isNotEmpty && existingServiceType != serviceType) {
-          updates['serviceType'] = serviceType;
-        }
-
-        if (updates.isEmpty) {
-          continue;
-        }
-
-        updates['updatedAt'] = FieldValue.serverTimestamp();
-        batch.update(doc.reference, updates);
-        operationCount++;
-
-        if (operationCount >= 450) {
-          await batch.commit();
-          batch = FirebaseFirestore.instance.batch();
-          operationCount = 0;
-        }
-      }
-
-      if (operationCount > 0) {
-        await batch.commit();
-      }
-    } catch (e) {
-      debugPrint('Failed to backfill shop info in products: $e');
+    final normalizedShopImageUrl = shopImageUrl?.trim();
+    if (normalizedShopImageUrl != null && normalizedShopImageUrl.isNotEmpty) {
+      publicData['shopImageUrl'] = normalizedShopImageUrl;
     }
+
+    await FirebaseFirestore.instance
+        .collection('public_shops')
+        .doc(ownerUid)
+        .set(publicData, SetOptions(merge: true));
   }
 
   Future<void> _backfillProductActiveFieldsForOwner(String ownerUid) async {
@@ -1300,12 +1989,70 @@ class AddProductScreenState extends State<AddProductScreen> {
             ),
             const SizedBox(height: 16),
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(child: _buildTextField(label: 'ราคา', controller: _priceController, keyboardType: TextInputType.number)),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildGuidedFieldOverlay(
+                        showGuidance: _showPriceGuidance,
+                        guidanceMessage: 'ระบบจะหักค่า GP 18% จากราคาที่ระบุ แนะนำให้บวกราคาเพิ่มจากราคาขายหน้าร้านปกติ ตามราคาที่เหมาะสม',
+                        footer: Text(
+                          _netPriceAfterGp == null
+                              ? 'ราคาที่จะได้รับ: ระบุราคาก่อน'
+                              : 'ราคาที่จะได้รับ: ${_formatPriceDisplay(_netPriceAfterGp!)} บาท',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.accentDark,
+                          ),
+                        ),
+                        field: _buildTextField(
+                          label: 'ราคา',
+                          controller: _priceController,
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          focusNode: _priceFocusNode,
+                          onTap: () {
+                            setState(() {
+                              _showPreparationTimeGuidance = false;
+                              _priceGuidanceDismissedWhileFocused = false;
+                              _showPriceGuidance = true;
+                            });
+                          },
+                          onChanged: (_) {
+                            if (!mounted) return;
+                            if (_showPriceGuidance) {
+                              setState(() {});
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _buildGuidedFieldOverlay(
+                        showGuidance: _showPreparationTimeGuidance,
+                        guidanceMessage: 'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
+                        field: _buildTextField(
+                          label: 'เวลาเตรียมสินค้า/ออเดอร์ (นาที)',
+                          controller: _preparationTimeController,
+                          keyboardType: TextInputType.number,
+                          hint: 'เช่น 10',
+                          onTap: () => setState(() {
+                            _showPriceGuidance = false;
+                            _priceGuidanceDismissedWhileFocused = false;
+                            _showPreparationTimeGuidance = true;
+                          }),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(width: 16),
                 Expanded(child: _buildTextField(label: 'สต็อกทั้งหมด', controller: _stockController, keyboardType: TextInputType.number)),
               ],
             ),
+            const SizedBox(height: 12),
+            _buildNationwideShippingSection(),
             const SizedBox(height: 24),
             _buildTaxSection(),
             const SizedBox(height: 32),
@@ -1335,7 +2082,7 @@ class AddProductScreenState extends State<AddProductScreen> {
             const SizedBox(height: 40),
 
             ElevatedButton(
-              onPressed: _isSaving ? null : _saveProduct, // Disable button while saving
+              onPressed: (_isSaving || _isGeneratingAiDescription) ? null : _saveProduct, // Disable button while saving
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
               ),
@@ -1456,17 +2203,24 @@ class AddProductScreenState extends State<AddProductScreen> {
     for (int i = 0; i < _existingImageUrls.length; i++) {
       final imageUrl = _existingImageUrls[i];
       final displayUrl = i < _existingThumbnailUrls.length ? _existingThumbnailUrls[i] : imageUrl;
+      final key = 'existing:$imageUrl';
       tiles.add(_buildImageTile(
         image: ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: _buildCachedImage(displayUrl),
         ),
         onRemove: () => _removeExistingImageAt(i),
+        onApplyAi: () => _applyWhiteBackgroundToExistingImage(i),
+        onSelectAi: () => _selectAiImageForExisting(i),
+        aiImageBytes: _aiWhiteBgImagesByKey[key],
+        isApplyingAi: _aiWhiteBgProcessingKeys.contains(key),
+        canApplyAi: !_hasUsedAiWhiteBgForProduct,
       ));
     }
 
     for (int i = 0; i < _newImageFiles.length; i++) {
       final file = _newImageFiles[i];
+      final key = 'new:${file.path}';
       tiles.add(_buildImageTile(
         image: ClipRRect(
           borderRadius: BorderRadius.circular(12),
@@ -1478,6 +2232,11 @@ class AddProductScreenState extends State<AddProductScreen> {
           ),
         ),
         onRemove: () => _removeNewImageAt(i),
+        onApplyAi: () => _applyWhiteBackgroundToNewImage(i),
+        onSelectAi: () => _selectAiImageForNew(i),
+        aiImageBytes: _aiWhiteBgImagesByKey[key],
+        isApplyingAi: _aiWhiteBgProcessingKeys.contains(key),
+        canApplyAi: !_hasUsedAiWhiteBgForProduct,
       ));
     }
 
@@ -1558,26 +2317,131 @@ class AddProductScreenState extends State<AddProductScreen> {
     });
   }
 
-  Widget _buildImageTile({required Widget image, required VoidCallback onRemove}) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        SizedBox(width: 110, height: 110, child: image),
-        Positioned(
-          top: -8,
-          right: -8,
-          child: InkWell(
-            onTap: onRemove,
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.black.withAlpha(166),
-                shape: BoxShape.circle,
+  Widget _buildImageTile({
+    required Widget image,
+    required VoidCallback onRemove,
+    required VoidCallback onApplyAi,
+    required VoidCallback onSelectAi,
+    required Uint8List? aiImageBytes,
+    required bool isApplyingAi,
+    required bool canApplyAi,
+  }) {
+    final bool showAiPreview = aiImageBytes != null || isApplyingAi;
+    final bool hasAiResult = aiImageBytes != null && aiImageBytes.isNotEmpty;
+
+    Widget buildRemovableOriginal() {
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          SizedBox(width: 110, height: 110, child: image),
+          Positioned(
+            top: -8,
+            right: -8,
+            child: InkWell(
+              onTap: onRemove,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withAlpha(166),
+                  shape: BoxShape.circle,
+                ),
+                padding: const EdgeInsets.all(4),
+                child: const Icon(Icons.close, size: 16, color: Colors.white),
               ),
-              padding: const EdgeInsets.all(4),
-              child: const Icon(Icons.close, size: 16, color: Colors.white),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget buildAiPreviewBox() {
+      if (isApplyingAi) {
+        return Container(
+          width: 110,
+          height: 110,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.grey.shade300),
+          ),
+          alignment: Alignment.center,
+          child: const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        );
+      }
+
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.memory(
+          aiImageBytes!,
+          width: 110,
+          height: 110,
+          fit: BoxFit.cover,
+        ),
+      );
+    }
+
+    final content = showAiPreview
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              buildRemovableOriginal(),
+              const SizedBox(width: 8),
+              buildAiPreviewBox(),
+            ],
+          )
+        : buildRemovableOriginal();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        content,
+        const SizedBox(height: 8),
+        SizedBox(
+          width: showAiPreview ? 228 : 110,
+          child: OutlinedButton.icon(
+            onPressed: isApplyingAi
+                ? null
+                : (hasAiResult ? onSelectAi : (canApplyAi ? onApplyAi : null)),
+            icon: isApplyingAi
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(
+                    hasAiResult ? Icons.check_circle_outline : Icons.auto_awesome_outlined,
+                    size: 16,
+                  ),
+            label: Text(
+              isApplyingAi
+                  ? 'กำลังประมวลผล...'
+                  : (hasAiResult
+                      ? 'เลือกรูปจาก AI เพื่อบันทึก'
+                    : (canApplyAi ? 'เปลี่ยนพื้นหลังด้วย AI' : 'ใช้ AI แล้ว')),
+            ),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              textStyle: const TextStyle(fontSize: 12),
+              foregroundColor: AppColors.accent,
             ),
           ),
         ),
+        if (isApplyingAi && (_aiQueueStatusText ?? '').isNotEmpty) ...[
+          const SizedBox(height: 6),
+          SizedBox(
+            width: showAiPreview ? 228 : 180,
+            child: Text(
+              _aiQueueStatusText!,
+              style: TextStyle(
+                fontSize: 11,
+                color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1604,6 +2468,46 @@ class AddProductScreenState extends State<AddProductScreen> {
               onPressed: _removeVideo,
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: (_isProcessingVideoAiWhiteBg || _hasUsedAiWhiteBgForProduct)
+                  ? null
+                  : _applyWhiteBackgroundToVideoPreview,
+                icon: _isProcessingVideoAiWhiteBg
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.auto_awesome_outlined, size: 16),
+                label: Text(
+                  _isProcessingVideoAiWhiteBg
+                      ? 'กำลังประมวลผล AI...'
+                      : (_hasUsedAiWhiteBgForProduct ? 'ใช้ AI แล้ว' : 'เปลี่ยนพื้นหลังด้วย AI'),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                ),
+              ),
+            ),
+          ),
+          if (_isProcessingVideoAiWhiteBg && (_aiQueueStatusText ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _aiQueueStatusText!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
+                  ),
+                ),
+              ),
+            ),
           if (hasVideo)
             Padding(
               padding: const EdgeInsets.all(8.0),
@@ -1619,6 +2523,54 @@ class AddProductScreenState extends State<AddProductScreen> {
                         : const Text('ไม่พบวิดีโอ')),
               ),
             ),
+          if (_videoAiOriginalPreviewBytes != null || _videoAiWhiteBgBytes != null || _isProcessingVideoAiWhiteBg)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _videoAiOriginalPreviewBytes == null
+                        ? _buildPlaceholderSquare(icon: Icons.image_outlined, label: 'ต้นฉบับ')
+                        : ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.memory(
+                              _videoAiOriginalPreviewBytes!,
+                              height: 110,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _isProcessingVideoAiWhiteBg
+                        ? Container(
+                            height: 110,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.grey.shade300),
+                            ),
+                            alignment: Alignment.center,
+                            child: const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : (_videoAiWhiteBgBytes == null
+                            ? _buildPlaceholderSquare(icon: Icons.auto_awesome_outlined, label: 'ผลลัพธ์ AI')
+                            : ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.memory(
+                                  _videoAiWhiteBgBytes!,
+                                  height: 110,
+                                  fit: BoxFit.cover,
+                                ),
+                              )),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -1630,6 +2582,9 @@ class AddProductScreenState extends State<AddProductScreen> {
     TextInputType keyboardType = TextInputType.text,
     String? hint,
     TextEditingController? controller,
+    FocusNode? focusNode,
+    VoidCallback? onTap,
+    ValueChanged<String>? onChanged,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1638,8 +2593,14 @@ class AddProductScreenState extends State<AddProductScreen> {
         const SizedBox(height: 8),
         TextField(
           controller: controller,
+          focusNode: focusNode,
           keyboardType: keyboardType,
           maxLines: maxLines,
+          onTap: () {
+            _hideFieldGuidance();
+            onTap?.call();
+          },
+          onChanged: onChanged,
           decoration: InputDecoration(
             hintText: hint,
             border: OutlineInputBorder(
@@ -1715,6 +2676,95 @@ class AddProductScreenState extends State<AddProductScreen> {
     );
   }
 
+  Widget _buildTaxSummaryCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _taxStatusColor.withAlpha(18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _taxStatusColor.withAlpha(90)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _taxStatusLabel,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: _taxStatusColor,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _taxReason,
+            style: const TextStyle(fontSize: 13, color: Colors.black87),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNationwideShippingSummaryCard() {
+    final canShip = _aiCanShipNationwide == true;
+    final color = canShip ? const Color(0xFF2E7D32) : const Color(0xFFC62828);
+    final reason = (_aiNationwideShippingReason ?? '').trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withAlpha(18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withAlpha(90)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            canShip ? 'สินค้านี้ส่งได้ทั่วไทย' : 'สินค้านี้ไม่เหมาะกับการส่งทั่วไทย',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+          if (reason.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              reason,
+              style: const TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildManualNationwideShippingCheckbox() {
+    return CheckboxListTile(
+      contentPadding: EdgeInsets.zero,
+      controlAffinity: ListTileControlAffinity.leading,
+      title: const Text('เหมาะกับการส่งทั่วประเทศ'),
+      subtitle: const Text('ติ๊กถูกถ้าสินค้านี้แพ็กและจัดส่งไปต่างจังหวัดได้'),
+      value: _manualCanShipNationwide,
+      onChanged: (value) {
+        setState(() {
+          _manualCanShipNationwide = value ?? false;
+        });
+      },
+      activeColor: AppColors.accent,
+    );
+  }
+
+  Widget _buildNationwideShippingSection() {
+    if (_aiCanShipNationwide != null) {
+      return _buildNationwideShippingSummaryCard();
+    }
+    return _buildManualNationwideShippingCheckbox();
+  }
+
   Widget _buildTaxSection() {
     return Container(
       width: double.infinity,
@@ -1729,100 +2779,89 @@ class AddProductScreenState extends State<AddProductScreen> {
         children: [
           const Text('ภาษีสินค้า', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
-          const Text('ประเภทสินค้า', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
-          const SizedBox(height: 8),
-          DropdownButtonFormField<String>(
-            value: _selectedProductCategory,
-            items: _productCategories.map((category) {
-              return DropdownMenuItem<String>(
-                value: category,
-                child: Text(category),
-              );
-            }).toList(),
-            onChanged: (value) {
-              setState(() {
-                _selectedProductCategory = value;
-                if (_isPharmacyCategory) {
-                  _isFreshProduct = false;
-                  _isProcessed = false;
-                }
-              });
-            },
-            decoration: InputDecoration(
-              hintText: 'เลือกประเภทสินค้า',
-              helperText: 'จำเป็นต้องเลือกก่อนบันทึกสินค้า',
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide(color: Colors.grey.shade400),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
-              ),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            ),
-          ),
-          if (_isPharmacyCategory) ...[
+          if (_hasAiTaxAnalysis) ...[
+            _buildTaxSummaryCard(),
+          ] else ...[
+            const Text('ประเภทสินค้า', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
             const SizedBox(height: 8),
-            const Text(
-              'หมวดร้านขายยาและเวชภัณฑ์จะถูกคำนวณเป็นสินค้าที่เสียภาษีอัตโนมัติ',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+            DropdownButtonFormField<String>(
+              value: _selectedProductCategory,
+              items: _productCategories.map((category) {
+                return DropdownMenuItem<String>(
+                  value: category,
+                  child: Text(category),
+                );
+              }).toList(),
+              onChanged: (value) {
+                setState(() {
+                  _selectedProductCategory = value;
+                  if (_isPharmacyCategory) {
+                    _isFreshProduct = false;
+                    _isProcessed = false;
+                  }
+                });
+              },
+              decoration: InputDecoration(
+                hintText: 'เลือกประเภทสินค้า',
+                helperText: 'จำเป็นต้องเลือกก่อนบันทึกสินค้า',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: BorderSide(color: Colors.grey.shade400),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
             ),
+            if (_isPharmacyCategory) ...[
+              const SizedBox(height: 12),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('เสียภาษี'),
+                subtitle: const Text('ปิดสวิตช์หากยาหรือเวชภัณฑ์รายการนี้เป็นสินค้ายกเว้นภาษี'),
+                value: _pharmacyIsTaxable,
+                onChanged: (value) {
+                  setState(() {
+                    _pharmacyIsTaxable = value;
+                    _isFreshProduct = false;
+                    _isProcessed = false;
+                  });
+                },
+                activeColor: AppColors.accent,
+              ),
+            ] else ...[
+              const SizedBox(height: 12),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('เป็นของสด'),
+                subtitle: const Text('เช่น ผัก ผลไม้ เนื้อสด อาหารทะเลสด'),
+                value: _isFreshProduct,
+                onChanged: (value) {
+                  setState(() {
+                    _isFreshProduct = value;
+                  });
+                },
+                activeColor: AppColors.accent,
+              ),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('ผ่านการแปรรูปแล้ว'),
+                subtitle: const Text('เช่น หั่น หมัก ปรุง บรรจุพร้อมขาย หรือแปรรูปจากสภาพสด'),
+                value: _isProcessed,
+                onChanged: (value) {
+                  setState(() {
+                    _isProcessed = value;
+                  });
+                },
+                activeColor: AppColors.accent,
+              ),
+            ],
+            const SizedBox(height: 12),
+            _buildTaxSummaryCard(),
           ],
-          const SizedBox(height: 12),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('เป็นของสด'),
-            subtitle: const Text('เช่น ผัก ผลไม้ เนื้อสด อาหารทะเลสด'),
-            value: _isFreshProduct,
-            onChanged: _isPharmacyCategory ? null : (value) {
-              setState(() {
-                _isFreshProduct = value;
-              });
-            },
-            activeColor: AppColors.accent,
-          ),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('ผ่านการแปรรูปแล้ว'),
-            subtitle: const Text('เช่น หั่น หมัก ปรุง บรรจุพร้อมขาย หรือแปรรูปจากสภาพสด'),
-            value: _isProcessed,
-            onChanged: _isPharmacyCategory ? null : (value) {
-              setState(() {
-                _isProcessed = value;
-              });
-            },
-            activeColor: AppColors.accent,
-          ),
-          const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: _taxStatusColor.withAlpha(18),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: _taxStatusColor.withAlpha(90)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _taxStatusLabel,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: _taxStatusColor,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  _taxReason,
-                  style: const TextStyle(fontSize: 13, color: Colors.black87),
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -1858,11 +2897,86 @@ class AddProductScreenState extends State<AddProductScreen> {
               hint: 'อธิบายรายละเอียดสินค้า',
               maxLines: 3,
             ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: (_isGeneratingAiDescription || _hasUsedAiDescriptionForProduct)
+                  ? null
+                  : _generateAiDescription,
+                icon: _isGeneratingAiDescription
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.auto_awesome_outlined),
+                label: Text(
+                  _isGeneratingAiDescription
+                      ? 'AI กำลังเขียนคำอธิบาย...'
+                      : (_hasUsedAiDescriptionForProduct
+                        ? 'ใช้ AI เขียนคำอธิบายแล้ว'
+                        : 'ให้ AI ช่วยเขียนคำอธิบายสินค้า'),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: BorderSide(color: AppColors.accent.withOpacity(0.6)),
+                ),
+              ),
+            ),
+            if (_isGeneratingAiDescription && (_aiQueueStatusText ?? '').isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                _aiQueueStatusText!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             _buildTextField(
               label: 'ท็อปปิ้ง',
               controller: _descriptionController,
-              hint: 'เช่น ไข่ดาว+10',
+              hint: 'เช่น (ระดับความเผ็ด) +เผ็ดน้อย+ เผ็ด+ กลาง+เผ็ดมาก',
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFED7AA)),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'วิธีกรอกท็อปปิ้ง',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF9A3412),
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  Text(
+                    '1. ถ้าใส่วงเล็บ () จะใช้เป็นหัวข้อ',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    '2. ถ้าใส่เครื่องหมาย + นำหน้า และลงท้ายด้วย + จะใช้เป็นตัวเลือก',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    '3. ตัวอย่าง: (ระดับความเผ็ด) +เผ็ดน้อย+ เผ็ด+ กลาง+เผ็ดมาก (เพิ่ม)+หอย 20+ เพิ่มกุ้ง 20+เพิ่มแคบหมู 10+',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 16),
             _buildTextField(

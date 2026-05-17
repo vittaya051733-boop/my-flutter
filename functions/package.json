@@ -2,7 +2,8 @@
   "name": "functions",
   "description": "Cloud Functions for Firebase",
   "scripts": {
-    "deploy": "firebase deploy --only functions"
+    "deploy": "powershell -ExecutionPolicy Bypass -File ../scripts/deploy-functions-isolated.ps1",
+    "deploy:verifyTopUpSlip": "powershell -ExecutionPolicy Bypass -File ../scripts/deploy-functions-isolated.ps1 -FunctionName verifyTopUpSlip"
   },
   "engines": {
     "node": "22"

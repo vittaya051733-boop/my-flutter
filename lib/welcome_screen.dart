@@ -10,6 +10,10 @@ class WelcomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final logoSize = (MediaQuery.sizeOf(context).shortestSide * 0.78)
+        .clamp(100.0, 300.0)
+        .toDouble();
+
     return Scaffold(
       body: Container(
         width: double.infinity,
@@ -30,7 +34,7 @@ class WelcomeScreen extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               const Spacer(flex: 2),
-              
+
               // Logo or App Icon
               Container(
                 padding: const EdgeInsets.all(30),
@@ -41,22 +45,23 @@ class WelcomeScreen extends StatelessWidget {
                     BoxShadow(
                       color: Colors.black.withAlpha(51), // withOpacity(0.2)
                       blurRadius: 8, // Reduced from 20
-                      spreadRadius: 2, // Redu Added a slight offset for a more natural look
+                      spreadRadius:
+                          2, // Redu Added a slight offset for a more natural look
                     ),
                   ],
                 ),
                 child: ClipOval(
                   child: Image.asset(
-                    'assets/file_000000008fc872089268acc9b04e5bcf.png',
-                    width: 100,
-                    height: 100,
+                    'assets/file_00000000be5472069245fc3bdb122dbb.png',
+                    width: logoSize,
+                    height: logoSize,
                     fit: BoxFit.cover,
                   ),
                 ),
               ),
-              
+
               const SizedBox(height: 40),
-              
+
               // App Name
               const Text(
                 'Van Merchant',
@@ -67,20 +72,17 @@ class WelcomeScreen extends StatelessWidget {
                   letterSpacing: 1.2,
                 ),
               ),
-              
+
               const SizedBox(height: 10),
-              
+
               // Subtitle
               const Text(
                 'ระบบจัดการร้านค้าออนไลน์',
-                style: TextStyle(
-                  fontSize: 18,
-                  color: Colors.white70,
-                ),
+                style: TextStyle(fontSize: 18, color: Colors.white70),
               ),
-              
+
               const Spacer(flex: 3),
-              
+
               // Buttons Row
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 40),
@@ -116,9 +118,9 @@ class WelcomeScreen extends StatelessWidget {
                         ),
                       ),
                     ),
-                    
+
                     const SizedBox(width: 12),
-                    
+
                     // Register Button
                     Expanded(
                       child: SizedBox(
@@ -127,7 +129,8 @@ class WelcomeScreen extends StatelessWidget {
                           onPressed: () {
                             Navigator.of(context).push(
                               MaterialPageRoute(
-                                builder: (context) => const RegisterShopBlankScreen(),
+                                builder: (context) =>
+                                    const RegisterShopBlankScreen(),
                               ),
                             );
                           },
@@ -152,7 +155,7 @@ class WelcomeScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              
+
               const SizedBox(height: 50),
             ],
           ),

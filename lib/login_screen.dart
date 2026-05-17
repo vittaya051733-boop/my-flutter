@@ -1,4 +1,4 @@
-﻿import 'dart:io';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -21,12 +21,14 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   static const String _androidServerClientId = String.fromEnvironment(
     'GOOGLE_ANDROID_SERVER_CLIENT_ID',
-    defaultValue: '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
+    defaultValue:
+        '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
   );
 
   static const String _iosClientId = String.fromEnvironment(
     'GOOGLE_IOS_CLIENT_ID',
-    defaultValue: '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
+    defaultValue:
+        '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
   );
 
   final TextEditingController _emailController = TextEditingController();
@@ -83,10 +85,7 @@ class _LoginScreenState extends State<LoginScreen> {
         setState(() => _isLoading = false);
         Navigator.of(context).pushNamed(
           '/phone_auth',
-          arguments: {
-            'phone': normalizedPhone,
-            'password': password,
-          },
+          arguments: {'phone': normalizedPhone, 'password': password},
         );
         return;
       } catch (e) {
@@ -102,7 +101,8 @@ class _LoginScreenState extends State<LoginScreen> {
     // แต่จะเช็คการลงทะเบียนร้านใน _handlePostLogin() แทน
     setState(() => _isLoading = true);
     try {
-      final userCredential = await FirebaseAuth.instance.signInWithEmailAndPassword(email: input, password: password);
+      final userCredential = await FirebaseAuth.instance
+          .signInWithEmailAndPassword(email: input, password: password);
       final user = userCredential.user;
 
       if (user == null) {
@@ -110,12 +110,13 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       // ไม่บังคับยืนยันอีเมลในขั้นตอนล็อกอิน (ตามที่ผู้ใช้กำหนด)
-      
+
       // เช็คการลงทะเบียนร้านหลังล็อกอินสำเร็จ
       if (!mounted) return; // use_build_context_synchronously
       setState(() => _isLoading = false);
       await _handlePostLogin();
-    } on FirebaseAuthException catch (e) { // use_build_context_synchronously
+    } on FirebaseAuthException catch (e) {
+      // use_build_context_synchronously
       if (!mounted) return;
       String message = 'ไม่สามารถเข้าสู่ระบบได้';
       if (e.code == 'user-not-found') {
@@ -145,7 +146,9 @@ class _LoginScreenState extends State<LoginScreen> {
       if (Platform.isIOS && _iosClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
       }
-      debugPrint('GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId');
+      debugPrint(
+        'GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId',
+      );
       final googleSignIn = GoogleSignIn.instance;
       await googleSignIn.initialize(
         serverClientId: Platform.isAndroid ? _androidServerClientId : null,
@@ -159,7 +162,10 @@ class _LoginScreenState extends State<LoginScreen> {
       final googleAuth = googleUser.authentication;
       final idToken = googleAuth.idToken;
       if (idToken == null || idToken.isEmpty) {
-        throw FirebaseAuthException(code: 'missing-id-token', message: 'ไม่พบ Google ID token');
+        throw FirebaseAuthException(
+          code: 'missing-id-token',
+          message: 'ไม่พบ Google ID token',
+        );
       }
 
       final credential = GoogleAuthProvider.credential(idToken: idToken);
@@ -196,8 +202,6 @@ class _LoginScreenState extends State<LoginScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  
-
   Future<void> _handlePostLogin() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -207,7 +211,9 @@ class _LoginScreenState extends State<LoginScreen> {
         if (!mounted) return;
         await FirebaseAuth.instance.signOut();
         _showSnack('บัญชีนี้ไม่มีอีเมล ไม่สามารถตรวจสอบการลงทะเบียนร้านค้าได้');
-        Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil('/welcome', (route) => false);
         return;
       }
 
@@ -218,7 +224,9 @@ class _LoginScreenState extends State<LoginScreen> {
         // ถ้ายังไม่เคยลงทะเบียนร้าน → ออกจากระบบและกลับไปหน้า welcome
         await FirebaseAuth.instance.signOut();
         _showSnack('กรุณาลงทะเบียนร้านค้าก่อนเข้าสู่ระบบ');
-        Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil('/welcome', (route) => false);
         return;
       }
       // ถ้าเคยลงทะเบียนแล้ว → เข้าสู่ระบบได้
@@ -228,7 +236,9 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) return;
       await FirebaseAuth.instance.signOut();
       _showSnack('เกิดข้อผิดพลาดในการตรวจสอบข้อมูล');
-      Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
+      Navigator.of(
+        context,
+      ).pushNamedAndRemoveUntil('/welcome', (route) => false);
     }
   }
 
@@ -251,7 +261,9 @@ class _LoginScreenState extends State<LoginScreen> {
           backgroundColor: backgroundColor,
           foregroundColor: foregroundColor,
           padding: const EdgeInsets.symmetric(vertical: 12),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
           elevation: 2,
           side: BorderSide(color: Colors.grey.shade300),
         ),
@@ -265,16 +277,23 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               )
             : (assetImage != null
-                ? Image.asset(
-                    assetImage,
-                    width: 22,
-                    height: 22,
-                    fit: BoxFit.contain,
-                  )
-                : assetSvg != null
-                    ? SvgPicture.asset(assetSvg, height: 22, width: 22)
-                    : Icon(icon, size: 22, color: foregroundColor)),
-        label: Text(label, style: TextStyle(fontSize: 16, color: foregroundColor, fontWeight: FontWeight.w500)),
+                  ? Image.asset(
+                      assetImage,
+                      width: 22,
+                      height: 22,
+                      fit: BoxFit.contain,
+                    )
+                  : assetSvg != null
+                  ? SvgPicture.asset(assetSvg, height: 22, width: 22)
+                  : Icon(icon, size: 22, color: foregroundColor)),
+        label: Text(
+          label,
+          style: TextStyle(
+            fontSize: 16,
+            color: foregroundColor,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }
@@ -285,7 +304,7 @@ class _LoginScreenState extends State<LoginScreen> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('เข้าสู่ระบบ'),
-  backgroundColor: AppColors.accent,
+        backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
         elevation: 0,
       ),
@@ -299,12 +318,17 @@ class _LoginScreenState extends State<LoginScreen> {
               controller: _emailController,
               keyboardType: TextInputType.text,
               textInputAction: TextInputAction.next,
-              autofillHints: const [AutofillHints.username, AutofillHints.email],
+              autofillHints: const [
+                AutofillHints.username,
+                AutofillHints.email,
+              ],
               decoration: InputDecoration(
                 labelText: 'อีเมลหรือเบอร์โทร',
                 hintText: 'user@example.com หรือ 0812345678',
                 prefixIcon: const Icon(Icons.account_circle),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
                 filled: true,
                 fillColor: Colors.grey[50],
               ),
@@ -320,10 +344,17 @@ class _LoginScreenState extends State<LoginScreen> {
                 labelText: 'รหัสผ่าน',
                 prefixIcon: const Icon(Icons.lock),
                 suffixIcon: IconButton(
-                  icon: Icon(_isPasswordVisible ? Icons.visibility : Icons.visibility_off),
-                  onPressed: () => setState(() => _isPasswordVisible = !_isPasswordVisible),
+                  icon: Icon(
+                    _isPasswordVisible
+                        ? Icons.visibility
+                        : Icons.visibility_off,
+                  ),
+                  onPressed: () =>
+                      setState(() => _isPasswordVisible = !_isPasswordVisible),
                 ),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
                 filled: true,
                 fillColor: Colors.grey[50],
               ),
@@ -337,7 +368,13 @@ class _LoginScreenState extends State<LoginScreen> {
               children: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pushNamed('/forgot'),
-                  child: const Text('ลืมรหัสผ่าน?', style: TextStyle(color: AppColors.accent, fontWeight: FontWeight.w500)),
+                  child: const Text(
+                    'ลืมรหัสผ่าน?',
+                    style: TextStyle(
+                      color: AppColors.accent,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
                 ),
                 Row(
                   children: [
@@ -349,16 +386,24 @@ class _LoginScreenState extends State<LoginScreen> {
                         onChanged: (bool? value) async {
                           if (value == true) {
                             final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString('saved_password_${_emailController.text}', _passwordController.text);
+                            await prefs.setString(
+                              'saved_password_${_emailController.text}',
+                              _passwordController.text,
+                            );
                           }
                           setState(() => _isPasswordSaved = value ?? false);
                         },
                         activeColor: AppColors.accent,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(4),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Text('บันทึกรหัสผ่าน', style: TextStyle(fontSize: 14, color: Color(0xFF718096))),
+                    const Text(
+                      'บันทึกรหัสผ่าน',
+                      style: TextStyle(fontSize: 14, color: Color(0xFF718096)),
+                    ),
                   ],
                 ),
               ],
@@ -370,11 +415,26 @@ class _LoginScreenState extends State<LoginScreen> {
                 backgroundColor: AppColors.accent,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
               child: _isLoading
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                  : const Text('เข้าสู่ระบบ', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Text(
+                      'เข้าสู่ระบบ',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
             ),
             const SizedBox(height: 24),
             const _OrDivider(),
@@ -394,7 +454,14 @@ class _LoginScreenState extends State<LoginScreen> {
             Center(
               child: GestureDetector(
                 onTap: () => Navigator.of(context).maybePop(),
-                child: const Text('← ย้อนกลับ', style: TextStyle(color: AppColors.accent, fontSize: 16, fontWeight: FontWeight.w500)),
+                child: const Text(
+                  '← ย้อนกลับ',
+                  style: TextStyle(
+                    color: AppColors.accent,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ),
             ),
             const SizedBox(height: 32),
@@ -421,7 +488,9 @@ class _LoginHeader extends StatelessWidget {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20.0),
               child: const Image(
-                image: AssetImage('assets/file_000000008fc872089268acc9b04e5bcf.png'),
+                image: AssetImage(
+                  'assets/file_00000000be5472069245fc3bdb122dbb.png',
+                ),
                 fit: BoxFit.cover,
               ),
             ),
@@ -431,7 +500,11 @@ class _LoginHeader extends StatelessWidget {
         const Text(
           'Van Merchant',
           textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF2C3E50)),
+          style: TextStyle(
+            fontSize: 28,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF2C3E50),
+          ),
         ),
         const SizedBox(height: 32),
       ],

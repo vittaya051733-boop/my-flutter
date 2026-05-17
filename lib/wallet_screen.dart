@@ -1,12 +1,12 @@
-﻿import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:qr_flutter/qr_flutter.dart';
-import 'qr_scanner_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'wallet_action_dialogs.dart';
-import 'utils/app_colors.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
+import 'qr_scanner_screen.dart';
+import 'wallet_action_dialogs.dart';
+import 'wallet_top_up_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key});
@@ -16,269 +16,641 @@ class WalletScreen extends StatefulWidget {
 }
 
 class _WalletScreenState extends State<WalletScreen> {
-  // ...existing code...
-  void _openQRScanner() async {
-    final result = await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => QRScannerScreen(),
-      ),
-    );
-    if (result != null && result is String) {
-      _handleScannedQRCode(result);
-    }
-  }
+  static const Color _dashboardOrangeTop = Color(0xFFFF9F1C);
+  static const Color _dashboardOrangeMid = Color(0xFFFF6B00);
+  static const Color _dashboardOrangeBottom = Color(0xFFFF5A00);
+  static const Color _dashboardCream = Color(0xFFFFF0DF);
+  static const Color _dashboardText = Color(0xFF2D2D2D);
 
-  void _handleScannedQRCode(String data) async {
-    // Example: If QR contains 'pay:<amount>' or 'receive:<amount>'
-    if (data.startsWith('pay:')) {
-      final amount = double.tryParse(data.substring(4));
-      if (amount != null && amount > 0) {
-        // Deduct credit
-        setState(() => _currentCredit -= amount);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('จ่ายเงิน $amount บาท สำเร็จ')),
-        );
-      }
-    } else if (data.startsWith('receive:')) {
-      final amount = double.tryParse(data.substring(8));
-      if (amount != null && amount > 0) {
-        // Add credit
-        setState(() => _currentCredit += amount);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('รับเงิน $amount บาท สำเร็จ')),
-        );
-      }
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('QR ไม่ถูกต้อง: $data')),
-      );
-    }
-  }
-  final TextEditingController _creditController = TextEditingController();
-  bool _isLoading = false;
-
-  double _currentCredit = 0.0;
+  double _currentCredit = 0;
   String? _uid;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCurrentCredit();
+  }
+
+  DateTime? _toDateTime(Object? value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
+  double? _toDouble(Object? value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value.trim());
+    return null;
+  }
+
+  Map<String, dynamic>? _readMap(Object? value) {
+    if (value is Map<String, dynamic>) return value;
+    if (value is Map) {
+      return <String, dynamic>{
+        for (final entry in value.entries) entry.key.toString(): entry.value,
+      };
+    }
+    return null;
+  }
+
+  String _formatTimestamp(Object? value) {
+    final dt = _toDateTime(value);
+    if (dt == null) return '';
+    final dd = dt.day.toString().padLeft(2, '0');
+    final mm = dt.month.toString().padLeft(2, '0');
+    final yyyy = dt.year.toString();
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final min = dt.minute.toString().padLeft(2, '0');
+    return '$dd/$mm/$yyyy $hh:$min';
+  }
+
+  DateTime? _orderDeliveredAt(Map<String, dynamic> data) {
+    return _toDateTime(data['deliveredAt']) ??
+        _toDateTime(data['deliveryCompletedAt']) ??
+        _toDateTime(data['updatedAt']) ??
+        _toDateTime(data['createdAt']);
+  }
+
+  bool _isDeliveredToday(Map<String, dynamic> data) {
+    final deliveredAt = _orderDeliveredAt(data);
+    if (deliveredAt == null) return false;
+    final now = DateTime.now();
+    return deliveredAt.year == now.year &&
+        deliveredAt.month == now.month &&
+        deliveredAt.day == now.day;
+  }
+
+  double _readProductRevenue(Map<String, dynamic> data) {
+    final direct =
+        _toDouble(data['subtotal']) ?? _toDouble(data['productTotal']);
+    if (direct != null && direct > 0) return direct;
+
+    final items = data['items'] ?? data['products'];
+    if (items is List) {
+      final itemTotal = items.whereType<Map>().fold<double>(0, (
+        runningTotal,
+        item,
+      ) {
+        final product = _readMap(item);
+        if (product == null) return runningTotal;
+        final price = _toDouble(product['price'] ?? product['unitPrice']) ?? 0;
+        final quantity = _toDouble(product['quantity']) ?? 0;
+        return runningTotal + (price * quantity);
+      });
+      if (itemTotal > 0) return itemTotal;
+    }
+
+    final total =
+        _toDouble(data['totalAmount']) ??
+        _toDouble(data['grandTotal']) ??
+        _toDouble(data['totalPrice']) ??
+        0;
+    final shipping =
+        _toDouble(data['shippingFee']) ??
+        _toDouble(data['deliveryFee']) ??
+        _toDouble(data['deliveryCharge']) ??
+        0;
+    final fallback = total - shipping;
+    return fallback > 0 ? fallback : total;
+  }
 
   Future<void> _fetchCurrentCredit() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-  setState(() => _uid = user.uid);
+
+    if (mounted) setState(() => _uid = user.uid);
+
     final snapshot = await FirebaseFirestore.instance
         .collection('credits')
         .where('uid', isEqualTo: user.uid)
         .get();
-    double total = 0.0;
+
+    var total = 0.0;
     for (final doc in snapshot.docs) {
-      final amount = doc['amount'];
-      if (amount is num) total += amount.toDouble();
+      final amount = _toDouble(doc.data()['amount']);
+      if (amount != null) total += amount;
     }
+
+    if (!mounted) return;
     setState(() => _currentCredit = total);
   }
 
   Future<void> _requestWithdraw() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณาเข้าสู่ระบบก่อน')),
-      );
+      _showSnack('กรุณาเข้าสู่ระบบก่อน');
       return;
     }
+
     await _fetchCurrentCredit();
+    if (!mounted) return;
     if (_currentCredit <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('คุณไม่มีเครดิตสำหรับถอนเงิน')),
-      );
+      _showSnack('คุณไม่มีเครดิตสำหรับถอนเงิน');
       return;
     }
-    // Mock: ส่งคำขอถอนเงินไปยังบริษัท (ยังไม่มีบัญชีจริง)
+
     await FirebaseFirestore.instance.collection('withdraw_requests').add({
       'uid': user.uid,
       'amount': _currentCredit,
       'timestamp': FieldValue.serverTimestamp(),
       'status': 'pending',
-      'companyBankAccount': null, // ยังไม่มีบัญชีบริษัท
+      'sourceApp': 'van1_merchant',
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('ส่งคำขอถอนเงินเรียบร้อย (รอบริษัทอนุมัติ)')),
+    _showSnack('ส่งคำขอถอนเงินเรียบร้อย (รอบริษัทอนุมัติ)');
+  }
+
+  Future<void> _promptTopUpAmount() async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const WalletTopUpDialog(),
+    );
+
+    if (!mounted) return;
+    if (result == true) await _fetchCurrentCredit();
+  }
+
+  Future<void> _openQRScanner() async {
+    final result = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(builder: (context) => QRScannerScreen()),
+    );
+    if (!mounted || result == null || result.isEmpty) return;
+    _handleScannedQRCode(result);
+  }
+
+  void _handleScannedQRCode(String data) {
+    if (data.startsWith('pay:')) {
+      final amount = double.tryParse(data.substring(4));
+      if (amount != null && amount > 0) {
+        setState(() => _currentCredit -= amount);
+        _showSnack('จ่ายเงิน $amount บาท สำเร็จ');
+        return;
+      }
+    } else if (data.startsWith('receive:')) {
+      final amount = double.tryParse(data.substring(8));
+      if (amount != null && amount > 0) {
+        setState(() => _currentCredit += amount);
+        _showSnack('รับเงิน $amount บาท สำเร็จ');
+        return;
+      }
+    }
+    _showSnack('QR ไม่ถูกต้อง: $data');
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _buildTodayIncomeCard(String uid) {
+    if (uid.isEmpty) return const SizedBox.shrink();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('orders')
+          .where('shopOwnerId', isEqualTo: uid)
+          .snapshots(),
+      builder: (context, snapshot) {
+        var deliveredTodayCount = 0;
+        var productRevenueToday = 0.0;
+
+        final docs =
+            snapshot.data?.docs ??
+            const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        for (final doc in docs) {
+          final data = doc.data();
+          final status = data['status']?.toString().trim();
+          if (status != 'delivered' || !_isDeliveredToday(data)) continue;
+          deliveredTodayCount += 1;
+          productRevenueToday += _readProductRevenue(data);
+        }
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            color: Colors.white.withValues(alpha: 0.14),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.query_stats_rounded,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'รายได้สินค้าในวันนี้',
+                      style: TextStyle(
+                        color: _dashboardCream,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${productRevenueToday.toStringAsFixed(2)} บาท',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'ส่งสำเร็จวันนี้ $deliveredTodayCount ออเดอร์',
+                      style: const TextStyle(
+                        color: _dashboardCream,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
-  Future<void> _submitCredit() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณาเข้าสู่ระบบก่อน')),
-      );
-      return;
-    }
-    final credit = double.tryParse(_creditController.text);
-    if (credit == null || credit <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอกจำนวนเครดิตที่ถูกต้อง')),
-      );
-      return;
-    }
-    setState(() => _isLoading = true);
-    try {
-      await FirebaseFirestore.instance.collection('credits').add({
-        'uid': user.uid,
-        'amount': credit,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('บันทึกเครดิตเรียบร้อยแล้ว')),
-      );
-      _creditController.clear();
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('เกิดข้อผิดพลาด: $e')),
-      );
-    } finally {
-      setState(() => _isLoading = false);
-    }
+  Widget _buildCreditsHistory(String uid) {
+    if (uid.isEmpty) return const Text('กรุณาเข้าสู่ระบบเพื่อดูประวัติ');
+
+    final creditStream = FirebaseFirestore.instance
+        .collection('credits')
+        .where('uid', isEqualTo: uid)
+        .snapshots();
+    final orderStream = FirebaseFirestore.instance
+        .collection('orders')
+        .where('shopOwnerId', isEqualTo: uid)
+        .snapshots();
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: creditStream,
+      builder: (context, creditSnapshot) {
+        if (creditSnapshot.connectionState == ConnectionState.waiting &&
+            !creditSnapshot.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (creditSnapshot.hasError) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text('โหลดประวัติเครดิตไม่สำเร็จ'),
+          );
+        }
+
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: orderStream,
+          builder: (context, orderSnapshot) {
+            if (orderSnapshot.connectionState == ConnectionState.waiting &&
+                !orderSnapshot.hasData) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            if (orderSnapshot.hasError) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text('โหลดประวัติออเดอร์ไม่สำเร็จ'),
+              );
+            }
+
+            final items = <_WalletHistoryItem>[];
+            final creditDocs =
+                creditSnapshot.data?.docs ??
+                const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+            for (final doc in creditDocs) {
+              final data = doc.data();
+              final amount = _toDouble(data['amount']) ?? 0;
+              final provider = data['provider']
+                  ?.toString()
+                  .trim()
+                  .toLowerCase();
+              final status = data['status']?.toString().trim().toLowerCase();
+              final paymentGroupId = data['paymentGroupId']?.toString().trim();
+              final slipFeedbackId = data['slipFeedbackId']?.toString().trim();
+              final isTopUp = amount >= 0;
+
+              var title = isTopUp ? 'เติมเครดิต' : 'หักเครดิต';
+              if (provider == 'slipok' && status == 'verified') {
+                title = 'เติมเครดิต (ตรวจสลิป)';
+              } else if (provider != null && provider.isNotEmpty) {
+                title = '$title ($provider)';
+              }
+
+              final subtitleParts = <String>[];
+              if (paymentGroupId != null && paymentGroupId.isNotEmpty) {
+                subtitleParts.add('รหัส: $paymentGroupId');
+              }
+              if (slipFeedbackId != null && slipFeedbackId.isNotEmpty) {
+                subtitleParts.add('SlipOK: $slipFeedbackId');
+              }
+
+              items.add(
+                _WalletHistoryItem(
+                  title: title,
+                  subtitle: subtitleParts.isEmpty
+                      ? null
+                      : subtitleParts.join(' • '),
+                  amount: amount,
+                  happenedAt: _toDateTime(data['timestamp']),
+                  icon: isTopUp
+                      ? Icons.add_circle_outline
+                      : Icons.remove_circle_outline,
+                  color: isTopUp ? Colors.green : Colors.redAccent,
+                ),
+              );
+            }
+
+            final orderDocs =
+                orderSnapshot.data?.docs ??
+                const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+            for (final doc in orderDocs) {
+              final data = doc.data();
+              final status = data['status']?.toString().trim();
+              if (status != 'delivered') continue;
+              final productRevenue = _readProductRevenue(data);
+              if (productRevenue <= 0) continue;
+              final orderCode = data['orderCode']?.toString().trim();
+              items.add(
+                _WalletHistoryItem(
+                  title: 'รายได้ค่าสินค้า',
+                  subtitle: orderCode == null || orderCode.isEmpty
+                      ? 'ออเดอร์ส่งสำเร็จ'
+                      : 'ออเดอร์: $orderCode',
+                  amount: productRevenue,
+                  happenedAt: _orderDeliveredAt(data),
+                  icon: Icons.shopping_bag_outlined,
+                  color: _dashboardOrangeMid,
+                ),
+              );
+            }
+
+            items.sort((a, b) {
+              final at = a.happenedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+              final bt = b.happenedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+              return bt.compareTo(at);
+            });
+
+            final visibleItems = items.take(50).toList();
+            if (visibleItems.isEmpty) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text('ยังไม่มีรายการ'),
+              );
+            }
+
+            return ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: visibleItems.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final item = visibleItems[index];
+                final isPositive = item.amount >= 0;
+                return ListTile(
+                  leading: Icon(item.icon, color: item.color),
+                  title: Text(item.title),
+                  subtitle: item.subtitle == null ? null : Text(item.subtitle!),
+                  trailing: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        '${item.amount.toStringAsFixed(2)} บาท',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: isPositive ? Colors.green : Colors.redAccent,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _formatTimestamp(item.happenedAt),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-  // ...existing code...
     final user = FirebaseAuth.instance.currentUser;
     final uid = user?.uid ?? _uid ?? '';
+
     return Scaffold(
-      backgroundColor: const Color(0xFFF7F7F7),
-      body: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.arrow_downward),
-                      label: const Text('รับเงิน'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.accent,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        elevation: 0,
-                      ),
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) => ReceiveMoneyDialog(uid: uid),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.arrow_upward),
-                      label: const Text('จ่ายเงิน'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.accent,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        elevation: 0,
-                      ),
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) => PayMoneyDialog(uid: uid),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.compare_arrows),
-                      label: const Text('โอนเงิน'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.accent,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        elevation: 0,
-                      ),
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) => TransferMoneyDialog(uid: uid),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      icon: const Icon(Icons.money_off),
-                      label: const Text('ถอนเงิน'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.accent,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                        elevation: 0,
-                      ),
-                      onPressed: _requestWithdraw,
-                    ),
-                  ),
-                ],
-              ),
+      backgroundColor: _dashboardOrangeMid,
+      appBar: AppBar(
+        title: const Text('กระเป๋าเงิน'),
+        backgroundColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [_dashboardOrangeTop, _dashboardOrangeMid],
             ),
           ),
-          Expanded(
-            child: SingleChildScrollView(
+        ),
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              _dashboardOrangeTop,
+              _dashboardOrangeMid,
+              _dashboardOrangeBottom,
+            ],
+          ),
+        ),
+        child: Column(
+          children: [
+            SafeArea(
+              bottom: false,
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                child: Row(
                   children: [
-                    // Balance Card
-                    Card(
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                      elevation: 4,
-                      color: AppColors.accent,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
+                    _WalletActionButton(
+                      icon: Icons.arrow_downward,
+                      label: 'รับเงิน',
+                      style: _walletActionButtonStyle(),
+                      onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (context) => ReceiveMoneyDialog(uid: uid),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _WalletActionButton(
+                      icon: Icons.arrow_upward,
+                      label: 'จ่ายเงิน',
+                      style: _walletActionButtonStyle(),
+                      onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (context) => PayMoneyDialog(uid: uid),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _WalletActionButton(
+                      icon: Icons.compare_arrows,
+                      label: 'โอนเงิน',
+                      style: _walletActionButtonStyle(),
+                      onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (context) => TransferMoneyDialog(uid: uid),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _WalletActionButton(
+                      icon: Icons.money_off,
+                      label: 'ถอนเงิน',
+                      style: _walletActionButtonStyle(),
+                      onPressed: _requestWithdraw,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(24),
+                          color: Colors.white.withValues(alpha: 0.14),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.22),
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 24,
+                          horizontal: 20,
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
                               children: [
-                                const Icon(Icons.account_balance_wallet, color: Colors.white, size: 32),
-                                const SizedBox(width: 12),
-                                const Text('ยอดเงินคงเหลือ', style: TextStyle(fontSize: 18, color: Colors.white)),
+                                const Expanded(
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.account_balance_wallet,
+                                        color: Colors.white,
+                                        size: 32,
+                                      ),
+                                      SizedBox(width: 12),
+                                      Flexible(
+                                        child: Text(
+                                          'ยอดเครดิตคงเหลือ',
+                                          style: TextStyle(
+                                            fontSize: 18,
+                                            color: Colors.white,
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                SizedBox(
+                                  height: 36,
+                                  child: FilledButton(
+                                    onPressed: _promptTopUpAmount,
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: Colors.white,
+                                      foregroundColor: _dashboardOrangeMid,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 12,
+                                      ),
+                                      minimumSize: const Size(0, 36),
+                                    ),
+                                    child: const FittedBox(
+                                      fit: BoxFit.scaleDown,
+                                      child: Text('เติมเครดิต'),
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 12),
                             Text(
                               '${_currentCredit.toStringAsFixed(2)} บาท',
-                              style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white),
+                              style: const TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
                             ),
                             const SizedBox(height: 8),
                             Row(
                               children: [
-                                Text('UID: ', style: const TextStyle(color: Colors.white70)),
-                                SelectableText(
-                                  uid.length > 10
-                                      ? uid.substring(0, 6) + '...' + uid.substring(uid.length - 4)
-                                      : uid,
-                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                const Text(
+                                  'UID: ',
+                                  style: TextStyle(color: Colors.white70),
+                                ),
+                                Expanded(
+                                  child: SelectableText(
+                                    uid.length > 10
+                                        ? '${uid.substring(0, 6)}...${uid.substring(uid.length - 4)}'
+                                        : uid,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
                                 ),
                                 IconButton(
-                                  icon: const Icon(Icons.copy, color: Colors.white),
+                                  icon: const Icon(
+                                    Icons.copy,
+                                    color: Colors.white,
+                                  ),
                                   tooltip: 'คัดลอก UID เต็ม',
                                   onPressed: () {
                                     Clipboard.setData(ClipboardData(text: uid));
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('คัดลอก UID เรียบร้อย')),
-                                    );
+                                    _showSnack('คัดลอก UID เรียบร้อย');
                                   },
                                 ),
                               ],
@@ -286,160 +658,195 @@ class _WalletScreenState extends State<WalletScreen> {
                           ],
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 18),
-                    // QR & Scan Section
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        Column(
-                          children: [
-                            GestureDetector(
-                              onTap: () {
-                                showDialog(
-                                  context: context,
-                                  barrierDismissible: true,
-                                  builder: (context) => GestureDetector(
-                                    onTap: () => Navigator.of(context).pop(),
-                                    child: Dialog(
-                                      backgroundColor: Colors.transparent,
-                                      child: Center(
-                                        child: Container(
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            borderRadius: BorderRadius.circular(24),
-                                            boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 12)],
-                                          ),
-                                          padding: const EdgeInsets.all(32),
-                                          child: QrImageView(
-                                            data: uid,
-                                            size: 280.0,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              },
-                              child: Container(
+                      const SizedBox(height: 12),
+                      _buildTodayIncomeCard(uid),
+                      const SizedBox(height: 18),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          _WalletQrButton(uid: uid),
+                          Column(
+                            children: [
+                              Container(
                                 decoration: BoxDecoration(
                                   color: Colors.white,
                                   borderRadius: BorderRadius.circular(16),
-                                  boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Color(0x24000000),
+                                      blurRadius: 10,
+                                    ),
+                                  ],
                                 ),
-                                padding: const EdgeInsets.all(12),
-                                child: QrImageView(
-                                  data: uid,
-                                  size: 100.0,
+                                child: IconButton(
+                                  icon: const Icon(
+                                    Icons.qr_code_scanner,
+                                    size: 48,
+                                    color: _dashboardOrangeMid,
+                                  ),
+                                  onPressed: _openQRScanner,
+                                  tooltip: 'สแกน QR',
                                 ),
                               ),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text('QR รับเงิน', style: TextStyle(fontSize: 14)),
-                          ],
-                        ),
-                        Column(
-                          children: [
-                            Container(
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                              const SizedBox(height: 8),
+                              const Text(
+                                'สแกนจ่าย/รับเงิน',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: _dashboardCream,
+                                ),
                               ),
-                              child: IconButton(
-                                icon: const Icon(Icons.qr_code_scanner, size: 48, color: AppColors.accent),
-                                onPressed: _openQRScanner,
-                                tooltip: 'สแกน QR',
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            const Text('สแกนจ่าย/รับเงิน', style: TextStyle(fontSize: 14)),
-                          ],
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Card(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
                         ),
+                        elevation: 0,
+                        color: Colors.white,
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'ประวัติเติมเครดิตและรายได้ร้าน',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: _dashboardText,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              _buildCreditsHistory(uid),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  ButtonStyle _walletActionButtonStyle() {
+    return ElevatedButton.styleFrom(
+      backgroundColor: Colors.white.withValues(alpha: 0.18),
+      foregroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      elevation: 0,
+      side: BorderSide(color: Colors.white.withValues(alpha: 0.22)),
+    );
+  }
+}
+
+class _WalletActionButton extends StatelessWidget {
+  const _WalletActionButton({
+    required this.icon,
+    required this.label,
+    required this.style,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final ButtonStyle style;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: ElevatedButton.icon(
+        icon: Icon(icon),
+        label: FittedBox(fit: BoxFit.scaleDown, child: Text(label)),
+        style: style,
+        onPressed: onPressed,
+      ),
+    );
+  }
+}
+
+class _WalletQrButton extends StatelessWidget {
+  const _WalletQrButton({required this.uid});
+
+  final String uid;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: () => showDialog<void>(
+            context: context,
+            barrierDismissible: true,
+            builder: (context) => GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Dialog(
+                backgroundColor: Colors.transparent,
+                child: Center(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black26, blurRadius: 12),
                       ],
                     ),
-                    const SizedBox(height: 24),
-                    // Transaction History (พื้นหลังสีขาว)
-                    Card(
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      elevation: 2,
-                      color: Colors.white,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('ประวัติธุรกรรม', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 12),
-                            // แสดงธุรกรรมจำลอง 3 รายการเสมอ
-                            Column(
-                              children: [
-                                ListTile(
-                                  leading: const Icon(Icons.arrow_downward, color: Colors.green),
-                                  title: const Text('รับเงินจาก UID: userA'),
-                                  subtitle: const Text('500 บาท'),
-                                  trailing: const Text('10/11/2025'),
-                                ),
-                                ListTile(
-                                  leading: const Icon(Icons.arrow_upward, color: Colors.redAccent),
-                                  title: const Text('จ่ายเงินให้ UID: userB'),
-                                  subtitle: const Text('200 บาท'),
-                                  trailing: const Text('09/11/2025'),
-                                ),
-                                ListTile(
-                                  leading: const Icon(Icons.compare_arrows, color: AppColors.accent),
-                                  title: const Text('โอนเงินไป UID: userC'),
-                                  subtitle: const Text('100 บาท'),
-                                  trailing: const Text('08/11/2025'),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    // เพิ่มฟอร์มเติมเครดิตเพื่อให้ _isLoading และ _submitCredit ถูกใช้งาน
-                    Card(
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      elevation: 2,
-                      color: Colors.white,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('เติมเครดิต', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 12),
-                            TextField(
-                              controller: _creditController,
-                              keyboardType: TextInputType.number,
-                              decoration: const InputDecoration(
-                                labelText: 'จำนวนเครดิต',
-                                border: OutlineInputBorder(),
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton(
-                                onPressed: _isLoading ? null : _submitCredit,
-                                child: _isLoading
-                                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                                    : const Text('บันทึกเครดิต'),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+                    padding: const EdgeInsets.all(32),
+                    child: QrImageView(data: uid, size: 280),
+                  ),
                 ),
               ),
             ),
           ),
-        ],
-      ),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: const [
+                BoxShadow(color: Color(0x24000000), blurRadius: 10),
+              ],
+            ),
+            padding: const EdgeInsets.all(12),
+            child: QrImageView(data: uid, size: 100),
+          ),
+        ),
+        const SizedBox(height: 8),
+        const Text(
+          'QR รับเงิน',
+          style: TextStyle(
+            fontSize: 14,
+            color: _WalletScreenState._dashboardCream,
+          ),
+        ),
+      ],
     );
   }
+}
+
+class _WalletHistoryItem {
+  const _WalletHistoryItem({
+    required this.title,
+    required this.amount,
+    required this.icon,
+    required this.color,
+    this.subtitle,
+    this.happenedAt,
+  });
+
+  final String title;
+  final String? subtitle;
+  final double amount;
+  final DateTime? happenedAt;
+  final IconData icon;
+  final Color color;
 }

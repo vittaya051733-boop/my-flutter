@@ -579,7 +579,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      await _syncShopProfileToProducts(
+      await _upsertPublicShopProfile(
         ownerUid: user.uid,
         shopName: _shopNameController.text.trim(),
         shopImageUrl: shopImageUrl,
@@ -614,7 +614,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     }
   }
 
-  Future<void> _syncShopProfileToProducts({
+  Future<void> _upsertPublicShopProfile({
     required String ownerUid,
     required String shopName,
     String? shopImageUrl,
@@ -625,124 +625,51 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     String? phone,
     String? email,
   }) async {
-    try {
-      final QuerySnapshot<Map<String, dynamic>> snapshot = await FirebaseFirestore.instance
-          .collection('products')
-          .where('ownerUid', isEqualTo: ownerUid)
-          .get();
+    final normalizedShopName = shopName.trim();
+    final normalizedShopImageUrl = shopImageUrl?.trim();
+    final normalizedAddress = address?.trim();
+    final normalizedPhone = phone?.trim();
+    final normalizedEmail = email?.trim();
+    final normalizedServiceType = serviceType.trim();
 
-      if (snapshot.docs.isEmpty) return;
+    final publicData = <String, dynamic>{
+      'ownerUid': ownerUid,
+      'ownerId': ownerUid,
+      'shopName': normalizedShopName,
+      'name': normalizedShopName,
+      'serviceType': normalizedServiceType,
+      'location': <String, double>{
+        'latitude': latitude,
+        'longitude': longitude,
+      },
+      'shopLocation': <String, double>{
+        'latitude': latitude,
+        'longitude': longitude,
+      },
+      'shopLatitude': latitude,
+      'shopLongitude': longitude,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
 
-      WriteBatch batch = FirebaseFirestore.instance.batch();
-      int operationCount = 0;
-
-      for (final doc in snapshot.docs) {
-        final Map<String, dynamic> data = doc.data();
-        final Map<String, dynamic> updates = <String, dynamic>{};
-
-        final String normalizedShopName = shopName.trim();
-        if (normalizedShopName.isNotEmpty) {
-          final String existingShopName = (data['shopName'] ?? '').toString().trim();
-          if (existingShopName != normalizedShopName) {
-            updates['shopName'] = normalizedShopName;
-          }
-        }
-
-        final String normalizedUrl = (shopImageUrl ?? '').trim();
-        if (normalizedUrl.isNotEmpty) {
-          final String existingShopImageUrl = (data['shopImageUrl'] ?? '').toString().trim();
-          if (existingShopImageUrl != normalizedUrl) {
-            updates['shopImageUrl'] = normalizedUrl;
-          }
-        }
-
-        double? existingLat;
-        double? existingLng;
-        final dynamic rawLocation = data['location'] ?? data['shopLocation'];
-        if (rawLocation is GeoPoint) {
-          existingLat = rawLocation.latitude;
-          existingLng = rawLocation.longitude;
-        } else if (rawLocation is Map) {
-          final Map<String, dynamic> locationMap = _stringKeyedMap(rawLocation);
-          existingLat = _parseDouble(locationMap['latitude'] ?? locationMap['lat'] ?? locationMap['y']);
-          existingLng = _parseDouble(
-            locationMap['longitude'] ?? locationMap['lng'] ?? locationMap['long'] ?? locationMap['x'],
-          );
-        }
-
-        final bool needsLocationUpdate =
-            existingLat == null ||
-            existingLng == null ||
-            (existingLat - latitude).abs() > 0.0000001 ||
-            (existingLng - longitude).abs() > 0.0000001;
-        if (needsLocationUpdate) {
-          updates['location'] = <String, double>{
-            'latitude': latitude,
-            'longitude': longitude,
-          };
-          updates['shopLocation'] = <String, double>{
-            'latitude': latitude,
-            'longitude': longitude,
-          };
-          updates['shopLatitude'] = latitude;
-          updates['shopLongitude'] = longitude;
-        }
-
-        final String normalizedServiceType = serviceType.trim();
-        if (normalizedServiceType.isNotEmpty) {
-          final String existingServiceType = (data['serviceType'] ?? '').toString().trim();
-          if (existingServiceType != normalizedServiceType) {
-            updates['serviceType'] = normalizedServiceType;
-          }
-        }
-
-        final String normalizedAddress = (address ?? '').trim();
-        if (normalizedAddress.isNotEmpty) {
-          final String existingAddress = (data['shopAddress'] ?? data['address'] ?? '').toString().trim();
-          if (existingAddress != normalizedAddress) {
-            updates['shopAddress'] = normalizedAddress;
-            updates['address'] = normalizedAddress;
-          }
-        }
-
-        final String normalizedPhone = (phone ?? '').trim();
-        if (normalizedPhone.isNotEmpty) {
-          final String existingPhone = (data['shopPhone'] ?? data['phone'] ?? '').toString().trim();
-          if (existingPhone != normalizedPhone) {
-            updates['shopPhone'] = normalizedPhone;
-            updates['phone'] = normalizedPhone;
-          }
-        }
-
-        final String normalizedEmail = (email ?? '').trim();
-        if (normalizedEmail.isNotEmpty) {
-          final String existingEmail = (data['email'] ?? '').toString().trim();
-          if (existingEmail != normalizedEmail) {
-            updates['email'] = normalizedEmail;
-          }
-        }
-
-        if (updates.isEmpty) {
-          continue;
-        }
-
-        updates['updatedAt'] = FieldValue.serverTimestamp();
-        batch.update(doc.reference, updates);
-        operationCount++;
-
-        if (operationCount >= 450) {
-          await batch.commit();
-          batch = FirebaseFirestore.instance.batch();
-          operationCount = 0;
-        }
-      }
-
-      if (operationCount > 0) {
-        await batch.commit();
-      }
-    } catch (e) {
-      debugPrint('Failed to sync shop profile to products: $e');
+    if (normalizedShopImageUrl != null && normalizedShopImageUrl.isNotEmpty) {
+      publicData['shopImageUrl'] = normalizedShopImageUrl;
     }
+    if (normalizedAddress != null && normalizedAddress.isNotEmpty) {
+      publicData['address'] = normalizedAddress;
+      publicData['shopAddress'] = normalizedAddress;
+    }
+    if (normalizedPhone != null && normalizedPhone.isNotEmpty) {
+      publicData['phone'] = normalizedPhone;
+      publicData['shopPhone'] = normalizedPhone;
+    }
+    if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
+      publicData['email'] = normalizedEmail;
+    }
+
+    await FirebaseFirestore.instance
+        .collection('public_shops')
+        .doc(ownerUid)
+        .set(publicData, SetOptions(merge: true));
   }
 
   // ตรวจสอบอีเมลรูปแบบทั่วไป

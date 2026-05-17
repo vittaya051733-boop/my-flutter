@@ -13,7 +13,7 @@ firebase.initializeApp({
 const messaging = firebase.messaging();
 
 messaging.onBackgroundMessage((payload) => {
-  const notificationTitle = payload.notification?.title || 'Van Merchant';
+  const notificationTitle = payload.notification?.title || 'SHOP';
   const notificationOptions = {
     body: payload.notification?.body || 'คุณมีการแจ้งเตือนใหม่',
     icon: payload.notification?.image || '/icons/Icon-192.png',

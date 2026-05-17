@@ -76,6 +76,14 @@ class ProductCacheService {
     await prefs.remove('$_keyPrefix$userId');
   }
 
+  Future<void> removeProduct(String userId, String productId) async {
+    if (userId.isEmpty || productId.isEmpty) return;
+    final cached = await loadProducts(userId);
+    final filtered = cached.where((product) => product.id != productId).toList();
+    if (filtered.length == cached.length) return;
+    await saveProducts(userId, filtered);
+  }
+
   Map<String, dynamic> _normalizeMap(Map<String, dynamic> input) {
     return input.map(
       (key, value) => MapEntry(key, _normalizeValue(value)),

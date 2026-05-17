@@ -3,6 +3,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'add_product_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/product_model.dart';
+import 'services/media_cache_service.dart';
+import 'services/product_cache_service.dart';
+import 'storage_helper.dart';
 import 'utils/app_colors.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
@@ -158,6 +161,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       if (removedFromHome) {
         widget.onHomeProductIdsChanged?.call(_homeProductIds);
       }
+      await _deleteProductMedia(product);
       await FirebaseFirestore.instance
           .collection('products')
           .doc(product.id!)
@@ -166,6 +170,10 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
           .delete()
           .catchError((_) => null);
       await FirebaseFirestore.instance.collection('products').doc(product.id!).delete();
+      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+      if (currentUserId != null && currentUserId.isNotEmpty) {
+        await ProductCacheService.instance.removeProduct(currentUserId, product.id!);
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ลบสินค้าเรียบร้อยแล้ว')));
         setState(() {
@@ -182,6 +190,34 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
           _deletingProductIds.remove(product.id!);
         });
       }
+    }
+  }
+
+  Future<void> _deleteProductMedia(Product product) async {
+    final mediaUrls = <String>{
+      ...product.imageUrls.where((url) => url.trim().isNotEmpty),
+      ...product.thumbnailUrls.where((url) => url.trim().isNotEmpty),
+      if ((product.videoUrl ?? '').trim().isNotEmpty) product.videoUrl!.trim(),
+      if ((product.videoThumbnailUrl ?? '').trim().isNotEmpty) product.videoThumbnailUrl!.trim(),
+    };
+
+    for (final url in mediaUrls) {
+      await _deleteStorageFile(url);
+      await MediaCacheService.instance.remove(url);
+    }
+  }
+
+  Future<void> _deleteStorageFile(String url) async {
+    try {
+      final ref = StorageHelper.instance.refFromURL(url);
+      await ref.delete();
+    } on FirebaseException catch (e) {
+      if (e.code == 'object-not-found') {
+        return;
+      }
+      debugPrint('Failed to delete storage file $url: ${e.message ?? e.code}');
+    } catch (e) {
+      debugPrint('Failed to delete storage file $url: $e');
     }
   }
   

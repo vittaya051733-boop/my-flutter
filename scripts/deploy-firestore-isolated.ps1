@@ -1,34 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$appRoot = Split-Path -Parent $scriptRoot
-Set-Location $appRoot
+$canonicalScript = Join-Path $scriptRoot '..\..\..\van2\scripts\deploy-firestore-isolated.ps1'
+$canonicalScript = [System.IO.Path]::GetFullPath($canonicalScript)
 
-
-$expectedProjectId = 'van-merchant'
-$rulesFile = 'firestore.rules'
-
-if (-not (Get-Command firebase -ErrorAction SilentlyContinue)) {
-  Write-Error 'Firebase CLI was not found in PATH.'
+if (-not (Test-Path $canonicalScript)) {
+  Write-Error "Missing canonical Firestore deploy script: $canonicalScript"
   exit 1
 }
 
-if (-not (Test-Path '.firebaserc')) {
-  Write-Error 'Missing .firebaserc.'
-  exit 1
-}
-
-if (-not (Test-Path $rulesFile)) {
-  Write-Error "Missing rules file: $rulesFile"
-  exit 1
-}
-
-$rc = Get-Content '.firebaserc' -Raw | ConvertFrom-Json
-$projectId = $rc.projects.default
-if ($projectId -ne $expectedProjectId) {
-  Write-Error "Configured project '$projectId' does not match expected '$expectedProjectId'."
-  exit 1
-}
-
-Write-Host 'Deploying Firestore rules to the shared default database used by the current Flutter app.' -ForegroundColor DarkYellow
-Write-Host "Deploying Firestore rules from '$rulesFile' in project '$expectedProjectId'" -ForegroundColor Cyan
-firebase deploy --project $expectedProjectId --only firestore
+Write-Host 'Firestore rules are shared by van1/van2/van3 on the default database.' -ForegroundColor DarkYellow
+Write-Host 'Delegating to the canonical van2 Firestore rules deploy script to avoid overwriting rules with an app-specific copy.' -ForegroundColor Cyan
+& powershell -ExecutionPolicy Bypass -File $canonicalScript

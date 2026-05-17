@@ -26,87 +26,93 @@ import 'widgets/app_update_gate.dart';
 import 'utils/feature_flags.dart';
 
 void main() {
-  runZonedGuarded(() async {
-    WidgetsFlutterBinding.ensureInitialized();
+  runZonedGuarded(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-    // ดักจับ error ระดับเฟรมเวิร์ก (ไม่ให้แอปหลุด)
-    FlutterError.onError = (FlutterErrorDetails details) {
-      FlutterError.presentError(details);
-    };
+      // ดักจับ error ระดับเฟรมเวิร์ก (ไม่ให้แอปหลุด)
+      FlutterError.onError = (FlutterErrorDetails details) {
+        FlutterError.presentError(details);
+      };
 
-    // ดักจับ error ระดับ engine/แพลตฟอร์ม ให้ไม่ทำให้แอปเด้ง
-    WidgetsBinding.instance.platformDispatcher.onError = (error, stack) {
-      // สามารถส่ง log ไปเก็บได้ที่นี่
-      return true; // กลืน error ไว้
-    };
+      // ดักจับ error ระดับ engine/แพลตฟอร์ม ให้ไม่ทำให้แอปเด้ง
+      WidgetsBinding.instance.platformDispatcher.onError = (error, stack) {
+        // สามารถส่ง log ไปเก็บได้ที่นี่
+        return true; // กลืน error ไว้
+      };
 
-    // แทน ErrorWidget (จอแดง) ด้วย widget เงียบๆ เพื่อไม่ให้ผู้ใช้เห็น error
-    ErrorWidget.builder = (FlutterErrorDetails details) {
-      return const SizedBox.shrink();
-    };
+      // แทน ErrorWidget (จอแดง) ด้วย widget เงียบๆ เพื่อไม่ให้ผู้ใช้เห็น error
+      ErrorWidget.builder = (FlutterErrorDetails details) {
+        return const SizedBox.shrink();
+      };
 
-    try {
-      // ป้องกันการ initialize ซ้ำ (เช่นตอน hot restart)
-      if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(
-          options: DefaultFirebaseOptions.currentPlatform,
-        );
-      }
-    } catch (e) {
-      final msg = e.toString();
-      // ถ้าเป็น duplicate-app ให้ข้ามและใช้อินสแตนซ์เดิม
-      if (!(msg.contains('duplicate-app') || msg.contains('already exists'))) {
-        runApp(ErrorApp(error: msg));
-        return;
-      }
-    }
-
-  // พยายามเปิดใช้ App Check แต่ถ้าล้มเหลว/ช้าเกินไป ให้ไปต่อได้
-    try {
-      await FirebaseAppCheck.instance
-          .activate(
-            // ถ้ากำหนด APP_CHECK_DEBUG=true จะบังคับใช้ Debug provider
-            androidProvider: kAppCheckForceDebug
-                ? AndroidProvider.debug
-                : (kReleaseMode
-                    ? AndroidProvider.playIntegrity
-                    : AndroidProvider.debug),
-          )
-          .timeout(const Duration(seconds: 5)); // กันค้าง
-      await FirebaseAppCheck.instance.setTokenAutoRefreshEnabled(true);
-
-      // เพิ่ม: พิมพ์ Debug Token ออกมาใน Console ทุกครั้งที่แอปเริ่มทำงาน (เฉพาะ Debug Mode)
-      if (kDebugMode || kAppCheckForceDebug) {
-        FirebaseAppCheck.instance.onTokenChange.listen((token) {
-          debugPrint('App Check Debug Token: $token');
-        });
+      try {
+        // ป้องกันการ initialize ซ้ำ (เช่นตอน hot restart)
+        if (Firebase.apps.isEmpty) {
+          await Firebase.initializeApp(
+            options: DefaultFirebaseOptions.currentPlatform,
+          );
+        }
+      } catch (e) {
+        final msg = e.toString();
+        // ถ้าเป็น duplicate-app ให้ข้ามและใช้อินสแตนซ์เดิม
+        if (!(msg.contains('duplicate-app') ||
+            msg.contains('already exists'))) {
+          runApp(ErrorApp(error: msg));
+          return;
+        }
       }
 
-      // พยายามดึงโทเคน (ช่วยให้เห็น debug token ใน log ครั้งแรก)
+      // พยายามเปิดใช้ App Check แต่ถ้าล้มเหลว/ช้าเกินไป ให้ไปต่อได้
       try {
         await FirebaseAppCheck.instance
-            .getToken(true)
-            .timeout(const Duration(seconds: 5));
+            .activate(
+              // ถ้ากำหนด APP_CHECK_DEBUG=true จะบังคับใช้ Debug provider
+              androidProvider: kAppCheckForceDebug
+                  ? AndroidProvider.debug
+                  : (kReleaseMode
+                        ? AndroidProvider.playIntegrity
+                        : AndroidProvider.debug),
+            )
+            .timeout(const Duration(seconds: 5)); // กันค้าง
+        await FirebaseAppCheck.instance.setTokenAutoRefreshEnabled(true);
+
+        // เพิ่ม: พิมพ์ Debug Token ออกมาใน Console ทุกครั้งที่แอปเริ่มทำงาน (เฉพาะ Debug Mode)
+        if (kDebugMode || kAppCheckForceDebug) {
+          FirebaseAppCheck.instance.onTokenChange.listen((token) {
+            debugPrint('App Check Debug Token: $token');
+          });
+        }
+
+        // พยายามดึงโทเคน (ช่วยให้เห็น debug token ใน log ครั้งแรก)
+        try {
+          await FirebaseAppCheck.instance
+              .getToken(true)
+              .timeout(const Duration(seconds: 5));
+        } catch (e) {
+          debugPrint('Could not get App Check token on startup: $e');
+        }
       } catch (e) {
-        debugPrint('Could not get App Check token on startup: $e');
+        // กลืนทุก error ของ App Check เพื่อให้แอปรันได้ก่อน
+        if (kDebugMode || kAppCheckForceDebug) {
+          debugPrint('App Check activate failed: $e');
+        }
       }
-    } catch (e) {
-      // กลืนทุก error ของ App Check เพื่อให้แอปรันได้ก่อน
-      if (kDebugMode || kAppCheckForceDebug) {
-        debugPrint('App Check activate failed: $e');
-      }
-    }
 
-    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandlerVan1);
+      FirebaseMessaging.onBackgroundMessage(
+        firebaseMessagingBackgroundHandlerVan1,
+      );
 
-    runApp(const MyApp());
+      runApp(const MyApp());
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_initializeNotificationsAfterAppStart());
-    });
-  }, (error, stack) {
-    // เก็บ/แสดง log ได้ตามต้องการ
-  });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_initializeNotificationsAfterAppStart());
+      });
+    },
+    (error, stack) {
+      // เก็บ/แสดง log ได้ตามต้องการ
+    },
+  );
 }
 
 Future<void> _initializeNotificationsAfterAppStart() async {
@@ -136,7 +142,11 @@ class ErrorApp extends StatelessWidget {
               children: [
                 Text(
                   'Error initializing Firebase:',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.red),
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red,
+                  ),
                 ),
                 SizedBox(height: 8),
                 Text(error),
@@ -152,13 +162,14 @@ class ErrorApp extends StatelessWidget {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
   static const String appFontFamily = 'Prompt';
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Van Merchant',
+      title: 'SHOP',
       debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,
       theme: ThemeData(
@@ -185,7 +196,9 @@ class MyApp extends StatelessWidget {
           style: ElevatedButton.styleFrom(
             foregroundColor: Colors.white,
             backgroundColor: AppColors.accentDark,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
             textStyle: const TextStyle(
               fontSize: 16,
@@ -203,11 +216,13 @@ class MyApp extends StatelessWidget {
         '/welcome': (context) => const WelcomeScreen(),
         '/register-shop-next': (context) => const RegisterShopNextScreen(),
         '/login': (context) {
-          final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
+          final serviceType =
+              ModalRoute.of(context)?.settings.arguments as String?;
           return LoginScreen(serviceType: serviceType);
         },
         '/register': (context) {
-          final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
+          final serviceType =
+              ModalRoute.of(context)?.settings.arguments as String?;
           return RegisterScreen(serviceType: serviceType);
         },
         '/forgot': (context) => const ForgotPasswordScreen(),
@@ -218,32 +233,35 @@ class MyApp extends StatelessWidget {
           return EmailVerificationHelper(prefilledEmail: email);
         },
         '/post-verification-intro': (context) {
-          final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
+          final serviceType =
+              ModalRoute.of(context)?.settings.arguments as String?;
           return PostVerificationIntroScreen(serviceType: serviceType);
         },
         '/contract-intro': (context) => const RegisterShopBlankScreen(),
         '/contract': (context) {
-          final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
+          final serviceType =
+              ModalRoute.of(context)?.settings.arguments as String?;
           return ContractScreen(serviceType: serviceType);
         },
         '/shop-registration': (context) {
-          final serviceType = ModalRoute.of(context)?.settings.arguments as String?;
+          final serviceType =
+              ModalRoute.of(context)?.settings.arguments as String?;
           return ShopRegistrationScreen(serviceType: serviceType);
         },
         '/home': (context) => const HomeScreen(),
       },
       home: kDisableAppUpdateGate
           ? _buildAuthTree()
-          : AppUpdateGate(
-              allowSkipForMandatory: true,
-              child: _buildAuthTree(),
-            ),
+          : AppUpdateGate(allowSkipForMandatory: true, child: _buildAuthTree()),
     );
   }
 
   Widget _buildAuthTree() {
     return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges().handleError((e, stackTrace) {
+      stream: FirebaseAuth.instance.authStateChanges().handleError((
+        e,
+        stackTrace,
+      ) {
         debugPrint('Error in authStateChanges stream: $e');
       }, test: (e) => true),
       builder: (context, snapshot) {
@@ -251,7 +269,9 @@ class MyApp extends StatelessWidget {
           return const WelcomeScreen();
         }
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
         }
         return snapshot.hasData ? const AuthWrapper() : const WelcomeScreen();
       },
@@ -278,13 +298,22 @@ class _AuthWrapperState extends State<AuthWrapper> {
     if (user != null && mounted) {
       // อัปเดต FCM token อัตโนมัติหลัง login
       await NotificationService().saveUserFcmToken(user.uid);
+      if (!mounted) return;
       // ใช้ NavigationHelper เพื่อตรวจสอบและนำทาง
-      await NavigationHelper.navigateBasedOnUserStatus(context, user, replace: true);
+      await NavigationHelper.navigateBasedOnUserStatus(
+        context,
+        user,
+        replace: true,
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final logoSize = (MediaQuery.sizeOf(context).shortestSide * 0.86)
+        .clamp(120.0, 360.0)
+        .toDouble();
+
     // แสดงหน้าจอ Loading ขณะกำลังตรวจสอบและนำทาง
     return Scaffold(
       body: Center(
@@ -292,7 +321,11 @@ class _AuthWrapperState extends State<AuthWrapper> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             // โลโก้ (เปลี่ยนชื่อไฟล์ตาม asset ที่มี)
-            Image.asset('assets/file_000000008fc872089268acc9b04e5bcf.png', width: 120, height: 120),
+            Image.asset(
+              'assets/file_00000000be5472069245fc3bdb122dbb.png',
+              width: logoSize,
+              height: logoSize,
+            ),
             const SizedBox(height: 24),
             const CircularProgressIndicator(),
             const SizedBox(height: 16),
@@ -303,4 +336,3 @@ class _AuthWrapperState extends State<AuthWrapper> {
     );
   }
 }
-

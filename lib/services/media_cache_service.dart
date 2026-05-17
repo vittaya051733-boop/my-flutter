@@ -62,10 +62,27 @@ class MediaCacheService {
     return null;
   }
 
+  /// Remove the cached file and index entry for a single remote [url].
+  Future<void> remove(String url) async {
+    if (url.isEmpty) return;
+    await _ensureIndexLoaded();
+    final existingPath = _index.remove(url);
+    if (existingPath != null) {
+      final file = File(existingPath);
+      if (await file.exists()) {
+        try {
+          await file.delete();
+        } catch (_) {
+          // Ignore local cache cleanup failures.
+        }
+      }
+    }
+    await _persistIndex();
+  }
+
   /// Clear every cached file and index entry. Useful for logouts.
   Future<void> clear() async {
-    _index
-      ..clear();
+    _index.clear();
     _indexLoaded = true;
     final baseDir = await getApplicationDocumentsDirectory();
     final cacheDir = Directory(p.join(baseDir.path, 'media_cache'));

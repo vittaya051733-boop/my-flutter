@@ -807,9 +807,13 @@ class NotificationService {
       }
 
       final order = DetailedOrder.fromSnapshot(snapshot);
+      final driverId = (data['driverId'] as String?)?.trim() ?? '';
       final bool awaitingShopDecision =
-          order.status == 'pending' ||
-          (order.status == 'accepted' && order.preparingStartTime == null);
+          (order.status == 'accepted' &&
+          driverId.isNotEmpty &&
+          order.preparingStartTime == null &&
+          data['shopDecisionStatus'] != 'rejected' &&
+          data['shopRejectedAt'] == null);
       return awaitingShopDecision ? order : null;
     } catch (error) {
       debugPrint('Failed to load actionable order $orderId: $error');
@@ -819,21 +823,43 @@ class NotificationService {
 
   Future<void> _acceptShopOrder(DetailedOrder order) async {
     final now = DateTime.now();
+    final preparationMinutes = (order.preparingDuration / 60000)
+        .ceil()
+        .clamp(1, 240)
+        .toDouble();
     final updatedOrder = order.copyWith(
       status: 'preparing',
       acceptedAt: now,
       preparingStartTime: now,
       notifications: <String, NotificationStatus>{
-        'firstWarning': NotificationStatus(sent: false, timeInMinutes: 5),
-        'secondWarning': NotificationStatus(sent: false, timeInMinutes: 7.5),
-        'finalWarning': NotificationStatus(sent: false, timeInMinutes: 10),
+        'firstWarning': NotificationStatus(
+          sent: false,
+          timeInMinutes: preparationMinutes * 0.5,
+        ),
+        'secondWarning': NotificationStatus(
+          sent: false,
+          timeInMinutes: preparationMinutes * 0.75,
+        ),
+        'finalWarning': NotificationStatus(
+          sent: false,
+          timeInMinutes: preparationMinutes,
+        ),
       },
     );
 
     await FirebaseFirestore.instance
         .collection('orders')
         .doc(order.orderId)
-        .update(updatedOrder.toMap());
+        .update(<String, dynamic>{
+          ...updatedOrder.toMap(),
+          'shopDecisionStatus': 'accepted',
+          'shopAcceptedAt': Timestamp.fromDate(now),
+          'shopRejectedAt': FieldValue.delete(),
+          'shopRejectedBy': FieldValue.delete(),
+          'customerShopChoice': FieldValue.delete(),
+          'customerShopWaitUntil': FieldValue.delete(),
+          'customerShopWaitRequestedAt': FieldValue.delete(),
+        });
 
     await _sendOrderAppNotification(
       targetApp: 'van3',
@@ -851,8 +877,12 @@ class NotificationService {
         .collection('orders')
         .doc(order.orderId)
         .update(<String, dynamic>{
-          'status': 'cancelled',
-          'updatedAt': Timestamp.now(),
+          'status': order.status == 'accepted' ? 'accepted' : 'pending',
+          'shopDecisionStatus': 'rejected',
+          'shopRejectedAt': FieldValue.serverTimestamp(),
+          'shopRejectedBy': FirebaseAuth.instance.currentUser?.uid,
+          'cancelReason': 'shop_rejected_waiting_customer_decision',
+          'updatedAt': FieldValue.serverTimestamp(),
         });
 
     await _sendOrderAppNotification(
@@ -861,7 +891,16 @@ class NotificationService {
       orderId: order.orderId,
       title: 'ร้านปฏิเสธออเดอร์',
       body:
-          'ออเดอร์ #${order.orderId.substring(0, order.orderId.length >= 8 ? 8 : order.orderId.length)} ถูกยกเลิกโดยร้านค้า',
+          'ออเดอร์ #${order.orderId.substring(0, order.orderId.length >= 8 ? 8 : order.orderId.length)} รอลูกค้าเลือกรอหรือแคนเซิล',
+      action: 'shop_rejected_order',
+    );
+
+    await _sendOrderAppNotification(
+      targetApp: 'van2',
+      recipientUid: order.customerId,
+      orderId: order.orderId,
+      title: 'ร้านค้าปฏิเสธออเดอร์',
+      body: 'เลือกรออีก 15 นาทีหรือแคนเซิลออเดอร์ได้ในการ์ดออเดอร์',
       action: 'shop_rejected_order',
     );
   }

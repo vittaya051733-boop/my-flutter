@@ -433,6 +433,9 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget _buildIncomingContent() {
+    final displayName = widget.targetProfile.displayName.trim();
+    final displayInitial =
+        displayName.isNotEmpty ? displayName.characters.first.toUpperCase() : '?';
     return Container(
       width: double.infinity,
       decoration: const BoxDecoration(
@@ -468,7 +471,7 @@ class _CallScreenState extends State<CallScreen> {
                   ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
                     : Center(
                         child: Text(
-                          widget.targetProfile.displayName.characters.first.toUpperCase(),
+                          displayInitial,
                           style: const TextStyle(fontSize: 64, color: Colors.white70, fontWeight: FontWeight.w600),
                         ),
                       ),
@@ -610,6 +613,9 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget _buildCallingStatus() {
+    final displayName = widget.targetProfile.displayName.trim();
+    final displayInitial =
+        displayName.isNotEmpty ? displayName.characters.first.toUpperCase() : '?';
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -622,7 +628,7 @@ class _CallScreenState extends State<CallScreen> {
               ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
                 : Center(
                     child: Text(
-                      widget.targetProfile.displayName.characters.first.toUpperCase(),
+                      displayInitial,
                       style: const TextStyle(fontSize: 64, color: Colors.white70, fontWeight: FontWeight.w600),
                     ),
                   ),

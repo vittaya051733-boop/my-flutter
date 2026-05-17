@@ -27,6 +27,7 @@ service cloud.firestore {
         'shop_registrations',
         'restaurant_registrations',
         'pharmacy_registrations',
+        'agriculture_registrations',
         'other_registrations'
       ];
     }
@@ -181,6 +182,12 @@ service cloud.firestore {
     // ตั้งค่าการทำงานของร้าน
     match /shop_operations/{shopId} {
       allow read, write: if isSelf(shopId);
+    }
+
+    // โปรไฟล์ร้านแบบ public สำหรับลูกค้าใช้ดูชื่อ รูป และพิกัดล่าสุด
+    match /public_shops/{shopId} {
+      allow get, list: if signedIn();
+      allow create, update, delete: if isSelf(shopId);
     }
 
     // เครดิต
