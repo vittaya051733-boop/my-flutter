@@ -13,6 +13,7 @@ class WelcomeScreen extends StatelessWidget {
     final logoSize = (MediaQuery.sizeOf(context).shortestSide * 0.78)
         .clamp(100.0, 300.0)
         .toDouble();
+    const logoRadius = 18.0;
 
     return Scaffold(
       body: Container(
@@ -37,10 +38,10 @@ class WelcomeScreen extends StatelessWidget {
 
               // Logo or App Icon
               Container(
-                padding: const EdgeInsets.all(30),
+                padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  shape: BoxShape.circle,
+                  borderRadius: BorderRadius.circular(logoRadius),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withAlpha(51), // withOpacity(0.2)
@@ -50,7 +51,8 @@ class WelcomeScreen extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: ClipOval(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(logoRadius - 4),
                   child: Image.asset(
                     'assets/file_00000000be5472069245fc3bdb122dbb.png',
                     width: logoSize,

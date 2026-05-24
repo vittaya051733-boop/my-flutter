@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'models/order_model.dart';
 import 'models/user_profile.dart';
 import 'models/shop_operations_settings.dart';
@@ -10,6 +14,7 @@ import 'utils/rider_call_launcher.dart';
 import 'test_order_helper.dart';
 import 'order_qr_screen.dart';
 import 'chat_room_screen.dart';
+import 'services/notification_service.dart';
 import 'services/shop_operations_service.dart';
 
 class OrderManagementScreen extends StatefulWidget {
@@ -22,11 +27,51 @@ class OrderManagementScreen extends StatefulWidget {
 }
 
 class _OrderManagementScreenState extends State<OrderManagementScreen> {
+  static const int _lowStockThreshold = 5;
+  static const MethodChannel _voiceAudioChannel = MethodChannel(
+    'van.merchant/voice_audio',
+  );
+  static const double _voiceNoiseGateDelta = 3.5;
+  static const double _voiceNoiseGateMinimumPeak = 5.5;
+  static const double _voiceNoiseGateAmbientGain = 0.12;
   String? _shopId;
   ShopOperationsSettings _operationsSettings =
       ShopOperationsSettings.defaults();
   StreamSubscription<ShopOperationsSettings>? _operationsSubscription;
   final Set<String> _autoAcceptingOrders = <String>{};
+  final ScrollController _ordersScrollController = ScrollController();
+  final Map<String, GlobalKey> _orderCardKeys = <String, GlobalKey>{};
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  final ValueNotifier<_VoicePanelDisplay> _voicePanelDisplay =
+      ValueNotifier<_VoicePanelDisplay>(
+        const _VoicePanelDisplay(
+          enabled: false,
+          listening: false,
+          message: 'กดปุ่มไมค์เพื่อสั่งงานด้วยเสียง',
+          heardText: '',
+          correctionText: '',
+        ),
+      );
+  Timer? _voiceKeepAliveTimer;
+  final NotificationService _notificationService = NotificationService();
+
+  List<DetailedOrder> _visibleOrders = <DetailedOrder>[];
+  bool _showRetryAction = false;
+  bool _voiceReady = false;
+  bool _voiceAvailable = false;
+  bool _isListening = false;
+  bool _voiceSessionEnabled = false;
+  bool _isHandlingVoiceCommand = false;
+  bool _voiceRestartPending = false;
+  bool _nativeVoiceAudioPrepared = false;
+  DateTime? _lastVoiceStartAt;
+  double _voiceAmbientLevel = 0;
+  double _voicePeakLevel = 0;
+  int _voiceLevelSamples = 0;
+  String _voiceMessage = 'กดปุ่มไมค์เพื่อสั่งงานด้วยเสียง';
+  String _lastVoiceText = '';
+  String _voiceCorrectionText = '';
+  List<_VoiceCommandAction> _dialogVoiceActions = <_VoiceCommandAction>[];
 
   bool _shouldHideUnverifiedPromptPayOrder(Map<String, dynamic> data) {
     final paymentMethod = (data['paymentMethod'] as String?)?.trim() ?? '';
@@ -77,7 +122,769 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   @override
   void dispose() {
     _operationsSubscription?.cancel();
+    _voiceKeepAliveTimer?.cancel();
+    _ordersScrollController.dispose();
+    _speech.cancel();
+    _voicePanelDisplay.dispose();
+    unawaited(_restoreNativeVoiceAudio());
     super.dispose();
+  }
+
+  GlobalKey _orderCardKey(String orderId) {
+    return _orderCardKeys.putIfAbsent(
+      orderId,
+      () => GlobalKey(debugLabel: 'order-card-$orderId'),
+    );
+  }
+
+  String _normalizeVoiceText(String input) {
+    return input
+        .toLowerCase()
+        .replaceAll('คิวอาร์', 'qr')
+        .replaceAll(RegExp(r'[^a-z0-9ก-๙]+'), '');
+  }
+
+  Future<void> _prepareNativeVoiceAudio() async {
+    if (_nativeVoiceAudioPrepared) return;
+    try {
+      final result = await _voiceAudioChannel.invokeMapMethod<String, dynamic>(
+        'prepare_voice_audio',
+      );
+      _nativeVoiceAudioPrepared = true;
+      debugPrint('Voice audio prepared: $result');
+    } catch (error) {
+      debugPrint('Voice audio prepare failed: $error');
+    }
+  }
+
+  Future<void> _restoreNativeVoiceAudio() async {
+    if (!_nativeVoiceAudioPrepared) return;
+    _nativeVoiceAudioPrepared = false;
+    try {
+      await _voiceAudioChannel.invokeMethod<void>('restore_voice_audio');
+    } catch (error) {
+      debugPrint('Voice audio restore failed: $error');
+    }
+  }
+
+  void _setVoiceListeningUi({
+    required bool listening,
+    required String message,
+  }) {
+    if (!mounted) return;
+    if (_isListening == listening && _voiceMessage == message) return;
+    _isListening = listening;
+    _voiceMessage = message;
+    _publishVoicePanelDisplay();
+  }
+
+  void _setVoiceFeedback({
+    required String message,
+    String? heardText,
+    String? correctionText,
+  }) {
+    if (!mounted) return;
+    _voiceMessage = message;
+    if (heardText != null) {
+      _lastVoiceText = heardText;
+    }
+    if (correctionText != null) {
+      _voiceCorrectionText = correctionText;
+    }
+    _publishVoicePanelDisplay();
+  }
+
+  void _publishVoicePanelDisplay() {
+    _voicePanelDisplay.value = _VoicePanelDisplay(
+      enabled: _voiceSessionEnabled,
+      listening: _isListening,
+      message: _voiceMessage,
+      heardText: _lastVoiceText,
+      correctionText: _voiceCorrectionText,
+    );
+  }
+
+  void _startVoiceKeepAlive() {
+    _voiceKeepAliveTimer?.cancel();
+    _voiceKeepAliveTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_ensureVoiceKeepAlive());
+    });
+  }
+
+  void _stopVoiceKeepAlive() {
+    _voiceKeepAliveTimer?.cancel();
+    _voiceKeepAliveTimer = null;
+  }
+
+  Future<void> _ensureVoiceKeepAlive() async {
+    if (!mounted || !_voiceSessionEnabled || _isHandlingVoiceCommand) return;
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return;
+
+    final recentlyStarted =
+        _lastVoiceStartAt != null &&
+        DateTime.now().difference(_lastVoiceStartAt!) <
+            const Duration(seconds: 2);
+    if ((_isListening && !_voiceRestartPending) || recentlyStarted) return;
+
+    _voiceRestartPending = true;
+    await _startVoiceListening();
+  }
+
+  Future<void> _toggleVoiceSession() async {
+    if (_voiceSessionEnabled || _isListening) {
+      _voiceSessionEnabled = false;
+      _voiceRestartPending = false;
+      _stopVoiceKeepAlive();
+      try {
+        await _speech.stop();
+      } catch (error) {
+        debugPrint('Voice stop failed: $error');
+      }
+      await _restoreNativeVoiceAudio();
+      if (!mounted) return;
+      _isListening = false;
+      _voiceMessage = 'ปิดการฟังคำสั่งเสียงแล้ว';
+      _publishVoicePanelDisplay();
+      return;
+    }
+
+    final micAllowed = await _requestMicrophonePermission();
+    if (!micAllowed) return;
+
+    if (!_voiceReady) {
+      await _initVoiceCommands();
+    }
+    if (!_voiceAvailable) {
+      if (!mounted) return;
+      _setVoiceFeedback(message: 'ไม่พบระบบรับเสียงของเครื่อง');
+      return;
+    }
+
+    _voiceSessionEnabled = true;
+    _startVoiceKeepAlive();
+    await _prepareNativeVoiceAudio();
+    await _startVoiceListening();
+  }
+
+  Future<void> _initVoiceCommands() async {
+    try {
+      final available = await _speech.initialize(
+        onStatus: _handleSpeechStatus,
+        onError: (error) {
+          if (!mounted) return;
+          _voiceSessionEnabled = false;
+          _voiceRestartPending = false;
+          _stopVoiceKeepAlive();
+          _isListening = false;
+          _voiceMessage = 'ไมค์ยังฟังไม่ได้: ${error.errorMsg}';
+          _publishVoicePanelDisplay();
+          unawaited(_restoreNativeVoiceAudio());
+        },
+      );
+      if (!mounted) return;
+      _voiceReady = true;
+      _voiceAvailable = available;
+      _voiceMessage = available
+          ? 'พร้อมฟังคำสั่งเสียงตามชื่อปุ่ม'
+          : 'ไม่พบระบบรับเสียงของเครื่อง';
+      _publishVoicePanelDisplay();
+    } catch (error) {
+      if (!mounted) return;
+      _voiceReady = true;
+      _voiceAvailable = false;
+      _voiceMessage = 'เปิดระบบเสียงไม่สำเร็จ';
+      _publishVoicePanelDisplay();
+    }
+  }
+
+  void _handleSpeechStatus(String status) {
+    if (!mounted) return;
+    if (status == 'done' || status == 'notListening') {
+      if (_voiceSessionEnabled && !_isHandlingVoiceCommand) {
+        _voiceRestartPending = true;
+        Future<void>.delayed(
+          const Duration(milliseconds: 250),
+          _restartVoiceListeningIfNeeded,
+        );
+        return;
+      }
+      _voiceRestartPending = false;
+      _isListening = false;
+      _publishVoicePanelDisplay();
+      if (!_voiceSessionEnabled) {
+        unawaited(_restoreNativeVoiceAudio());
+      }
+    }
+  }
+
+  Future<void> _restartVoiceListeningIfNeeded() async {
+    if (!mounted || !_voiceSessionEnabled || _isHandlingVoiceCommand) {
+      _voiceRestartPending = false;
+      return;
+    }
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) {
+      _voiceRestartPending = false;
+      return;
+    }
+    await _ensureVoiceKeepAlive();
+  }
+
+  Future<void> _startVoiceListening() async {
+    if (!mounted || !_voiceAvailable) {
+      _voiceRestartPending = false;
+      return;
+    }
+    if (_isListening && !_voiceRestartPending) {
+      return;
+    }
+
+    _voiceRestartPending = false;
+    _lastVoiceStartAt = DateTime.now();
+    await _prepareNativeVoiceAudio();
+    _setVoiceListeningUi(
+      listening: true,
+      message: 'เปิดฟังตลอดเวลา รอชื่อปุ่ม',
+    );
+    _resetVoiceNoiseGate();
+
+    try {
+      await _speech.listen(
+        localeId: 'th_TH',
+        listenFor: const Duration(hours: 1),
+        pauseFor: const Duration(seconds: 6),
+        partialResults: true,
+        cancelOnError: false,
+        onSoundLevelChange: _trackVoiceSoundLevel,
+        listenMode: stt.ListenMode.confirmation,
+        onResult: (result) {
+          final words = result.recognizedWords.trim();
+          if (words.isEmpty) return;
+          _handleVoiceResult(words, isFinal: result.finalResult);
+        },
+      );
+    } catch (error) {
+      debugPrint('Voice listen failed: $error');
+      if (!mounted) return;
+      _voiceRestartPending = false;
+      _voiceSessionEnabled = false;
+      await _restoreNativeVoiceAudio();
+      _isListening = false;
+      _voiceMessage = 'เริ่มฟังคำสั่งเสียงไม่สำเร็จ';
+      _publishVoicePanelDisplay();
+    }
+  }
+
+  void _resetVoiceNoiseGate() {
+    _voiceAmbientLevel = 0;
+    _voicePeakLevel = 0;
+    _voiceLevelSamples = 0;
+  }
+
+  void _trackVoiceSoundLevel(double level) {
+    if (!level.isFinite) return;
+    final sanitized = level < 0 ? 0.0 : level;
+    if (sanitized > _voicePeakLevel) {
+      _voicePeakLevel = sanitized;
+    }
+
+    final shouldLearnAmbient =
+        _voiceLevelSamples < 5 ||
+        sanitized <= (_voiceAmbientLevel + (_voiceNoiseGateDelta / 2));
+    if (!shouldLearnAmbient) {
+      return;
+    }
+
+    if (_voiceLevelSamples == 0) {
+      _voiceAmbientLevel = sanitized;
+    } else {
+      _voiceAmbientLevel = (_voiceAmbientLevel * 0.8) + (sanitized * 0.2);
+    }
+    _voiceLevelSamples++;
+  }
+
+  bool _passesVoiceNoiseGate() {
+    final requiredPeak = math.max(
+      _voiceNoiseGateMinimumPeak,
+      _voiceAmbientLevel +
+          _voiceNoiseGateDelta +
+          (_voiceAmbientLevel * _voiceNoiseGateAmbientGain),
+    );
+    return _voicePeakLevel >= requiredPeak;
+  }
+
+  Future<bool> _requestMicrophonePermission() async {
+    final status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+
+    final requested = await Permission.microphone.request();
+    if (requested.isGranted) return true;
+
+    if (!mounted) return false;
+    _voiceReady = false;
+    _voiceAvailable = false;
+    _voiceSessionEnabled = false;
+    _isListening = false;
+    _voiceMessage = requested.isPermanentlyDenied
+        ? 'กรุณาเปิดสิทธิ์ไมค์ในตั้งค่าเครื่องก่อนใช้คำสั่งเสียง'
+        : 'ต้องอนุญาตไมค์ก่อนใช้คำสั่งเสียง';
+    _publishVoicePanelDisplay();
+    return false;
+  }
+
+  Future<void> _scrollOrdersBy(double delta) async {
+    if (!_ordersScrollController.hasClients) {
+      return;
+    }
+    final position = _ordersScrollController.position;
+    final target = (position.pixels + delta).clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    await _ordersScrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOut,
+    );
+  }
+
+  DetailedOrder? _currentVoiceTargetOrder() {
+    if (_visibleOrders.isEmpty) {
+      return null;
+    }
+
+    final topInset = MediaQuery.of(context).padding.top + kToolbarHeight + 8;
+    final bottomLimit = MediaQuery.of(context).size.height - 120;
+    DetailedOrder? bestOrder;
+    double? bestScore;
+
+    for (final order in _visibleOrders) {
+      final contextForKey = _orderCardKeys[order.orderId]?.currentContext;
+      if (contextForKey == null) continue;
+      final renderObject = contextForKey.findRenderObject();
+      if (renderObject is! RenderBox || !renderObject.hasSize) continue;
+
+      final top = renderObject.localToGlobal(Offset.zero).dy;
+      final bottom = top + renderObject.size.height;
+      final isVisible = bottom > topInset && top < bottomLimit;
+      if (!isVisible) continue;
+
+      final score = top < topInset ? topInset - top : top - topInset;
+      if (bestScore == null || score < bestScore) {
+        bestScore = score;
+        bestOrder = order;
+      }
+    }
+
+    return bestOrder ?? _visibleOrders.first;
+  }
+
+  Future<void> _openOrderQr(DetailedOrder order) async {
+    unawaited(
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => OrderQRScreen(order: order)),
+      ),
+    );
+  }
+
+  Future<void> _chatVisibleOrderRider() async {
+    final order = _currentVoiceTargetOrder();
+    if (order == null) {
+      _setVoiceMessage('ไม่มีออเดอร์ที่พร้อมให้แชทไรเดอร์');
+      return;
+    }
+    final state = await _loadRiderContactState(order);
+    final hasRiderId = order.driverId?.trim().isNotEmpty ?? false;
+    if (!hasRiderId || state.profile == null) {
+      _setVoiceMessage('ออเดอร์นี้ยังแชทไรเดอร์ไม่ได้');
+      return;
+    }
+    unawaited(
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ChatRoomScreen(friendProfile: state.profile!),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleVoiceBackNavigation() async {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final didPop = await navigator.maybePop();
+    if (!didPop && mounted) {
+      _setVoiceMessage('ไม่มีหน้าก่อนหน้าให้ย้อนกลับ');
+    }
+  }
+
+  Future<void> _callVisibleOrderRider() async {
+    final order = _currentVoiceTargetOrder();
+    if (order == null) {
+      _setVoiceMessage('ไม่มีออเดอร์ที่พร้อมให้โทรไรเดอร์');
+      return;
+    }
+    final state = await _loadRiderContactState(order);
+    final canCall =
+        (order.driverId?.trim().isNotEmpty ?? false) ||
+        (state.phone?.trim().isNotEmpty ?? false);
+    if (!canCall) {
+      _setVoiceMessage('ออเดอร์นี้ยังโทรไรเดอร์ไม่ได้');
+      return;
+    }
+    await RiderCallLauncher.startVoiceCall(
+      context: context,
+      riderProfile: state.profile,
+      fallbackPhone: state.phone,
+    );
+  }
+
+  void _setVoiceMessage(String message) {
+    if (!mounted) return;
+    _voiceMessage = message;
+    _publishVoicePanelDisplay();
+  }
+
+  void _armRejectDialogVoiceCommands() {
+    if (!mounted) return;
+    setState(() {
+      _dialogVoiceActions = <_VoiceCommandAction>[
+        _VoiceCommandAction(
+          label: 'ยกเลิก',
+          phrases: const <String>['ยกเลิก'],
+          onTrigger: () async {
+            Navigator.of(context, rootNavigator: true).pop(false);
+          },
+        ),
+        _VoiceCommandAction(
+          label: 'ปฏิเสธ',
+          phrases: const <String>['ปฏิเสธ'],
+          onTrigger: () async {
+            Navigator.of(context, rootNavigator: true).pop(true);
+          },
+        ),
+      ];
+    });
+    _voiceMessage = 'ยืนยันการปฏิเสธ: พูด ยกเลิก หรือ ปฏิเสธ';
+    _publishVoicePanelDisplay();
+  }
+
+  void _clearDialogVoiceCommands() {
+    if (!mounted) return;
+    setState(() {
+      _dialogVoiceActions = <_VoiceCommandAction>[];
+    });
+    _voiceMessage = 'พร้อมฟังคำสั่งตามชื่อปุ่ม';
+    _publishVoicePanelDisplay();
+  }
+
+  List<_VoiceCommandAction> _buildVoiceActions() {
+    final actions = <_VoiceCommandAction>[
+      ..._dialogVoiceActions,
+      _VoiceCommandAction(
+        label: 'ย้อนกลับ',
+        phrases: const <String>['ย้อนกลับ', 'กลับ', 'back'],
+        onTrigger: _handleVoiceBackNavigation,
+      ),
+      _VoiceCommandAction(
+        label: 'สร้างออเดอร์ทดสอบ',
+        phrases: const <String>[
+          'สร้างออเดอร์ทดสอบ',
+          'ออเดอร์ทดสอบ',
+          'สร้างเทสออเดอร์',
+        ],
+        onTrigger: _createTestOrder,
+      ),
+      _VoiceCommandAction(
+        label: 'เลื่อนขึ้น',
+        phrases: const <String>['เลื่อนขึ้น', 'ขึ้น', 'scrollup'],
+        onTrigger: () => _scrollOrdersBy(-320),
+      ),
+      _VoiceCommandAction(
+        label: 'เลื่อนลง',
+        phrases: const <String>['เลื่อนลง', 'ลง', 'scrolldown'],
+        onTrigger: () => _scrollOrdersBy(320),
+      ),
+    ];
+
+    if (_showRetryAction) {
+      actions.add(
+        _VoiceCommandAction(
+          label: 'ลองใหม่',
+          phrases: const <String>['ลองใหม่'],
+          onTrigger: () async {
+            setState(() {});
+          },
+        ),
+      );
+    }
+
+    actions.addAll(<_VoiceCommandAction>[
+      _VoiceCommandAction(
+        label: 'แชทไรเดอร์',
+        phrases: const <String>['แชทไรเดอร์', 'แชท'],
+        onTrigger: _chatVisibleOrderRider,
+      ),
+      _VoiceCommandAction(
+        label: 'โทรไรเดอร์',
+        phrases: const <String>['โทรไรเดอร์', 'โทรหาไรเดอร์'],
+        onTrigger: _callVisibleOrderRider,
+      ),
+      _VoiceCommandAction(
+        label: 'แสดง QR',
+        phrases: const <String>['แสดงqr', 'แสดงคิวอาร์', 'แสดงqrcode'],
+        onTrigger: () async {
+          final order = _currentVoiceTargetOrder();
+          if (order == null) {
+            _setVoiceMessage('ไม่มีออเดอร์สำหรับแสดง QR');
+            return;
+          }
+          await _openOrderQr(order);
+        },
+      ),
+      _VoiceCommandAction(
+        label: 'พิมพ์ QR',
+        phrases: const <String>['พิมพ์qr', 'พิมพ์คิวอาร์'],
+        onTrigger: () async {
+          final order = _currentVoiceTargetOrder();
+          if (order == null) {
+            _setVoiceMessage('ไม่มีออเดอร์สำหรับพิมพ์ QR');
+            return;
+          }
+          await printOrderQr(context, order);
+        },
+      ),
+      _VoiceCommandAction(
+        label: 'รับออเดอร์',
+        phrases: const <String>[
+          'รับออเดอร์',
+          'รับออเดอร์เข้า',
+          'ยืนยันออเดอร์',
+          'ตกลงรับออเดอร์',
+        ],
+        onTrigger: () async {
+          final order = _currentVoiceTargetOrder();
+          if (order == null || !_isAwaitingShopDecision(order)) {
+            _setVoiceMessage('ไม่พบปุ่ม รับออเดอร์ ในการ์ดที่อยู่บนจอ');
+            return;
+          }
+          await _acceptOrder(order);
+        },
+      ),
+      _VoiceCommandAction(
+        label: 'ปฏิเสธ',
+        phrases: const <String>[
+          'ปฏิเสธ',
+          'ปฏิเสธออเดอร์',
+          'ไม่รับออเดอร์',
+          'ยกเลิกออเดอร์',
+        ],
+        onTrigger: () async {
+          final order = _currentVoiceTargetOrder();
+          if (order == null || !_isAwaitingShopDecision(order)) {
+            _setVoiceMessage('ไม่พบปุ่ม ปฏิเสธ ในการ์ดที่อยู่บนจอ');
+            return;
+          }
+          await _rejectOrder(order);
+        },
+      ),
+      _VoiceCommandAction(
+        label: 'เตรียมสินค้าเสร็จสิ้น',
+        phrases: const <String>[
+          'เตรียมสินค้าเสร็จสิ้น',
+          'เตรียมเสร็จ',
+          'สินค้าพร้อมแล้ว',
+        ],
+        onTrigger: () async {
+          final order = _currentVoiceTargetOrder();
+          if (order == null ||
+              !<String>{'accepted', 'preparing'}.contains(order.status)) {
+            _setVoiceMessage(
+              'ไม่พบปุ่ม เตรียมสินค้าเสร็จสิ้น ในการ์ดที่อยู่บนจอ',
+            );
+            return;
+          }
+          await _markAsReady(order);
+        },
+      ),
+    ]);
+
+    return actions;
+  }
+
+  _VoiceCommandMatch? _findBestVoiceCommandMatch(String normalizedInput) {
+    _VoiceCommandMatch? bestMatch;
+    for (final action in _buildVoiceActions()) {
+      final match = action.match(normalizedInput, _normalizeVoiceText);
+      if (match == null) continue;
+      if (bestMatch == null || match.confidence > bestMatch.confidence) {
+        bestMatch = match;
+      }
+    }
+    return bestMatch;
+  }
+
+  Future<void> _handleVoiceResult(String words, {required bool isFinal}) async {
+    if (!mounted || _isHandlingVoiceCommand) return;
+    final heardText = words.trim();
+    if (heardText.isEmpty) return;
+
+    final normalized = _normalizeVoiceText(heardText);
+    final commandMatch = _findBestVoiceCommandMatch(normalized);
+    final correctionText = commandMatch == null
+        ? ''
+        : 'ได้ยิน: $heardText → ประเมินเป็น: ${commandMatch.action.label} (${(commandMatch.confidence * 100).round()}%)';
+
+    if (!isFinal) {
+      if (commandMatch != null && commandMatch.shouldTrigger) {
+        await _runMatchedVoiceCommand(commandMatch, heardText, correctionText);
+        return;
+      }
+      _setVoiceFeedback(
+        message: 'กำลังฟังคำพูด...',
+        heardText: heardText,
+        correctionText: '',
+      );
+      return;
+    }
+
+    if (commandMatch == null && !_passesVoiceNoiseGate()) {
+      _setVoiceFeedback(
+        message: 'เสียงรบกวนมากเกินไป ลองพูดใกล้ไมค์อีกครั้ง',
+        heardText: heardText,
+        correctionText: '',
+      );
+      return;
+    }
+
+    if (commandMatch == null || !commandMatch.shouldTrigger) {
+      _setVoiceFeedback(
+        message: commandMatch == null
+            ? 'ยังไม่ตรงกับชื่อปุ่ม'
+            : 'ใกล้เคียง ${commandMatch.action.label} แต่ยังไม่มั่นใจพอ',
+        heardText: heardText,
+        correctionText: correctionText,
+      );
+      return;
+    }
+
+    await _runMatchedVoiceCommand(commandMatch, heardText, correctionText);
+  }
+
+  Future<void> _runMatchedVoiceCommand(
+    _VoiceCommandMatch commandMatch,
+    String heardText,
+    String correctionText,
+  ) async {
+    if (!mounted || _isHandlingVoiceCommand) return;
+    final matchedAction = commandMatch.action;
+    _setVoiceFeedback(
+      message: commandMatch.isFuzzy
+          ? 'คำเพี้ยนเล็กน้อย กำลังทำ: ${matchedAction.label}'
+          : 'กำลังทำคำสั่ง: ${matchedAction.label}',
+      heardText: heardText,
+      correctionText: correctionText,
+    );
+
+    _isHandlingVoiceCommand = true;
+    _voiceRestartPending = true;
+    try {
+      await _speech.stop();
+    } catch (error) {
+      debugPrint('Voice stop before command failed: $error');
+    }
+
+    try {
+      await matchedAction.onTrigger();
+    } catch (error) {
+      _setVoiceMessage('ทำคำสั่ง ${matchedAction.label} ไม่สำเร็จ');
+      debugPrint('Voice command failed: $error');
+    } finally {
+      _isHandlingVoiceCommand = false;
+      if (mounted && _voiceSessionEnabled) {
+        _setVoiceListeningUi(
+          listening: true,
+          message: 'เปิดฟังตลอดเวลา รอชื่อปุ่มถัดไป',
+        );
+        Future<void>.delayed(
+          const Duration(milliseconds: 250),
+          _restartVoiceListeningIfNeeded,
+        );
+      }
+    }
+  }
+
+  Widget _buildVoiceCommandPanel() {
+    return SafeArea(
+      top: false,
+      child: ValueListenableBuilder<_VoicePanelDisplay>(
+        valueListenable: _voicePanelDisplay,
+        builder: (context, display, _) {
+          return Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+            ),
+            child: Row(
+              children: [
+                IconButton.filledTonal(
+                  onPressed: _toggleVoiceSession,
+                  icon: Icon(
+                    display.enabled || display.listening
+                        ? Icons.mic_rounded
+                        : Icons.mic_none_rounded,
+                  ),
+                  tooltip: display.enabled
+                      ? 'หยุดฟังคำสั่งเสียง'
+                      : 'เริ่มฟังคำสั่งเสียง',
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        display.message,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        display.heardText.trim().isNotEmpty
+                            ? 'คำที่พูด: ${display.heardText.trim()}'
+                            : 'เปิดไว้ได้ตลอด พูดชื่อปุ่ม เช่น รับออเดอร์, ปฏิเสธ, แสดง QR, เลื่อนลง',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                      if (display.correctionText.trim().isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          display.correctionText.trim(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppColors.accent,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _loadShopId() async {
@@ -132,19 +939,21 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          onPressed: () {
+            Navigator.of(
+              context,
+            ).pushNamedAndRemoveUntil('/home', (route) => false);
+          },
+          icon: const Icon(Icons.arrow_back),
+          tooltip: 'กลับหน้าแรก',
+        ),
         title: const Text('จัดการออเดอร์'),
         backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
-        actions: [
-          // ปุ่มสร้างออเดอร์ทดสอบ
-          IconButton(
-            onPressed: _createTestOrder,
-            icon: const Icon(Icons.add_circle_outline),
-            tooltip: 'สร้างออเดอร์ทดสอบ',
-          ),
-        ],
       ),
       backgroundColor: Colors.white,
+      bottomNavigationBar: _buildVoiceCommandPanel(),
       body: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
             .collection('orders')
@@ -153,6 +962,8 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         builder: (context, snapshot) {
           // Debug: แสดง error ถ้ามี
           if (snapshot.hasError) {
+            _showRetryAction = true;
+            _visibleOrders = <DetailedOrder>[];
             print('❌ Firestore Error: ${snapshot.error}');
             return Center(
               child: Column(
@@ -172,6 +983,8 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           }
 
           if (snapshot.connectionState == ConnectionState.waiting) {
+            _showRetryAction = false;
+            _visibleOrders = <DetailedOrder>[];
             return const Center(child: CircularProgressIndicator());
           }
 
@@ -180,6 +993,8 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           print('🔑 Current shopId: $_shopId');
 
           if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            _showRetryAction = false;
+            _visibleOrders = <DetailedOrder>[];
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -236,11 +1051,14 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           }
 
           _maybeAutoAcceptAwaitingShopDecisionOrders(orders);
+          _showRetryAction = false;
+          _visibleOrders = orders;
 
           final hasPauseBanner = _operationsSettings.pauseNewOrders;
           final itemCount = orders.length + (hasPauseBanner ? 1 : 0);
 
           return ListView.builder(
+            controller: _ordersScrollController,
             padding: const EdgeInsets.all(16),
             itemCount: itemCount,
             itemBuilder: (context, index) {
@@ -262,6 +1080,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     final isFocused =
         widget.focusOrderId != null && widget.focusOrderId == order.orderId;
     return Card(
+      key: _orderCardKey(order.orderId),
       margin: const EdgeInsets.only(bottom: 16),
       elevation: 3,
       shape: RoundedRectangleBorder(
@@ -978,6 +1797,94 @@ extension on _OrderManagementScreenState {
     });
   }
 
+  int _readProductStock(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+    if (value is String) {
+      return int.tryParse(value.trim()) ?? 0;
+    }
+    return 0;
+  }
+
+  Future<List<String>> _markOrderReadyAndDeductStock(DetailedOrder order) {
+    return FirebaseFirestore.instance.runTransaction<List<String>>((
+      transaction,
+    ) async {
+      final orderRef = FirebaseFirestore.instance
+          .collection('orders')
+          .doc(order.orderId);
+      final orderSnapshot = await transaction.get(orderRef);
+      final orderData = orderSnapshot.data();
+      final currentStatus = orderData?['status']?.toString() ?? '';
+      if (!<String>{'accepted', 'preparing'}.contains(currentStatus)) {
+        throw StateError('order-not-ready-transition');
+      }
+
+      final Map<String, int> mergedQuantities = <String, int>{};
+      final Map<String, String> productNames = <String, String>{};
+      for (final item in order.items) {
+        final productId = item.productId.trim();
+        if (productId.isEmpty) continue;
+        mergedQuantities.update(
+          productId,
+          (value) => value + item.quantity,
+          ifAbsent: () => item.quantity,
+        );
+        productNames.putIfAbsent(productId, () => item.productName.trim());
+      }
+
+      final productRefs = <String, DocumentReference<Map<String, dynamic>>>{};
+      final productSnapshots =
+          <String, DocumentSnapshot<Map<String, dynamic>>>{};
+      for (final productId in mergedQuantities.keys) {
+        final productRef = FirebaseFirestore.instance
+            .collection('products')
+            .doc(productId);
+        productRefs[productId] = productRef;
+        productSnapshots[productId] = await transaction.get(productRef);
+      }
+
+      final List<String> lowStockAlerts = <String>[];
+      final stockUpdates = <String, int>{};
+      for (final entry in mergedQuantities.entries) {
+        final productSnapshot = productSnapshots[entry.key];
+        if (productSnapshot == null || !productSnapshot.exists) {
+          continue;
+        }
+        final data = productSnapshot.data();
+        final currentStock = _readProductStock(data?['stock']);
+        final remainingStock = math.max(0, currentStock - entry.value);
+        stockUpdates[entry.key] = remainingStock;
+        if (_operationsSettings.notifyLowStock &&
+            remainingStock < _OrderManagementScreenState._lowStockThreshold) {
+          final name = (data?['name']?.toString().trim().isNotEmpty ?? false)
+              ? data!['name'].toString().trim()
+              : (productNames[entry.key]?.isNotEmpty ?? false)
+              ? productNames[entry.key]!
+              : entry.key;
+          lowStockAlerts.add('$name เหลือ $remainingStock ชิ้น');
+        }
+      }
+
+      final now = DateTime.now();
+      transaction.update(orderRef, {
+        'status': 'ready',
+        'readyAt': Timestamp.fromDate(now),
+        'updatedAt': Timestamp.now(),
+      });
+
+      for (final entry in stockUpdates.entries) {
+        transaction.update(productRefs[entry.key]!, {
+          'stock': entry.value,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      return lowStockAlerts;
+    });
+  }
+
   Widget _buildActionButtons(DetailedOrder order) {
     if (_isAwaitingShopDecision(order)) {
       return Row(
@@ -1123,6 +2030,8 @@ extension on _OrderManagementScreenState {
   }
 
   Future<void> _rejectOrder(DetailedOrder order) async {
+    _armRejectDialogVoiceCommands();
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1141,6 +2050,8 @@ extension on _OrderManagementScreenState {
         ],
       ),
     );
+
+    _clearDialogVoiceCommands();
 
     if (confirmed == true) {
       try {
@@ -1195,25 +2106,25 @@ extension on _OrderManagementScreenState {
 
   Future<void> _markAsReady(DetailedOrder order) async {
     try {
-      final now = DateTime.now();
-      await FirebaseFirestore.instance
-          .collection('orders')
-          .doc(order.orderId)
-          .update({
-            'status': 'ready',
-            'readyAt': Timestamp.fromDate(now),
-            'updatedAt': Timestamp.now(),
-          });
+      final lowStockAlerts = await _markOrderReadyAndDeductStock(order);
 
-      await _sendOrderAppNotification(
-        targetApp: 'van3',
-        recipientUid: order.driverId,
-        orderId: order.orderId,
-        title: 'ร้านเตรียมสินค้าเสร็จแล้ว',
-        body:
-            'ออเดอร์ #${order.orderId.substring(0, 8)} พร้อมให้ไรเดอร์รับสินค้า',
-        action: 'shop_ready_for_pickup',
-      );
+      if (lowStockAlerts.isNotEmpty) {
+        unawaited(
+          _notificationService
+              .createInboxNotification(
+                title: 'เตือนสต๊อกใกล้หมด',
+                body: lowStockAlerts.join(', '),
+                orderId: order.orderId,
+                action: 'low_stock_alert',
+              )
+              .catchError((Object error, StackTrace stackTrace) {
+                debugPrint(
+                  'Low-stock inbox notification failed for order '
+                  '${order.orderId}: $error',
+                );
+              }),
+        );
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1222,6 +2133,41 @@ extension on _OrderManagementScreenState {
             backgroundColor: Colors.green,
           ),
         );
+        if (lowStockAlerts.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('เตือนสต๊อกใกล้หมด: ${lowStockAlerts.join(', ')}'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+
+      try {
+        await _sendOrderAppNotification(
+          targetApp: 'van3',
+          recipientUid: order.driverId,
+          orderId: order.orderId,
+          title: 'ร้านเตรียมสินค้าเสร็จแล้ว',
+          body:
+              'ออเดอร์ #${order.orderId.substring(0, 8)} พร้อมให้ไรเดอร์รับสินค้า',
+          action: 'shop_ready_for_pickup',
+        );
+      } catch (notificationError) {
+        debugPrint(
+          'Ready notification failed for order ${order.orderId}: $notificationError',
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'เปลี่ยนสถานะออเดอร์แล้ว แต่ยังส่งแจ้งเตือนไปไรเดอร์ไม่สำเร็จ',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1238,6 +2184,142 @@ extension on _OrderManagementScreenState {
   String _formatTime(DateTime dateTime) {
     return '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
   }
+}
+
+class _VoiceCommandAction {
+  const _VoiceCommandAction({
+    required this.label,
+    required this.phrases,
+    required this.onTrigger,
+  });
+
+  final String label;
+  final List<String> phrases;
+  final Future<void> Function() onTrigger;
+
+  _VoiceCommandMatch? match(
+    String normalizedInput,
+    String Function(String) normalize,
+  ) {
+    if (normalizedInput.isEmpty) return null;
+
+    _VoiceCommandMatch? bestMatch;
+    for (final phrase in phrases) {
+      final normalizedPhrase = normalize(phrase);
+      if (normalizedPhrase.isEmpty) continue;
+
+      final exact = normalizedInput.contains(normalizedPhrase);
+      final confidence = exact
+          ? 1.0
+          : _voiceSimilarity(normalizedInput, normalizedPhrase);
+      final candidate = _VoiceCommandMatch(
+        action: this,
+        phrase: phrase,
+        confidence: confidence,
+        isFuzzy: !exact,
+      );
+      if (bestMatch == null || candidate.confidence > bestMatch.confidence) {
+        bestMatch = candidate;
+      }
+    }
+    if (bestMatch == null || bestMatch.confidence < 0.45) return null;
+    return bestMatch;
+  }
+}
+
+class _VoicePanelDisplay {
+  const _VoicePanelDisplay({
+    required this.enabled,
+    required this.listening,
+    required this.message,
+    required this.heardText,
+    required this.correctionText,
+  });
+
+  final bool enabled;
+  final bool listening;
+  final String message;
+  final String heardText;
+  final String correctionText;
+}
+
+class _VoiceCommandMatch {
+  const _VoiceCommandMatch({
+    required this.action,
+    required this.phrase,
+    required this.confidence,
+    required this.isFuzzy,
+  });
+
+  final _VoiceCommandAction action;
+  final String phrase;
+  final double confidence;
+  final bool isFuzzy;
+
+  bool get shouldTrigger {
+    final normalizedPhraseLength = phrase.replaceAll(RegExp(r'\s+'), '').length;
+    final threshold = normalizedPhraseLength <= 4 ? 0.78 : 0.68;
+    return confidence >= threshold;
+  }
+}
+
+double _voiceSimilarity(String input, String phrase) {
+  if (input == phrase) return 1;
+  if (input.contains(phrase) || phrase.contains(input)) {
+    final shorter = math.min(input.length, phrase.length);
+    final longer = math.max(input.length, phrase.length);
+    if (longer == 0) return 0;
+    return shorter / longer;
+  }
+
+  final windowScore = input.length > phrase.length
+      ? _bestWindowSimilarity(input, phrase)
+      : 0.0;
+  final directDistance = _levenshteinDistance(input, phrase);
+  final directMax = math.max(input.length, phrase.length);
+  final directScore = directMax == 0 ? 0.0 : 1 - (directDistance / directMax);
+  return math.max(windowScore, directScore).clamp(0.0, 1.0);
+}
+
+double _bestWindowSimilarity(String input, String phrase) {
+  if (phrase.isEmpty || input.length < phrase.length) return 0;
+  var bestScore = 0.0;
+  final minWindow = math.max(1, phrase.length - 2);
+  final maxWindow = math.min(input.length, phrase.length + 2);
+  for (
+    var windowLength = minWindow;
+    windowLength <= maxWindow;
+    windowLength++
+  ) {
+    for (var start = 0; start <= input.length - windowLength; start++) {
+      final window = input.substring(start, start + windowLength);
+      final distance = _levenshteinDistance(window, phrase);
+      final maxLength = math.max(window.length, phrase.length);
+      final score = maxLength == 0 ? 0.0 : 1 - (distance / maxLength);
+      if (score > bestScore) bestScore = score;
+    }
+  }
+  return bestScore;
+}
+
+int _levenshteinDistance(String a, String b) {
+  if (a == b) return 0;
+  if (a.isEmpty) return b.length;
+  if (b.isEmpty) return a.length;
+
+  var previous = List<int>.generate(b.length + 1, (index) => index);
+  for (var i = 0; i < a.length; i++) {
+    final current = List<int>.filled(b.length + 1, 0);
+    current[0] = i + 1;
+    for (var j = 0; j < b.length; j++) {
+      final insertion = current[j] + 1;
+      final deletion = previous[j + 1] + 1;
+      final substitution = previous[j] + (a[i] == b[j] ? 0 : 1);
+      current[j + 1] = math.min(insertion, math.min(deletion, substitution));
+    }
+    previous = current;
+  }
+  return previous[b.length];
 }
 
 class _RiderContactState {

@@ -30,7 +30,8 @@ class EmailOtpService {
   static final EmailOtpService instance = EmailOtpService._();
   static const String _region = 'asia-southeast1';
 
-  FirebaseFunctions get _functions => FirebaseFunctions.instanceFor(region: _region);
+  FirebaseFunctions get _functions =>
+      FirebaseFunctions.instanceFor(region: _region);
 
   Future<EmailOtpSendResult> sendOtp() async {
     final result = await _functions.httpsCallable('sendEmailOtp').call();
@@ -44,17 +45,21 @@ class EmailOtpService {
   }
 
   Future<EmailOtpVerifyResult> verifyOtp(String code) async {
-    final result = await _functions.httpsCallable('verifyEmailOtp').call(<String, dynamic>{
-      'code': code.trim(),
-    });
+    final normalizedCode = code.trim();
+    final result = await _functions.httpsCallable('verifyEmailOtp').call(
+      <String, dynamic>{'otp': normalizedCode},
+    );
     final data = _asMap(result.data);
     return EmailOtpVerifyResult(
-      verified: data['verified'] == true,
+      verified: data['verified'] == true || data['success'] == true,
       alreadyVerified: data['alreadyVerified'] == true,
     );
   }
 
-  String mapError(Object error, {String fallback = 'เกิดข้อผิดพลาดในการยืนยันอีเมล'}) {
+  String mapError(
+    Object error, {
+    String fallback = 'เกิดข้อผิดพลาดในการยืนยันอีเมล',
+  }) {
     if (error is FirebaseFunctionsException) {
       final message = error.message?.trim();
       switch (error.code) {

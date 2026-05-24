@@ -8,6 +8,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'register_shop_next.dart';
 import 'contract_screen.dart';
+import 'services/branch_assignment_service.dart';
 import 'services/email_otp_service.dart';
 import 'services/notification_service.dart';
 import 'utils/app_colors.dart';
@@ -40,12 +41,14 @@ class RegisterScreen extends StatefulWidget {
 class _RegisterScreenState extends State<RegisterScreen> {
   static const String _androidServerClientId = String.fromEnvironment(
     'GOOGLE_ANDROID_SERVER_CLIENT_ID',
-    defaultValue: '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
+    defaultValue:
+        '802503541368-6sh9d08648ctf3e6ujlsd8l8400uu0ej.apps.googleusercontent.com',
   );
 
   static const String _iosClientId = String.fromEnvironment(
     'GOOGLE_IOS_CLIENT_ID',
-    defaultValue: '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
+    defaultValue:
+        '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
   );
 
   final TextEditingController _emailController = TextEditingController();
@@ -55,6 +58,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _isTypingPhoneNumber = false;
   bool _isSocialLoading = false;
   String? _socialLoadingKey;
+  BranchAssignment? _pendingBranchAssignment;
   final _debouncer = Debouncer(milliseconds: 300);
   List<MapEntry<String, String>> _countryCodeSuggestions = [];
 
@@ -81,7 +85,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
     // Expanded the local phone number regex to support more formats, including Japanese 11-digit numbers.
     // It now accepts numbers starting with '0' followed by 8 to 12 digits.
     final localPhoneRegex = RegExp(r'^0\d{8,12}$');
-    return internationalPhoneRegex.hasMatch(cleanInput) || localPhoneRegex.hasMatch(cleanInput);
+    return internationalPhoneRegex.hasMatch(cleanInput) ||
+        localPhoneRegex.hasMatch(cleanInput);
   }
 
   // Updated to handle Thai numbers specifically and assume others are either
@@ -121,8 +126,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
       try {
-        final doc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
-        final stored = _normalizeServiceType(doc.data()?['serviceType'] as String?);
+        final doc = await FirebaseFirestore.instance
+            .collection('contracts')
+            .doc(user.uid)
+            .get();
+        final stored = _normalizeServiceType(
+          doc.data()?['serviceType'] as String?,
+        );
         if (stored != null) {
           if (mounted) setState(() => _serviceTypeNormalized = stored);
           return;
@@ -158,7 +168,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
             onPressed: () {
               Navigator.of(context).pop();
               Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (_) => const RegisterShopNextScreen()),
+                MaterialPageRoute(
+                  builder: (_) => const RegisterShopNextScreen(),
+                ),
               );
             },
             child: const Text('เลือกบริการ'),
@@ -190,29 +202,38 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final password = _passwordController.text;
     final confirm = _confirmController.text;
     if (contactInput.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกอีเมลหรือเบอร์โทรศัพท์')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกอีเมลหรือเบอร์โทรศัพท์')),
+      );
       return;
     }
 
     if (password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกรหัสผ่าน')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกรหัสผ่าน')));
       return;
     }
     if (password != confirm) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('รหัสผ่านไม่ตรงกัน')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('รหัสผ่านไม่ตรงกัน')));
       return;
     }
 
     setState(() => _loading = true);
     try {
       debugPrint('🔄 เริ่มสร้างบัญชี: $contactInput'); // Debug log
-      
+      _pendingBranchAssignment ??=
+          await BranchAssignmentService.resolveForCurrentLocation();
+
       if (_isPhoneNumber(contactInput)) {
         // Navigate to phone verification screen
         final args = {
           'phone': _formatPhoneNumber(contactInput),
           'password': password,
           'serviceType': _serviceTypeNormalized,
+          'branchAssignment': _pendingBranchAssignment?.toFirestoreFields(),
         };
         Navigator.pushNamed(context, '/phone_auth', arguments: args);
         setState(() => _loading = false);
@@ -220,17 +241,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
       }
 
       // Proceed with email registration
-      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(email: contactInput, password: password);
+      final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: contactInput,
+        password: password,
+      );
       final user = cred.user;
       debugPrint('✅ สร้างบัญชีสำเร็จ: ${user?.uid}'); // Debug log
 
       if (user != null) {
         // *** แก้ไข: บันทึก serviceType ลงใน contracts collection ทันทีหลังสร้าง user ***
         if (_serviceTypeNormalized != null) {
-          await FirebaseFirestore.instance.collection('contracts').doc(user.uid).set({
-            'serviceType': _serviceTypeNormalized,
-            'status': 'pending_acceptance',
-          });
+          await FirebaseFirestore.instance
+              .collection('contracts')
+              .doc(user.uid)
+              .set({
+                'serviceType': _serviceTypeNormalized,
+                'status': 'pending_acceptance',
+                ...?_pendingBranchAssignment?.toFirestoreFields(),
+              });
         }
 
         try {
@@ -250,19 +278,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
           } catch (emailError) {
             debugPrint('❌ เกิดข้อผิดพลาดในการส่ง OTP อีเมล: $emailError');
             debugPrint('Rollback: กำลังลบบัญชีที่สร้างไม่สำเร็จ...');
-            
+
             // Rollback: Delete the user if OTP sending fails.
             await user.delete();
             debugPrint('🗑️ ลบบัญชี ${user.uid} เรียบร้อยแล้ว');
 
             // Throw an exception to be caught by the outer catch block.
-            throw Exception('การสร้างบัญชีล้มเหลวเนื่องจากไม่สามารถส่ง OTP ยืนยันอีเมลได้ กรุณาลองใหม่อีกครั้ง');
+            throw Exception(
+              'การสร้างบัญชีล้มเหลวเนื่องจากไม่สามารถส่ง OTP ยืนยันอีเมลได้ กรุณาลองใหม่อีกครั้ง',
+            );
           }
         }
       }
-      
+
       if (!mounted) return;
-      
+
       // Navigate to the email verification screen instead of popping.
       // The user must verify their email before proceeding.
       Navigator.pushNamedAndRemoveUntil(
@@ -277,10 +307,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
     } on FirebaseAuthException catch (e) {
       String message = 'เกิดข้อผิดพลาด';
       bool showResendOption = false;
-      
+
       switch (e.code) {
         case 'email-already-in-use':
-          message = 'อีเมลนี้ถูกใช้แล้ว! อาจยังไม่ได้ยืนยันอีเมล\nลองเข้าสู่ระบบหรือใช้ "ส่งลิงก์รีเซ็ตอีเมล" ในหน้า Login';
+          message =
+              'อีเมลนี้ถูกใช้แล้ว! อาจยังไม่ได้ยืนยันอีเมล\nลองเข้าสู่ระบบหรือใช้ "ส่งลิงก์รีเซ็ตอีเมล" ในหน้า Login';
           showResendOption = true;
           break;
         case 'weak-password':
@@ -295,22 +326,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
         default:
           message = e.message ?? 'เกิดข้อผิดพลาดในการสมัครสมาชิก';
       }
-      
+
       debugPrint('❌ FirebaseAuthException: ${e.code} - $message'); // Debug log
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(message),
             backgroundColor: showResendOption ? AppColors.accent : Colors.red,
             duration: Duration(seconds: showResendOption ? 8 : 5),
-            action: showResendOption ? SnackBarAction(
-              label: 'ไปหน้า Login',
-              textColor: Colors.white,
-              onPressed: () {
-                Navigator.pop(context);
-              },
-            ) : null,
+            action: showResendOption
+                ? SnackBarAction(
+                    label: 'ไปหน้า Login',
+                    textColor: Colors.white,
+                    onPressed: () {
+                      Navigator.pop(context);
+                    },
+                  )
+                : null,
           ),
         );
       }
@@ -318,7 +351,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       // Catch other exceptions, like the one we threw for email failure.
       final message = e.toString().replaceFirst('Exception: ', '');
       debugPrint('❌ Exception: $message');
-      
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -335,7 +368,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   void _showSnack(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   // แปลงประเภทบริการเป็นชื่อคอลเลกชั่น
@@ -359,28 +394,36 @@ class _RegisterScreenState extends State<RegisterScreen> {
     if (serviceType == null) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    
+
     try {
       final collectionName = _getCollectionName(serviceType);
-      
+
       // บันทึกลงคอลเลกชั่นตามประเภทบริการ
-      await FirebaseFirestore.instance.collection(collectionName).doc(user.uid).set({
-        'email': user.email ?? '',
-        'phone': user.phoneNumber ?? '',
-        'serviceType': serviceType,
-        'userId': user.uid,
-        'createdAt': FieldValue.serverTimestamp(),
-        'status': 'pending_contract',
-        'isProfileCompleted': false,
-      }, SetOptions(merge: true));
-      
+      await FirebaseFirestore.instance
+          .collection(collectionName)
+          .doc(user.uid)
+          .set({
+            'email': user.email ?? '',
+            'phone': user.phoneNumber ?? '',
+            'serviceType': serviceType,
+            'userId': user.uid,
+            ...?_pendingBranchAssignment?.toFirestoreFields(),
+            'createdAt': FieldValue.serverTimestamp(),
+            'status': 'pending_contract',
+            'isProfileCompleted': false,
+          }, SetOptions(merge: true));
+
       // บันทึกลง contracts collection
-      await FirebaseFirestore.instance.collection('contracts').doc(user.uid).set({
-        'serviceType': serviceType,
-        'status': 'pending_acceptance',
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      
+      await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(user.uid)
+          .set({
+            'serviceType': serviceType,
+            'status': 'pending_acceptance',
+            ...?_pendingBranchAssignment?.toFirestoreFields(),
+            'createdAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+
       debugPrint('✅ บันทึกข้อมูลลง $collectionName และ contracts สำเร็จ');
     } catch (e) {
       debugPrint('❌ Firestore error: $e');
@@ -390,18 +433,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
   Future<void> _handleSocialSignIn() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    
+
     // ตรวจสอบว่ามีประเภทบริการหรือยัง
     if (_serviceTypeNormalized == null) {
       _promptServiceTypeSelection();
       return;
     }
-    
+    _pendingBranchAssignment ??=
+        await BranchAssignmentService.resolveForCurrentLocation();
+
     // บันทึกข้อมูลลงคอลเลกชั่นตามประเภทบริการทันที
     await _saveServiceRegistration();
-    
+
     if (!mounted) return;
-    
+
     // ส่ง OTP ยืนยันอีเมล (ถ้าเป็น Google ที่มีอีเมลและยังไม่ verified)
     if (user.email != null && !user.emailVerified) {
       try {
@@ -411,7 +456,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         debugPrint('⚠️ ไม่สามารถส่ง OTP ยืนยันอีเมล: $e');
       }
     }
-    
+
     // นำทางไปยืนยันอีเมลก่อนไปหน้าสัญญา
     if (user.email != null && !user.emailVerified) {
       Navigator.pushNamedAndRemoveUntil(
@@ -441,7 +486,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
       if (Platform.isIOS && _iosClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
       }
-      debugPrint('GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId');
+      debugPrint(
+        'GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId',
+      );
       final googleSignIn = GoogleSignIn.instance;
       await googleSignIn.initialize(
         serverClientId: Platform.isAndroid ? _androidServerClientId : null,
@@ -455,7 +502,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
       final googleAuth = googleUser.authentication;
       final idToken = googleAuth.idToken;
       if (idToken == null || idToken.isEmpty) {
-        throw FirebaseAuthException(code: 'missing-id-token', message: 'ไม่พบ Google ID token');
+        throw FirebaseAuthException(
+          code: 'missing-id-token',
+          message: 'ไม่พบ Google ID token',
+        );
       }
 
       final credential = GoogleAuthProvider.credential(idToken: idToken);
@@ -506,7 +556,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
           backgroundColor: backgroundColor,
           foregroundColor: foregroundColor,
           padding: const EdgeInsets.symmetric(vertical: 12),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
           elevation: 2,
           side: BorderSide(color: Colors.grey.shade300),
         ),
@@ -520,16 +572,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 ),
               )
             : (assetImage != null
-                ? Image.asset(
-                    assetImage,
-                    width: 22,
-                    height: 22,
-                    fit: BoxFit.contain,
-                  )
-                : assetSvg != null
-                    ? SvgPicture.asset(assetSvg, height: 22, width: 22)
-                    : Icon(icon, size: 22, color: foregroundColor)),
-        label: Text(label, style: TextStyle(fontSize: 16, color: foregroundColor, fontWeight: FontWeight.w500)),
+                  ? Image.asset(
+                      assetImage,
+                      width: 22,
+                      height: 22,
+                      fit: BoxFit.contain,
+                    )
+                  : assetSvg != null
+                  ? SvgPicture.asset(assetSvg, height: 22, width: 22)
+                  : Icon(icon, size: 22, color: foregroundColor)),
+        label: Text(
+          label,
+          style: TextStyle(
+            fontSize: 16,
+            color: foregroundColor,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
       ),
     );
   }
@@ -546,7 +605,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('สมัครสมาชิก'), // Title is already set
-  backgroundColor: AppColors.accent, // Match the app's theme
+        backgroundColor: AppColors.accent, // Match the app's theme
         foregroundColor: Colors.white,
         elevation: 0,
       ),
@@ -580,7 +639,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
             ),
             const SizedBox(height: 24),
-            
+
             // Registration form card
             Card(
               elevation: 8,
@@ -611,7 +670,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 24),
-                    
+
                     // Email field
                     Column(
                       children: [
@@ -623,18 +682,27 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                           child: TextField(
                             controller: _emailController,
-                            keyboardType: TextInputType.text, // Allow both email and phone
+                            keyboardType: TextInputType
+                                .text, // Allow both email and phone
                             onChanged: (value) => _debouncer.run(() {
                               if (mounted) {
                                 setState(() {
                                   final cleanValue = value.trim();
                                   if (cleanValue.isNotEmpty) {
                                     final firstChar = cleanValue[0];
-                                    _isTypingPhoneNumber = (int.tryParse(firstChar) != null || firstChar == '+');
+                                    _isTypingPhoneNumber =
+                                        (int.tryParse(firstChar) != null ||
+                                        firstChar == '+');
 
-                                    if (_isTypingPhoneNumber && cleanValue.startsWith('+')) {
-                                      _countryCodeSuggestions = _countryCodes.entries
-                                          .where((entry) => entry.key.startsWith(cleanValue))
+                                    if (_isTypingPhoneNumber &&
+                                        cleanValue.startsWith('+')) {
+                                      _countryCodeSuggestions = _countryCodes
+                                          .entries
+                                          .where(
+                                            (entry) => entry.key.startsWith(
+                                              cleanValue,
+                                            ),
+                                          )
                                           .toList();
                                     } else {
                                       _countryCodeSuggestions = [];
@@ -648,12 +716,27 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             }),
                             decoration: InputDecoration(
                               labelText: 'อีเมล หรือ เบอร์โทรศัพท์',
-                              prefixIcon: const Icon(Icons.person_outline, color: AppColors.accentDark, size: 20),
+                              prefixIcon: const Icon(
+                                Icons.person_outline,
+                                color: AppColors.accentDark,
+                                size: 20,
+                              ),
                               border: InputBorder.none,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                              labelStyle: TextStyle(color: Colors.grey.shade600),
-                              helperText: _isTypingPhoneNumber && _countryCodeSuggestions.isEmpty ? 'รูปแบบที่แนะนำ: +66812345678' : null,
-                              helperStyle: TextStyle(color: Colors.green.shade700),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 16,
+                              ),
+                              labelStyle: TextStyle(
+                                color: Colors.grey.shade600,
+                              ),
+                              helperText:
+                                  _isTypingPhoneNumber &&
+                                      _countryCodeSuggestions.isEmpty
+                                  ? 'รูปแบบที่แนะนำ: +66812345678'
+                                  : null,
+                              helperStyle: TextStyle(
+                                color: Colors.green.shade700,
+                              ),
                             ),
                           ),
                         ),
@@ -670,14 +753,25 @@ class _RegisterScreenState extends State<RegisterScreen> {
                               shrinkWrap: true,
                               itemCount: _countryCodeSuggestions.length,
                               itemBuilder: (context, index) {
-                                final suggestion = _countryCodeSuggestions[index];
+                                final suggestion =
+                                    _countryCodeSuggestions[index];
                                 return ListTile(
                                   dense: true,
-                                  title: Text('${suggestion.value} (${suggestion.key})'),
+                                  title: Text(
+                                    '${suggestion.value} (${suggestion.key})',
+                                  ),
                                   onTap: () {
-                                    _emailController.text = '${suggestion.key} ';
-                                    _emailController.selection = TextSelection.fromPosition(TextPosition(offset: _emailController.text.length));
-                                    setState(() => _countryCodeSuggestions = []);
+                                    _emailController.text =
+                                        '${suggestion.key} ';
+                                    _emailController
+                                        .selection = TextSelection.fromPosition(
+                                      TextPosition(
+                                        offset: _emailController.text.length,
+                                      ),
+                                    );
+                                    setState(
+                                      () => _countryCodeSuggestions = [],
+                                    );
                                   },
                                 );
                               },
@@ -686,7 +780,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       ],
                     ),
                     const SizedBox(height: 16),
-                    
+
                     // Password field
                     Container(
                       decoration: BoxDecoration(
@@ -699,15 +793,22 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         obscureText: true,
                         decoration: const InputDecoration(
                           labelText: 'รหัสผ่าน',
-                          prefixIcon: Icon(Icons.lock_outline, color: AppColors.accentDark, size: 20),
+                          prefixIcon: Icon(
+                            Icons.lock_outline,
+                            color: AppColors.accentDark,
+                            size: 20,
+                          ),
                           border: InputBorder.none,
-                          contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
                           labelStyle: TextStyle(color: Colors.black54),
                         ),
                       ),
                     ),
                     const SizedBox(height: 16),
-                    
+
                     // Confirm password field
                     Container(
                       decoration: BoxDecoration(
@@ -720,9 +821,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         obscureText: true,
                         decoration: const InputDecoration(
                           labelText: 'ยืนยันรหัสผ่าน',
-                          prefixIcon: Icon(Icons.lock_outline, color: AppColors.accentDark, size: 20),
+                          prefixIcon: Icon(
+                            Icons.lock_outline,
+                            color: AppColors.accentDark,
+                            size: 20,
+                          ),
                           border: InputBorder.none,
-                          contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
                           labelStyle: TextStyle(color: Colors.black54),
                         ),
                       ),
@@ -730,14 +838,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     const SizedBox(height: 16),
                     _socialButton(
                       onPressed: _isSocialLoading ? null : _signInWithGoogle,
-                      assetImage: 'assets/file_0000000075b0720680f74d4375d75c25.png',
+                      assetImage:
+                          'assets/file_0000000075b0720680f74d4375d75c25.png',
                       label: 'เข้าสู่ระบบด้วย Google',
                       backgroundColor: Colors.white,
                       foregroundColor: Colors.black87,
                       buttonKey: 'google',
                     ),
                     const SizedBox(height: 24),
-                    
+
                     // Register button
                     Container(
                       height: 50,
@@ -764,16 +873,20 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             borderRadius: BorderRadius.circular(12),
                           ),
                         ),
-                        icon: _loading 
-                          ? const SizedBox(
-                              width: 20, 
-                              height: 20, 
-                              child: CircularProgressIndicator(
-                                color: Colors.white, 
-                                strokeWidth: 2
+                        icon: _loading
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
                               )
-                            )
-                          : Icon(Icons.person_add, size: 20, color: Colors.white),
+                            : Icon(
+                                Icons.person_add,
+                                size: 20,
+                                color: Colors.white,
+                              ),
                         label: Text(
                           _loading ? 'กำลังสมัคร...' : 'สมัครสมาชิก',
                           style: const TextStyle(
@@ -788,9 +901,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 ),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // ลบการ์ดช่วยแก้ปัญหาอีเมลออกตามคำสั่งของผู้ใช้
             // (เดิมเป็น Card สีส้มพร้อมปุ่ม "ไปที่เครื่องมือแก้ปัญหา")
             // เว้นระยะห่างไว้เล็กน้อยเพื่อไม่ให้ UI อัดแน่น

@@ -3,10 +3,12 @@ const functions = require('firebase-functions/v1');
 const { defineSecret } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Redis = require('ioredis');
+const sharp = require('sharp');
 const DEFAULT_REGION = 'asia-southeast1';
 const CALL_TTL_MS = 30 * 1000; // 30 seconds
 const ACTIVE_CALL_INVITES_COLLECTION = 'active_call_invites';
@@ -242,9 +244,184 @@ const AI_QUEUE_AVERAGE_SECONDS = 45;
 const AI_QUEUE_POLL_MS = 2500;
 const AI_QUEUE_MAX_WAIT_MS = 60 * 1000;
 const AI_QUEUE_JOB_TTL_MS = 4 * 60 * 1000;
+const AI_BACKGROUND_DEFAULT_PATH = 'gs://van-merchant.firebasestorage.app/image_background';
+const AI_BACKGROUND_MAX_BYTES = 5 * 1024 * 1024;
+const AI_BACKGROUND_MAX_CANDIDATES = 10;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseStorageLocation(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) {
+    return { bucketName: null, objectPath: '' };
+  }
+
+  if (value.startsWith('gs://')) {
+    const withoutScheme = value.slice('gs://'.length);
+    const firstSlash = withoutScheme.indexOf('/');
+    if (firstSlash < 0) {
+      return { bucketName: withoutScheme, objectPath: '' };
+    }
+    return {
+      bucketName: withoutScheme.slice(0, firstSlash),
+      objectPath: withoutScheme.slice(firstSlash + 1).replace(/^\/+/, ''),
+    };
+  }
+
+  return {
+    bucketName: null,
+    objectPath: value.replace(/^\/+/, ''),
+  };
+}
+
+function guessImageMimeTypeFromName(fileName) {
+  const lower = String(fileName || '').toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  return 'image/jpeg';
+}
+
+function isSupportedBackgroundName(fileName) {
+  const lower = String(fileName || '').toLowerCase();
+  return lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.webp');
+}
+
+async function loadAiBackgroundAssets(rawPath) {
+  const target = String(rawPath || AI_BACKGROUND_DEFAULT_PATH).trim();
+  const { bucketName, objectPath } = parseStorageLocation(target);
+  const bucket = bucketName ? admin.storage().bucket(bucketName) : admin.storage().bucket();
+
+  const normalizedPath = String(objectPath || '').trim().replace(/^\/+/, '');
+  if (!normalizedPath) {
+    return [];
+  }
+
+  const candidates = [];
+
+  // Allow both a direct object path and a folder prefix.
+  if (!target.endsWith('/')) {
+    const directFile = bucket.file(normalizedPath);
+    const [exists] = await directFile.exists();
+    if (exists && isSupportedBackgroundName(directFile.name)) {
+      candidates.push(directFile);
+    }
+  }
+
+  const prefix = normalizedPath.endsWith('/') ? normalizedPath : `${normalizedPath}/`;
+  try {
+    const [listedFiles] = await bucket.getFiles({ prefix, maxResults: 100 });
+    for (const file of listedFiles) {
+      if (!file || !file.name) continue;
+      if (!isSupportedBackgroundName(file.name)) continue;
+      candidates.push(file);
+    }
+  } catch (listError) {
+    logger.warn('loadAiBackgroundAsset list files failed', {
+      target,
+      bucket: bucket.name,
+      prefix,
+      message: listError instanceof Error ? listError.message : String(listError),
+    });
+  }
+
+  const uniqueByName = new Map();
+  for (const file of candidates) {
+    uniqueByName.set(file.name, file);
+  }
+  const uniqueCandidates = [...uniqueByName.values()];
+
+  if (uniqueCandidates.length === 0) {
+    return [];
+  }
+
+  const assets = [];
+  for (const file of uniqueCandidates.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (assets.length >= AI_BACKGROUND_MAX_CANDIDATES) break;
+
+    const [buffer] = await file.download();
+    if (!buffer || buffer.length === 0) {
+      continue;
+    }
+
+    if (buffer.length > AI_BACKGROUND_MAX_BYTES) {
+      logger.warn('loadAiBackgroundAssets skipped oversized background', {
+        file: file.name,
+        bytes: buffer.length,
+        maxBytes: AI_BACKGROUND_MAX_BYTES,
+      });
+      continue;
+    }
+
+    assets.push({
+      index: assets.length + 1,
+      mimeType: guessImageMimeTypeFromName(file.name),
+      data: buffer.toString('base64'),
+      buffer,
+      name: file.name,
+      source: `gs://${bucket.name}/${file.name}`,
+    });
+  }
+
+  return assets;
+}
+
+async function composeProductCutoutOnBackground(productBuffer, backgroundAsset) {
+  const productMeta = await sharp(productBuffer, { failOn: 'none' }).metadata();
+  const canvasWidth = Math.min(Math.max(Number(productMeta.width) || 1024, 512), 1600);
+  const canvasHeight = Math.min(Math.max(Number(productMeta.height) || 1024, 512), 1600);
+
+  const backgroundBuffer = backgroundAsset?.buffer
+    ? await sharp(backgroundAsset.buffer, { failOn: 'none' })
+      .rotate()
+      .resize(canvasWidth, canvasHeight, { fit: 'cover', position: 'center' })
+      .jpeg({ quality: 88, chromaSubsampling: '4:4:4' })
+      .toBuffer()
+    : await sharp({
+      create: {
+        width: canvasWidth,
+        height: canvasHeight,
+        channels: 3,
+        background: '#ffffff',
+      },
+    }).jpeg({ quality: 88 }).toBuffer();
+
+  let cutoutBuffer = productBuffer;
+  try {
+    cutoutBuffer = await sharp(productBuffer, { failOn: 'none' })
+      .ensureAlpha()
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 10 })
+      .png()
+      .toBuffer();
+  } catch (trimError) {
+    logger.warn('composeProductCutoutOnBackground trim failed, using original cutout canvas', {
+      message: trimError instanceof Error ? trimError.message : String(trimError),
+    });
+  }
+
+  const resizedCutout = await sharp(cutoutBuffer, { failOn: 'none' })
+    .ensureAlpha()
+    .resize({
+      width: Math.round(canvasWidth * 0.78),
+      height: Math.round(canvasHeight * 0.78),
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
+    .png()
+    .toBuffer();
+
+  const cutoutMeta = await sharp(resizedCutout, { failOn: 'none' }).metadata();
+  const left = Math.max(0, Math.round((canvasWidth - (Number(cutoutMeta.width) || canvasWidth)) / 2));
+  const top = Math.max(0, Math.round((canvasHeight - (Number(cutoutMeta.height) || canvasHeight)) / 2));
+
+  return sharp(backgroundBuffer, { failOn: 'none' })
+    .composite([{ input: resizedCutout, left, top }])
+    .jpeg({ quality: 88, chromaSubsampling: '4:4:4' })
+    .toBuffer();
 }
 
 function normalizeAiRequestId(rawValue) {
@@ -703,6 +880,192 @@ function buildTransport() {
   });
 }
 
+async function readShopOperationsDoc(shopId) {
+  if (!shopId) return {};
+  try {
+    const snapshot = await db.collection('shop_operations').doc(shopId).get();
+    return snapshot.exists ? (snapshot.data() || {}) : {};
+  } catch (error) {
+    logger.warn('Unable to read shop_operations', {
+      shopId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return {};
+  }
+}
+
+async function resolveShopEmailAndName(shopId) {
+  if (!shopId) {
+    return { email: '', name: '' };
+  }
+
+  for (const collection of SHOP_COLLECTIONS) {
+    try {
+      const snapshot = await db.collection(collection).doc(shopId).get();
+      if (!snapshot.exists) continue;
+      const data = snapshot.data() || {};
+      const email = String(data.email || '').trim().toLowerCase();
+      const name = String(data.shopName || data.name || data.storeName || '').trim();
+      if (email) {
+        return { email, name };
+      }
+    } catch (_) {}
+  }
+
+  try {
+    const userRecord = await admin.auth().getUser(shopId);
+    return {
+      email: normalizeEmail(userRecord.email),
+      name: String(userRecord.displayName || '').trim(),
+    };
+  } catch (_) {
+    return { email: '', name: '' };
+  }
+}
+
+function getPreviousBangkokMonthRange() {
+  const bangkokOffsetMs = 7 * 60 * 60 * 1000;
+  const bangkokNow = new Date(Date.now() + bangkokOffsetMs);
+  const year = bangkokNow.getUTCFullYear();
+  const month = bangkokNow.getUTCMonth();
+  const startMs = Date.UTC(year, month - 1, 1, 0, 0, 0) - bangkokOffsetMs;
+  const endMs = Date.UTC(year, month, 1, 0, 0, 0) - bangkokOffsetMs;
+  const labelYear = month === 0 ? year - 1 : year;
+  const labelMonth = month === 0 ? 12 : month;
+  const label = `${labelYear}-${`${labelMonth}`.padStart(2, '0')}`;
+  return {
+    start: admin.firestore.Timestamp.fromMillis(startMs),
+    end: admin.firestore.Timestamp.fromMillis(endMs),
+    label,
+  };
+}
+
+function formatMoney(value) {
+  return Number(value || 0).toLocaleString('th-TH', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function buildMonthlyReportRows(orders) {
+  let totalRevenue = 0;
+  let totalItems = 0;
+  const itemTotals = new Map();
+
+  for (const order of orders) {
+    totalRevenue += Number(order.totalAmount || 0);
+    const items = Array.isArray(order.items) ? order.items : [];
+    for (const item of items) {
+      const quantity = Number(item.quantity || 0);
+      if (!quantity) continue;
+      totalItems += quantity;
+      const name = String(item.productName || item.name || 'สินค้าไม่ระบุชื่อ').trim();
+      itemTotals.set(name, (itemTotals.get(name) || 0) + quantity);
+    }
+  }
+
+  const topItems = [...itemTotals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  return {
+    totalRevenue,
+    totalItems,
+    topItems,
+  };
+}
+
+exports.sendMonthlySalesReports = onSchedule(
+  {
+    region: DEFAULT_REGION,
+    schedule: '10 0 1 * *',
+    timeZone: 'Asia/Bangkok',
+    secrets: [SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM],
+  },
+  async () => {
+    const { start, end, label } = getPreviousBangkokMonthRange();
+    const operationsSnapshot = await db
+      .collection('shop_operations')
+      .where('emailDailyReports', '==', true)
+      .get();
+
+    if (operationsSnapshot.empty) {
+      logger.info('No shop has enabled monthly sales reports');
+      return;
+    }
+
+    const transport = buildTransport();
+    const from = readRequiredSecret(SMTP_FROM, 'SMTP_FROM');
+    const tasks = operationsSnapshot.docs.map(async (doc) => {
+      const shopId = doc.id;
+      const operations = doc.data() || {};
+      if (operations.lastMonthlyReportSentFor === label) {
+        return;
+      }
+
+      const { email, name } = await resolveShopEmailAndName(shopId);
+      if (!email) {
+        logger.warn('Skip monthly report because shop email is missing', {
+          shopId,
+          label,
+        });
+        return;
+      }
+
+      const ordersSnapshot = await db
+        .collection('orders')
+        .where('shopOwnerId', '==', shopId)
+        .where('deliveredAt', '>=', start)
+        .where('deliveredAt', '<', end)
+        .get();
+
+      const deliveredOrders = ordersSnapshot.docs
+        .map((orderDoc) => orderDoc.data())
+        .filter((order) => String(order.status || '').trim() === 'delivered');
+
+      const summary = buildMonthlyReportRows(deliveredOrders);
+      const itemLines = summary.topItems.length > 0
+        ? summary.topItems.map(([itemName, qty]) => `<li>${itemName} x${qty}</li>`).join('')
+        : '<li>ไม่มีสินค้าเด่นในช่วงเดือนดังกล่าว</li>';
+
+      await transport.sendMail({
+        from,
+        to: email,
+        subject: `สรุปยอดขายรายเดือน ${label}`,
+        text: [
+          `สรุปรายงานยอดขายรายเดือน ${label}`,
+          `ร้าน: ${name || shopId}`,
+          `จำนวนออเดอร์ส่งสำเร็จ: ${deliveredOrders.length}`,
+          `ยอดขายรวม: ฿${formatMoney(summary.totalRevenue)}`,
+          `จำนวนสินค้าที่ขายได้: ${summary.totalItems}`,
+          summary.topItems.length > 0
+            ? `สินค้าเด่น: ${summary.topItems.map(([itemName, qty]) => `${itemName} x${qty}`).join(', ')}`
+            : 'สินค้าเด่น: ไม่มีข้อมูล',
+        ].join('\n'),
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937;">
+            <h2 style="color: #ea580c;">สรุปยอดขายรายเดือน</h2>
+            <p><strong>เดือน:</strong> ${label}</p>
+            <p><strong>ร้าน:</strong> ${name || shopId}</p>
+            <p><strong>จำนวนออเดอร์ส่งสำเร็จ:</strong> ${deliveredOrders.length}</p>
+            <p><strong>ยอดขายรวม:</strong> ฿${formatMoney(summary.totalRevenue)}</p>
+            <p><strong>จำนวนสินค้าที่ขายได้:</strong> ${summary.totalItems}</p>
+            <p><strong>สินค้าเด่น:</strong></p>
+            <ul>${itemLines}</ul>
+          </div>
+        `,
+      });
+
+      await doc.ref.set({
+        lastMonthlyReportSentFor: label,
+        lastMonthlyReportSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
+
+    await Promise.all(tasks);
+  },
+);
+
 exports.askGeminiFlash = onCall(
   {
     region: DEFAULT_REGION,
@@ -929,6 +1292,253 @@ exports.askGeminiFlash = onCall(
   },
 );
 
+exports.analyzeProductWithAi = onCall(
+  {
+    region: DEFAULT_REGION,
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 90,
+    memory: '512MiB',
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'กรุณาเข้าสู่ระบบก่อนใช้งาน AI');
+    }
+
+    const imageBase64 = String(request.data?.imageBase64 || '').trim();
+    const inputMimeType = String(request.data?.mimeType || '').trim().toLowerCase();
+    const allowedMimeTypes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+    if (!imageBase64) {
+      throw new HttpsError('invalid-argument', 'ไม่พบรูปภาพสินค้าที่ต้องการวิเคราะห์');
+    }
+
+    const normalizedMimeType = inputMimeType === 'image/jpg' ? 'image/jpeg' : inputMimeType;
+    const mimeType = allowedMimeTypes.has(normalizedMimeType)
+      ? normalizedMimeType
+      : 'image/jpeg';
+    const estimatedBytes = Math.floor((imageBase64.length * 3) / 4);
+    if (estimatedBytes > 5 * 1024 * 1024) {
+      throw new HttpsError('invalid-argument', 'รูปมีขนาดใหญ่เกินไป (สูงสุด 5MB)');
+    }
+
+    const apiKey = String(GEMINI_API_KEY.value() || '').trim();
+    if (!apiKey) {
+      throw new HttpsError('failed-precondition', 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY');
+    }
+
+    const queueLease = await acquireAiProcessingSlot({
+      uid: request.auth.uid,
+      requestId: request.data?.requestId,
+    });
+    let queueFinalStatus = 'completed';
+
+    try {
+      const productName = String(request.data?.productName || '').trim();
+      const description = String(request.data?.description || '').trim();
+      const category = String(request.data?.category || '').trim();
+      const unit = String(request.data?.unit || '').trim();
+      const price = String(request.data?.price || '').trim();
+      const apiVersions = ['v1beta', 'v1'];
+      const preferredModels = [
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+      ];
+
+      const parseAnalysisFromParts = (partsForAnalysis) => {
+        const textOutput = Array.isArray(partsForAnalysis)
+          ? partsForAnalysis.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
+          : '';
+        if (!textOutput) return {};
+        try {
+          const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
+          if (jsonMatch) return JSON.parse(jsonMatch[0]);
+        } catch (parseError) {
+          logger.warn('analyzeProductWithAi JSON parse failed', {
+            uid: request.auth.uid,
+            message: parseError instanceof Error ? parseError.message : String(parseError),
+            text: textOutput.slice(0, 800),
+          });
+        }
+        return {};
+      };
+
+      const prompt = [
+        'You are analyzing one product listing for a Thai merchant app. Return JSON only.',
+        'Analyze the image and merchant-entered fields. Do not generate or edit any image.',
+        'If the product name is missing or unclear from merchant fields, infer the most likely Thai product name from the image and return it as productName. Leave productName empty only if the product cannot be identified.',
+        'Write description in Thai at about 2 natural mobile-app lines, useful for selling online. Avoid being too short.',
+        'Main task 1: decide whether this product is legal to sell in Thailand for normal online commerce. Consider obvious prohibited or controlled goods such as illegal drugs, weapons, counterfeit goods, gambling items, protected wildlife, hazardous materials, prescription-only medicines, and other regulated goods. If uncertain, mark isLegalInThailand false and explain that manual review is required.',
+        'Main task 2: identify what product type it is in Thai, such as fresh vegetable, fruit, prepared food, beverage, medicine/pharmacy item, cosmetic, electronics, clothing, household item, agricultural product, or general goods.',
+        'Also fill existing merchant fields when possible.',
+        'VAT rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
+        'Nationwide shipping rule: dry, sealed, shelf-stable, non-fragile, legal products are usually suitable; fresh, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
+        'JSON schema only:',
+        '{"productName":"likely Thai product name","description":"Thai product description about 2 mobile lines","isLegalInThailand":true/false,"legalReason":"short Thai reason","productType":"specific Thai product type","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason"}',
+        `Known merchant-entered fields: productName=${productName || '-'}, description=${description || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}.`,
+      ].join(' ');
+
+      const discoveredModelNames = new Set();
+      for (const apiVersion of apiVersions) {
+        try {
+          const listResp = await fetch(
+            `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+          );
+          if (!listResp.ok) continue;
+          const listPayload = await listResp.json();
+          const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+          for (const model of models) {
+            const name = String(model?.name || '').trim();
+            const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+            const methods = Array.isArray(model?.supportedGenerationMethods)
+              ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+              : [];
+            if (shortName && methods.includes('generateContent') && !/image|imagen/i.test(shortName)) {
+              discoveredModelNames.add(shortName);
+            }
+          }
+        } catch (listError) {
+          logger.warn('analyzeProductWithAi listModels network error', {
+            uid: request.auth.uid,
+            apiVersion,
+            message: listError instanceof Error ? listError.message : String(listError),
+          });
+        }
+      }
+
+      const modelCandidates = [...new Set([...preferredModels, ...discoveredModelNames])];
+      let analysis = {};
+      let selectedModel = null;
+      let selectedApiVersion = null;
+      let lastErrorStatus = null;
+      let lastErrorBody = '';
+
+      for (const modelName of modelCandidates) {
+        for (const apiVersion of apiVersions) {
+          const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+          let response;
+          try {
+            response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      { text: prompt },
+                      { inlineData: { mimeType, data: imageBase64 } },
+                    ],
+                  },
+                ],
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: 'application/json',
+                },
+              }),
+            });
+          } catch (error) {
+            logger.error('analyzeProductWithAi network error', {
+              uid: request.auth.uid,
+              model: modelName,
+              apiVersion,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
+          }
+
+          if (!response.ok) {
+            const errorBody = await response.text();
+            const loweredErrorBody = errorBody.toLowerCase();
+            logger.error('analyzeProductWithAi upstream error', {
+              uid: request.auth.uid,
+              model: modelName,
+              apiVersion,
+              status: response.status,
+              body: errorBody.slice(0, 1000),
+            });
+
+            if (loweredErrorBody.includes('api_key_invalid') || loweredErrorBody.includes('api key not valid')) {
+              throw new HttpsError('failed-precondition', 'GEMINI_API_KEY ไม่ถูกต้องหรือถูกจำกัดสิทธิ์ กรุณาตั้งค่า key ใหม่ใน Secret Manager');
+            }
+            if (loweredErrorBody.includes('permission_denied')) {
+              throw new HttpsError('permission-denied', 'บัญชีหรือ API key ยังไม่ได้เปิดสิทธิ์ใช้งาน Generative Language API');
+            }
+            if (
+              loweredErrorBody.includes('resource_exhausted') ||
+              loweredErrorBody.includes('prepayment credits are depleted') ||
+              loweredErrorBody.includes('credits are depleted') ||
+              loweredErrorBody.includes('quota')
+            ) {
+              throw new HttpsError('resource-exhausted', 'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing ใน AI Studio แล้วลองใหม่อีกครั้ง');
+            }
+
+            lastErrorStatus = response.status;
+            lastErrorBody = errorBody;
+            const canTryNextModel =
+              loweredErrorBody.includes('not found') ||
+              loweredErrorBody.includes('unsupported') ||
+              loweredErrorBody.includes('method not found') ||
+              loweredErrorBody.includes('model') ||
+              loweredErrorBody.includes('invalid json payload') ||
+              loweredErrorBody.includes('unknown name') ||
+              loweredErrorBody.includes('cannot find field') ||
+              loweredErrorBody.includes('responsemimetype');
+            if (canTryNextModel) continue;
+            throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
+          }
+
+          const payload = await response.json();
+          const parts = payload?.candidates?.[0]?.content?.parts;
+          analysis = parseAnalysisFromParts(parts);
+          if (Object.keys(analysis).length > 0) {
+            selectedModel = modelName;
+            selectedApiVersion = apiVersion;
+            break;
+          }
+
+          lastErrorStatus = 200;
+          lastErrorBody = JSON.stringify(payload).slice(0, 1000);
+        }
+        if (selectedModel) break;
+      }
+
+      if (!selectedModel) {
+        logger.error('analyzeProductWithAi no available model', {
+          uid: request.auth.uid,
+          lastErrorStatus,
+          lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
+          discoveredModels: [...discoveredModelNames].slice(0, 20),
+        });
+        throw new HttpsError('unimplemented', 'โมเดล AI สำหรับวิเคราะห์สินค้ายังไม่พร้อมใช้งานในโปรเจกต์นี้');
+      }
+
+      return {
+        productName: String(analysis.productName || '').trim(),
+        description: String(analysis.description || '').trim(),
+        isLegalInThailand: analysis.isLegalInThailand === true,
+        legalReason: String(analysis.legalReason || '').trim(),
+        productType: String(analysis.productType || '').trim(),
+        productCategory: String(analysis.productCategory || '').trim(),
+        taxStatus: String(analysis.taxStatus || '').trim(),
+        taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
+        taxReason: String(analysis.taxReason || '').trim(),
+        isFreshProduct: analysis.isFreshProduct === true,
+        isProcessed: analysis.isProcessed === true,
+        canShipNationwide: analysis.canShipNationwide === true,
+        nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+        model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
+        queuePosition: queueLease.position,
+        estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
+      };
+    } catch (error) {
+      queueFinalStatus = 'failed';
+      throw error;
+    } finally {
+      await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+    }
+  },
+);
+
 exports.replaceImageBackgroundWhite = onCall(
   {
     region: DEFAULT_REGION,
@@ -972,306 +1582,257 @@ exports.replaceImageBackgroundWhite = onCall(
     let queueFinalStatus = 'completed';
 
     try {
+      const apiVersions = ['v1beta', 'v1'];
+      const preferredModels = [
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+      ];
 
-    const apiVersions = ['v1beta', 'v1'];
-    const preferredModels = [
-      'gemini-2.5-flash-image',
-      'gemini-2.5-flash-image-preview',
-      'gemini-2.0-flash-preview-image-generation',
-      'gemini-2.0-flash-exp-image-generation',
-    ];
+      const productName = String(request.data?.productName || '').trim();
+      const category = String(request.data?.category || '').trim();
+      const unit = String(request.data?.unit || '').trim();
+      const price = String(request.data?.price || '').trim();
+      const backgroundPath = String(request.data?.backgroundPath || AI_BACKGROUND_DEFAULT_PATH).trim();
 
-    const productName = String(request.data?.productName || '').trim();
-    const category = String(request.data?.category || '').trim();
-    const unit = String(request.data?.unit || '').trim();
-    const price = String(request.data?.price || '').trim();
-
-    const whiteBackgroundEditPrompt = [
-      'You are processing one Thai product image for a merchant app. Do all tasks in this single response.',
-      'The response MUST include an edited image part. Output the edited image first, then one text part containing JSON.',
-      'Task 1 is mandatory: Edit the provided image. Remove or replace the entire original background.',
-      'Keep the main product/object exactly as the subject, preserving its shape, color, texture, text, packaging, and edges.',
-      'Place the subject on a clean pure white #FFFFFF background only.',
-      'Do not keep any original background, floor, wall, table, shadow pattern, scenery, or colored backdrop.',
-      'Do not add text, logos, frames, decorations, watermark, props, or new objects.',
-      'Even if the product is hard to identify, still return the edited image with a pure white background.',
-      'Task 2: Analyze what the product appears to be in Thailand and write a concise Thai product description for selling online.',
-      'Task 3: Classify whether the product is likely Thai VAT taxable or VAT-exempt for this app.',
-      'Use this app rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
-      'Task 4: Evaluate whether this product can reasonably be shipped nationwide across Thailand by normal parcel delivery.',
-      'Products that are dry, sealed, shelf-stable, non-fragile, and legal to ship are usually suitable. Fresh, highly perishable, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
-      'Return a newly edited image and also a TEXT JSON object only for the analysis. JSON schema:',
-      '{"description":"Thai product description","taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason"}',
-      `Known merchant-entered fields: productName=${productName || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}.`,
-      'If uncertain, choose taxable and explain uncertainty briefly in Thai.',
-    ].join(' ');
-
-    const discoveredModelNames = new Set();
-    for (const apiVersion of apiVersions) {
+      let backgroundAssets = [];
       try {
-        const listResp = await fetch(
-          `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
-        );
-        if (!listResp.ok) {
-          const listErr = await listResp.text();
-          logger.warn('replaceImageBackgroundWhite listModels failed', {
-            uid: request.auth.uid,
-            apiVersion,
-            status: listResp.status,
-            body: listErr.slice(0, 400),
-          });
-          continue;
-        }
-
-        const listPayload = await listResp.json();
-        const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
-        for (const model of models) {
-          const name = String(model?.name || '').trim();
-          const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
-          const methods = Array.isArray(model?.supportedGenerationMethods)
-            ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
-            : [];
-          if (!shortName || !methods.includes('generateContent')) {
-            continue;
-          }
-          discoveredModelNames.add(shortName);
-        }
-      } catch (listError) {
-        logger.warn('replaceImageBackgroundWhite listModels network error', {
+        backgroundAssets = await loadAiBackgroundAssets(backgroundPath);
+      } catch (bgError) {
+        logger.warn('replaceImageBackgroundWhite failed to load storage backgrounds', {
           uid: request.auth.uid,
-          apiVersion,
-          message: listError instanceof Error ? listError.message : String(listError),
+          backgroundPath,
+          message: bgError instanceof Error ? bgError.message : String(bgError),
         });
       }
-    }
 
-    const discoveredImageModels = [...discoveredModelNames].filter((name) =>
-      /image|imagen/i.test(name),
-    );
-    const modelCandidates = [
-      ...new Set([
-        ...preferredModels,
-        ...discoveredImageModels,
-        ...discoveredModelNames,
-      ]),
-    ];
+      const parseAnalysisFromParts = (partsForAnalysis) => {
+        const textOutput = Array.isArray(partsForAnalysis)
+          ? partsForAnalysis.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
+          : '';
+        if (!textOutput) return {};
 
-    let payload = null;
-    let selectedModel = null;
-    let selectedApiVersion = null;
-    let lastErrorStatus = null;
-    let lastErrorBody = '';
-    let fallbackAnalysis = {};
-
-    const parseAnalysisFromParts = (partsForAnalysis) => {
-      const textOutput = Array.isArray(partsForAnalysis)
-        ? partsForAnalysis.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
-        : '';
-      if (!textOutput) {
-        return {};
-      }
-
-      try {
-        const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          return JSON.parse(jsonMatch[0]);
-        }
-      } catch (parseError) {
-        logger.warn('replaceImageBackgroundWhite analysis JSON parse failed', {
-          uid: request.auth.uid,
-          message: parseError instanceof Error ? parseError.message : String(parseError),
-          text: textOutput.slice(0, 800),
-        });
-      }
-      return {};
-    };
-
-    for (const modelName of modelCandidates) {
-      for (const apiVersion of apiVersions) {
-        const endpoint =
-          `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
-
-        let response;
         try {
-          const generationConfig = {
-            temperature: 0.2,
-          };
-          if (apiVersion === 'v1beta') {
-            generationConfig.responseModalities = ['IMAGE', 'TEXT'];
-          }
+          const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
+          if (jsonMatch) return JSON.parse(jsonMatch[0]);
+        } catch (parseError) {
+          logger.warn('replaceImageBackgroundWhite analysis JSON parse failed', {
+            uid: request.auth.uid,
+            message: parseError instanceof Error ? parseError.message : String(parseError),
+            text: textOutput.slice(0, 800),
+          });
+        }
+        return {};
+      };
 
-          response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [
-                    {
-                      text: whiteBackgroundEditPrompt,
-                    },
-                    {
-                      inlineData: {
-                        mimeType,
-                        data: imageBase64,
-                      },
-                    },
-                  ],
+      const backgroundListText = backgroundAssets.length > 0
+        ? backgroundAssets.map((asset) => `${asset.index}. ${asset.source}`).join('\n')
+        : 'No storage backgrounds are available.';
+
+      const selectionPrompt = [
+        'You are selecting a real existing background from Firebase Storage for one Thai merchant product image.',
+        'Do NOT generate, edit, or return any image. Return TEXT JSON only.',
+        'The first image is the merchant product after its original background has already been removed. The following numbered images are existing storage backgrounds in the same order as the list.',
+        'Choose the single most suitable storage background for the product based on product type, color contrast, sale presentation, and visual cleanliness.',
+        'If backgrounds are available, selectedBackgroundIndex MUST be one of the provided numbers. Do not choose white unless no storage background exists.',
+        'Also analyze the product for Thai online selling fields.',
+        'If the product name is missing or unclear from merchant fields, infer the most likely Thai product name from the product image and return it as productName. Leave productName empty only if the product cannot be identified.',
+        'Write description in Thai at about 2 natural mobile-app lines, useful for selling online. Avoid being too short.',
+        'Main task 1: decide whether this product is legal to sell in Thailand for normal online commerce. Consider obvious prohibited or controlled goods such as illegal drugs, weapons, counterfeit goods, gambling items, protected wildlife, hazardous materials, prescription-only medicines, and other regulated goods. If uncertain, mark isLegalInThailand false and explain that manual review is required.',
+        'Main task 2: identify what product type it is in Thai, such as fresh vegetable, fruit, prepared food, beverage, medicine/pharmacy item, cosmetic, electronics, clothing, household item, agricultural product, or general goods.',
+        'VAT rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
+        'Nationwide shipping rule: dry, sealed, shelf-stable, non-fragile, legal products are usually suitable; fresh, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
+        'JSON schema only:',
+        '{"productName":"likely Thai product name","description":"Thai product description about 2 mobile lines","isLegalInThailand":true/false,"legalReason":"short Thai reason","productType":"specific Thai product type","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason","selectedBackgroundIndex":1,"backgroundReason":"short Thai reason"}',
+        `Known merchant-entered fields: productName=${productName || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}.`,
+        `Storage background candidates:\n${backgroundListText}`,
+        'If uncertain, choose the cleanest and highest-contrast storage background. If uncertain about legality, mark isLegalInThailand false and explain manual review in Thai. If uncertain about VAT, choose taxable and explain uncertainty briefly in Thai.',
+      ].join(' ');
+
+      const discoveredModelNames = new Set();
+      for (const apiVersion of apiVersions) {
+        try {
+          const listResp = await fetch(
+            `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+          );
+          if (!listResp.ok) continue;
+          const listPayload = await listResp.json();
+          const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+          for (const model of models) {
+            const name = String(model?.name || '').trim();
+            const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+            const methods = Array.isArray(model?.supportedGenerationMethods)
+              ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+              : [];
+            if (shortName && methods.includes('generateContent')) {
+              discoveredModelNames.add(shortName);
+            }
+          }
+        } catch (listError) {
+          logger.warn('replaceImageBackgroundWhite listModels network error', {
+            uid: request.auth.uid,
+            apiVersion,
+            message: listError instanceof Error ? listError.message : String(listError),
+          });
+        }
+      }
+
+      const modelCandidates = [
+        ...new Set([
+          ...preferredModels,
+          ...[...discoveredModelNames].filter((name) => !/image|imagen/i.test(name)),
+        ]),
+      ];
+
+      let analysis = {};
+      let selectedModel = null;
+      let selectedApiVersion = null;
+      let lastErrorStatus = null;
+      let lastErrorBody = '';
+
+      for (const modelName of modelCandidates) {
+        for (const apiVersion of apiVersions) {
+          const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+          let response;
+          try {
+            response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      { text: selectionPrompt },
+                      { inlineData: { mimeType, data: imageBase64 } },
+                      ...backgroundAssets.flatMap((asset) => [
+                        { text: `Storage background candidate ${asset.index}: ${asset.source}` },
+                        { inlineData: { mimeType: asset.mimeType, data: asset.data } },
+                      ]),
+                    ],
+                  },
+                ],
+                generationConfig: {
+                  temperature: 0.1,
+                  responseMimeType: 'application/json',
                 },
-              ],
-              generationConfig,
-            }),
-          });
-        } catch (error) {
-          logger.error('replaceImageBackgroundWhite network error', {
-            uid: request.auth.uid,
-            model: modelName,
-            apiVersion,
-            message: error instanceof Error ? error.message : String(error),
-          });
-          throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
-        }
-
-        if (!response.ok) {
-          const errorBody = await response.text();
-          const loweredErrorBody = errorBody.toLowerCase();
-          logger.error('replaceImageBackgroundWhite upstream error', {
-            uid: request.auth.uid,
-            model: modelName,
-            apiVersion,
-            status: response.status,
-            body: errorBody.slice(0, 1000),
-          });
-
-          if (loweredErrorBody.includes('api_key_invalid') || loweredErrorBody.includes('api key not valid')) {
-            throw new HttpsError(
-              'failed-precondition',
-              'GEMINI_API_KEY ไม่ถูกต้องหรือถูกจำกัดสิทธิ์ กรุณาตั้งค่า key ใหม่ใน Secret Manager',
-            );
+              }),
+            });
+          } catch (error) {
+            logger.error('replaceImageBackgroundWhite network error', {
+              uid: request.auth.uid,
+              model: modelName,
+              apiVersion,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
           }
 
-          if (loweredErrorBody.includes('permission_denied')) {
-            throw new HttpsError(
-              'permission-denied',
-              'บัญชีหรือ API key ยังไม่ได้เปิดสิทธิ์ใช้งาน Generative Language API',
-            );
+          if (!response.ok) {
+            const errorBody = await response.text();
+            const loweredErrorBody = errorBody.toLowerCase();
+            logger.error('replaceImageBackgroundWhite upstream error', {
+              uid: request.auth.uid,
+              model: modelName,
+              apiVersion,
+              status: response.status,
+              body: errorBody.slice(0, 1000),
+            });
+
+            if (loweredErrorBody.includes('api_key_invalid') || loweredErrorBody.includes('api key not valid')) {
+              throw new HttpsError(
+                'failed-precondition',
+                'GEMINI_API_KEY ไม่ถูกต้องหรือถูกจำกัดสิทธิ์ กรุณาตั้งค่า key ใหม่ใน Secret Manager',
+              );
+            }
+
+            if (loweredErrorBody.includes('permission_denied')) {
+              throw new HttpsError(
+                'permission-denied',
+                'บัญชีหรือ API key ยังไม่ได้เปิดสิทธิ์ใช้งาน Generative Language API',
+              );
+            }
+
+            if (
+              loweredErrorBody.includes('resource_exhausted') ||
+              loweredErrorBody.includes('prepayment credits are depleted') ||
+              loweredErrorBody.includes('credits are depleted') ||
+              loweredErrorBody.includes('quota')
+            ) {
+              throw new HttpsError(
+                'resource-exhausted',
+                'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing ใน AI Studio แล้วลองใหม่อีกครั้ง',
+              );
+            }
+
+            lastErrorStatus = response.status;
+            lastErrorBody = errorBody;
+            const canTryNextModel =
+              loweredErrorBody.includes('not found') ||
+              loweredErrorBody.includes('unsupported') ||
+              loweredErrorBody.includes('method not found') ||
+              loweredErrorBody.includes('model') ||
+              loweredErrorBody.includes('invalid json payload') ||
+              loweredErrorBody.includes('unknown name') ||
+              loweredErrorBody.includes('cannot find field') ||
+              loweredErrorBody.includes('responsemimetype');
+            if (canTryNextModel) continue;
+            throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
           }
 
-          if (
-            loweredErrorBody.includes('resource_exhausted') ||
-            loweredErrorBody.includes('prepayment credits are depleted') ||
-            loweredErrorBody.includes('credits are depleted') ||
-            loweredErrorBody.includes('quota')
-          ) {
-            throw new HttpsError(
-              'resource-exhausted',
-              'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing ใน AI Studio แล้วลองใหม่อีกครั้ง',
-            );
+          const payload = await response.json();
+          const parts = payload?.candidates?.[0]?.content?.parts;
+          analysis = parseAnalysisFromParts(parts);
+          if (Object.keys(analysis).length > 0) {
+            selectedModel = modelName;
+            selectedApiVersion = apiVersion;
+            break;
           }
 
-          lastErrorStatus = response.status;
-          lastErrorBody = errorBody;
-
-          const isModelUnavailable =
-            loweredErrorBody.includes('not found') ||
-            loweredErrorBody.includes('unsupported') ||
-            loweredErrorBody.includes('method not found') ||
-            loweredErrorBody.includes('model');
-
-          const isPayloadMismatch =
-            loweredErrorBody.includes('invalid json payload') ||
-            loweredErrorBody.includes('unknown name') ||
-            loweredErrorBody.includes('cannot find field');
-
-          if (isModelUnavailable || isPayloadMismatch) {
-            continue;
-          }
-
-          throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
-        }
-
-        const candidatePayload = await response.json();
-        const candidateParts = candidatePayload?.candidates?.[0]?.content?.parts;
-        const hasImageOutput = Array.isArray(candidateParts) && candidateParts.some((part) => part?.inlineData?.data);
-        if (!hasImageOutput) {
-          const candidateAnalysis = parseAnalysisFromParts(candidateParts);
-          if (candidateAnalysis.description || candidateAnalysis.taxStatus || candidateAnalysis.taxReason) {
-            fallbackAnalysis = candidateAnalysis;
-          }
-          logger.warn('replaceImageBackgroundWhite text-only response skipped', {
-            uid: request.auth.uid,
-            model: modelName,
-            apiVersion,
-            payloadPreview: JSON.stringify(candidatePayload).slice(0, 1200),
-          });
           lastErrorStatus = 200;
-          lastErrorBody = 'Gemini returned text only without inline image data';
-          continue;
+          lastErrorBody = JSON.stringify(payload).slice(0, 1000);
         }
-
-        payload = candidatePayload;
-        selectedModel = modelName;
-        selectedApiVersion = apiVersion;
-        break;
+        if (selectedModel) break;
       }
 
-      if (payload && selectedModel) {
-        break;
+      if (!selectedModel) {
+        logger.error('replaceImageBackgroundWhite no available analysis model', {
+          uid: request.auth.uid,
+          lastErrorStatus,
+          lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
+          discoveredModels: [...discoveredModelNames].slice(0, 20),
+        });
+        throw new HttpsError('unimplemented', 'โมเดล AI สำหรับประเมินพื้นหลังยังไม่พร้อมใช้งานในโปรเจกต์นี้');
       }
-    }
 
-    if (!payload || !selectedModel) {
-      logger.error('replaceImageBackgroundWhite no available model', {
-        uid: request.auth.uid,
-        lastErrorStatus,
-        lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
-        discoveredModels: [...discoveredModelNames].slice(0, 20),
-      });
-      throw new HttpsError(
-        'unimplemented',
-        'โมเดล AI สำหรับแก้ไขภาพยังไม่พร้อมใช้งานในโปรเจกต์นี้ กรุณาเปิดสิทธิ์ Gemini image generation',
-      );
-    }
+      const requestedBackgroundIndex = Number(analysis.selectedBackgroundIndex);
+      const selectedBackground = backgroundAssets.find((asset) => asset.index === requestedBackgroundIndex) || backgroundAssets[0] || null;
+      const outputBuffer = await composeProductCutoutOnBackground(Buffer.from(imageBase64, 'base64'), selectedBackground);
 
-    const parts = payload?.candidates?.[0]?.content?.parts;
-    const imagePart = Array.isArray(parts)
-      ? parts.find((part) => part?.inlineData?.data)
-      : null;
-
-    const outputBase64 = String(imagePart?.inlineData?.data || '').trim();
-    const outputMimeType = String(imagePart?.inlineData?.mimeType || 'image/png').trim();
-    const imageResponseAnalysis = parseAnalysisFromParts(parts);
-    const analysis = Object.keys(imageResponseAnalysis).length > 0
-      ? imageResponseAnalysis
-      : fallbackAnalysis;
-
-    if (!outputBase64) {
-      logger.error('replaceImageBackgroundWhite missing image output', {
-        uid: request.auth.uid,
-        payloadPreview: JSON.stringify(payload).slice(0, 1200),
-      });
-      throw new HttpsError('internal', 'AI ไม่ได้ส่งรูปภาพกลับมา');
-    }
-
-    return {
-      imageBase64: outputBase64,
-      mimeType: outputMimeType,
-      description: String(analysis.description || '').trim(),
-      taxStatus: String(analysis.taxStatus || '').trim(),
-      taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
-      taxReason: String(analysis.taxReason || '').trim(),
-      productCategory: String(analysis.productCategory || '').trim(),
-      isFreshProduct: analysis.isFreshProduct === true,
-      isProcessed: analysis.isProcessed === true,
-      canShipNationwide: analysis.canShipNationwide === true,
-      nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
-      model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
-      queuePosition: queueLease.position,
-      estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
-    };
+      return {
+        imageBase64: outputBuffer.toString('base64'),
+        mimeType: 'image/jpeg',
+        productName: String(analysis.productName || '').trim(),
+        description: String(analysis.description || '').trim(),
+        isLegalInThailand: analysis.isLegalInThailand === true,
+        legalReason: String(analysis.legalReason || '').trim(),
+        productType: String(analysis.productType || '').trim(),
+        taxStatus: String(analysis.taxStatus || '').trim(),
+        taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
+        taxReason: String(analysis.taxReason || '').trim(),
+        productCategory: String(analysis.productCategory || '').trim(),
+        isFreshProduct: analysis.isFreshProduct === true,
+        isProcessed: analysis.isProcessed === true,
+        canShipNationwide: analysis.canShipNationwide === true,
+        nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+        backgroundDecision: selectedBackground ? 'use_storage_background' : 'use_white',
+        backgroundReason: String(analysis.backgroundReason || '').trim(),
+        backgroundSource: selectedBackground?.source || '',
+        selectedBackgroundIndex: selectedBackground?.index || null,
+        model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
+        queuePosition: queueLease.position,
+        estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
+      };
     } catch (error) {
       queueFinalStatus = 'failed';
       throw error;
@@ -1554,7 +2115,7 @@ exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
         }
       }
 
-      await Promise.all(promises);
+      await Promise.allSettled(promises);
       console.log(`Processed ${ordersSnapshot.docs.length} preparing orders`);
       
     } catch (error) {
@@ -2257,8 +2818,7 @@ exports.computeRouteMetrics = onCall(
           },
         },
       },
-      travelMode: 'DRIVE',
-      routingPreference: 'TRAFFIC_AWARE',
+      travelMode: 'TWO_WHEELER',
       languageCode: 'th-TH',
       units: 'METRIC',
     };
@@ -2323,8 +2883,8 @@ function buildRouteCacheKey({
   destinationLatitude,
   destinationLongitude,
 }) {
-  const to5 = (v) => Number(v).toFixed(5);
-  return `route:${to5(originLatitude)},${to5(originLongitude)}->${to5(destinationLatitude)},${to5(destinationLongitude)}`;
+  const to4 = (v) => Number(v).toFixed(4);
+  return `route:${to4(originLatitude)},${to4(originLongitude)}->${to4(destinationLatitude)},${to4(destinationLongitude)}`;
 }
 
 function parseDurationSeconds(durationText) {

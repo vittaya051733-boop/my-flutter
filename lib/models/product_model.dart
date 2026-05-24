@@ -22,6 +22,10 @@ class Product {
   final String? videoThumbnailUrl;
   final bool aiDescriptionRequested;
   final bool aiWhiteBackgroundRequested;
+  final bool aiProductAnalysisRequested;
+  final bool? aiIsLegalInThailand;
+  final String? aiLegalAnalysisReason;
+  final String? aiProductType;
   final String? taxAiReason;
   final bool? canShipNationwide;
   final String? nationwideShippingReason;
@@ -48,6 +52,10 @@ class Product {
     this.videoThumbnailUrl,
     this.aiDescriptionRequested = false,
     this.aiWhiteBackgroundRequested = false,
+    this.aiProductAnalysisRequested = false,
+    this.aiIsLegalInThailand,
+    this.aiLegalAnalysisReason,
+    this.aiProductType,
     this.taxAiReason,
     this.canShipNationwide,
     this.nationwideShippingReason,
@@ -77,6 +85,10 @@ class Product {
       'videoThumbnailUrl': videoThumbnailUrl,
       'aiDescriptionRequested': aiDescriptionRequested,
       'aiWhiteBackgroundRequested': aiWhiteBackgroundRequested,
+      'aiProductAnalysisRequested': aiProductAnalysisRequested,
+      'aiIsLegalInThailand': aiIsLegalInThailand,
+      'aiLegalAnalysisReason': aiLegalAnalysisReason,
+      'aiProductType': aiProductType,
       'taxAiReason': taxAiReason,
       'canShipNationwide': canShipNationwide,
       'nationwideShippingReason': nationwideShippingReason,
@@ -119,6 +131,10 @@ class Product {
       videoThumbnailUrl: map['videoThumbnailUrl'] as String?,
       aiDescriptionRequested: (map['aiDescriptionRequested'] as bool?) ?? false,
       aiWhiteBackgroundRequested: (map['aiWhiteBackgroundRequested'] as bool?) ?? false,
+      aiProductAnalysisRequested: (map['aiProductAnalysisRequested'] as bool?) ?? false,
+      aiIsLegalInThailand: map['aiIsLegalInThailand'] as bool?,
+      aiLegalAnalysisReason: map['aiLegalAnalysisReason'] as String?,
+      aiProductType: map['aiProductType'] as String?,
       taxAiReason: map['taxAiReason'] as String?,
       canShipNationwide: map['canShipNationwide'] as bool?,
       nationwideShippingReason: map['nationwideShippingReason'] as String?,

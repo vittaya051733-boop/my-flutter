@@ -75,6 +75,8 @@
 		<string>แอปนี้ต้องการบันทึกไฟล์ลงในคลังรูปภาพของคุณสำหรับการดาวน์โหลดใบเสร็จและรูปสินค้า</string>
 		<key>NSMicrophoneUsageDescription</key>
 		<string>แอปนี้ต้องการใช้ไมโครโฟนของคุณสำหรับการโทรด้วยเสียงและวิดีโอ</string>
+		<key>NSFaceIDUsageDescription</key>
+		<string>แอปนี้ใช้การยืนยันตัวตนของเครื่องเพื่อเข้าสู่ระบบอย่างปลอดภัย</string>
 		<key>NSLocationWhenInUseUsageDescription</key>
 		<string>แอปนี้ต้องการตำแหน่งของคุณเพื่อระบุตำแหน่งรถและลูกค้า</string>
 		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>

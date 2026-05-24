@@ -2,10 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
-import 'qr_scanner_screen.dart';
-import 'wallet_action_dialogs.dart';
 import 'wallet_top_up_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
@@ -136,66 +133,16 @@ class _WalletScreenState extends State<WalletScreen> {
     setState(() => _currentCredit = total);
   }
 
-  Future<void> _requestWithdraw() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      _showSnack('กรุณาเข้าสู่ระบบก่อน');
-      return;
-    }
-
-    await _fetchCurrentCredit();
-    if (!mounted) return;
-    if (_currentCredit <= 0) {
-      _showSnack('คุณไม่มีเครดิตสำหรับถอนเงิน');
-      return;
-    }
-
-    await FirebaseFirestore.instance.collection('withdraw_requests').add({
-      'uid': user.uid,
-      'amount': _currentCredit,
-      'timestamp': FieldValue.serverTimestamp(),
-      'status': 'pending',
-      'sourceApp': 'van1_merchant',
-    });
-    _showSnack('ส่งคำขอถอนเงินเรียบร้อย (รอบริษัทอนุมัติ)');
-  }
-
   Future<void> _promptTopUpAmount() async {
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const WalletTopUpDialog(),
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        fullscreenDialog: true,
+        builder: (context) => const WalletTopUpDialog(),
+      ),
     );
 
     if (!mounted) return;
     if (result == true) await _fetchCurrentCredit();
-  }
-
-  Future<void> _openQRScanner() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(builder: (context) => QRScannerScreen()),
-    );
-    if (!mounted || result == null || result.isEmpty) return;
-    _handleScannedQRCode(result);
-  }
-
-  void _handleScannedQRCode(String data) {
-    if (data.startsWith('pay:')) {
-      final amount = double.tryParse(data.substring(4));
-      if (amount != null && amount > 0) {
-        setState(() => _currentCredit -= amount);
-        _showSnack('จ่ายเงิน $amount บาท สำเร็จ');
-        return;
-      }
-    } else if (data.startsWith('receive:')) {
-      final amount = double.tryParse(data.substring(8));
-      if (amount != null && amount > 0) {
-        setState(() => _currentCredit += amount);
-        _showSnack('รับเงิน $amount บาท สำเร็จ');
-        return;
-      }
-    }
-    _showSnack('QR ไม่ถูกต้อง: $data');
   }
 
   void _showSnack(String message) {
@@ -499,55 +446,6 @@ class _WalletScreenState extends State<WalletScreen> {
         ),
         child: Column(
           children: [
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
-                child: Row(
-                  children: [
-                    _WalletActionButton(
-                      icon: Icons.arrow_downward,
-                      label: 'รับเงิน',
-                      style: _walletActionButtonStyle(),
-                      onPressed: () => showDialog<void>(
-                        context: context,
-                        builder: (context) => ReceiveMoneyDialog(uid: uid),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _WalletActionButton(
-                      icon: Icons.arrow_upward,
-                      label: 'จ่ายเงิน',
-                      style: _walletActionButtonStyle(),
-                      onPressed: () => showDialog<void>(
-                        context: context,
-                        builder: (context) => PayMoneyDialog(uid: uid),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _WalletActionButton(
-                      icon: Icons.compare_arrows,
-                      label: 'โอนเงิน',
-                      style: _walletActionButtonStyle(),
-                      onPressed: () => showDialog<void>(
-                        context: context,
-                        builder: (context) => TransferMoneyDialog(uid: uid),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _WalletActionButton(
-                      icon: Icons.money_off,
-                      label: 'ถอนเงิน',
-                      style: _walletActionButtonStyle(),
-                      onPressed: _requestWithdraw,
-                    ),
-                  ],
-                ),
-              ),
-            ),
             Expanded(
               child: SingleChildScrollView(
                 child: Padding(
@@ -660,46 +558,6 @@ class _WalletScreenState extends State<WalletScreen> {
                       ),
                       const SizedBox(height: 12),
                       _buildTodayIncomeCard(uid),
-                      const SizedBox(height: 18),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          _WalletQrButton(uid: uid),
-                          Column(
-                            children: [
-                              Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(16),
-                                  boxShadow: const [
-                                    BoxShadow(
-                                      color: Color(0x24000000),
-                                      blurRadius: 10,
-                                    ),
-                                  ],
-                                ),
-                                child: IconButton(
-                                  icon: const Icon(
-                                    Icons.qr_code_scanner,
-                                    size: 48,
-                                    color: _dashboardOrangeMid,
-                                  ),
-                                  onPressed: _openQRScanner,
-                                  tooltip: 'สแกน QR',
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'สแกนจ่าย/รับเงิน',
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: _dashboardCream,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
                       const SizedBox(height: 24),
                       Card(
                         shape: RoundedRectangleBorder(
@@ -737,100 +595,6 @@ class _WalletScreenState extends State<WalletScreen> {
     );
   }
 
-  ButtonStyle _walletActionButtonStyle() {
-    return ElevatedButton.styleFrom(
-      backgroundColor: Colors.white.withValues(alpha: 0.18),
-      foregroundColor: Colors.white,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-      elevation: 0,
-      side: BorderSide(color: Colors.white.withValues(alpha: 0.22)),
-    );
-  }
-}
-
-class _WalletActionButton extends StatelessWidget {
-  const _WalletActionButton({
-    required this.icon,
-    required this.label,
-    required this.style,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String label;
-  final ButtonStyle style;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: ElevatedButton.icon(
-        icon: Icon(icon),
-        label: FittedBox(fit: BoxFit.scaleDown, child: Text(label)),
-        style: style,
-        onPressed: onPressed,
-      ),
-    );
-  }
-}
-
-class _WalletQrButton extends StatelessWidget {
-  const _WalletQrButton({required this.uid});
-
-  final String uid;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        GestureDetector(
-          onTap: () => showDialog<void>(
-            context: context,
-            barrierDismissible: true,
-            builder: (context) => GestureDetector(
-              onTap: () => Navigator.of(context).pop(),
-              child: Dialog(
-                backgroundColor: Colors.transparent,
-                child: Center(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(24),
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black26, blurRadius: 12),
-                      ],
-                    ),
-                    padding: const EdgeInsets.all(32),
-                    child: QrImageView(data: uid, size: 280),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: const [
-                BoxShadow(color: Color(0x24000000), blurRadius: 10),
-              ],
-            ),
-            padding: const EdgeInsets.all(12),
-            child: QrImageView(data: uid, size: 100),
-          ),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'QR รับเงิน',
-          style: TextStyle(
-            fontSize: 14,
-            color: _WalletScreenState._dashboardCream,
-          ),
-        ),
-      ],
-    );
-  }
 }
 
 class _WalletHistoryItem {

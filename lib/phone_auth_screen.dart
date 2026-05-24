@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'dart:async'; // Import Timer
 import 'navigation_helper.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,7 +19,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
   final TextEditingController _phoneController = TextEditingController();
   final TextEditingController _otpController = TextEditingController();
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  
+
   bool _isLoading = false;
   bool _isOtpSent = false;
   String _verificationId = '';
@@ -27,6 +28,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
   // New: To hold password during registration
   String? _passwordForRegistration;
   String? _serviceTypeForRegistration;
+  Map<String, dynamic>? _branchAssignmentForRegistration;
 
   Timer? _countdownTimer;
   int _countdownSeconds = 120;
@@ -41,6 +43,12 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       phoneNumber = args['phone'] as String?;
       _passwordForRegistration = args['password'] as String?;
       _serviceTypeForRegistration = args['serviceType'] as String?;
+      final branchAssignment = args['branchAssignment'];
+      if (branchAssignment is Map) {
+        _branchAssignmentForRegistration = Map<String, dynamic>.from(
+          branchAssignment,
+        );
+      }
     } else if (args is String) {
       phoneNumber = args;
     }
@@ -75,14 +83,17 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     });
   }
 
-
   Future<void> _sendOtp() async {
-    final phoneNumber = PhoneLoginHelper.normalize(_phoneController.text.trim());
+    final phoneNumber = PhoneLoginHelper.normalize(
+      _phoneController.text.trim(),
+    );
     if (!phoneNumber.startsWith('+')) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('รูปแบบเบอร์โทรไม่ถูกต้อง ต้องขึ้นต้นด้วย + ตามด้วยรหัสประเทศ (เช่น +66..., +81...)'),
+            content: Text(
+              'รูปแบบเบอร์โทรไม่ถูกต้อง ต้องขึ้นต้นด้วย + ตามด้วยรหัสประเทศ (เช่น +66..., +81...)',
+            ),
             backgroundColor: Colors.red,
           ),
         );
@@ -113,12 +124,19 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
             message = 'เบอร์โทรศัพท์ไม่ถูกต้อง';
           } else if (e.code == 'too-many-requests') {
             message = 'มีการขอ OTP มากเกินไป กรุณาลองใหม่ภายหลัง';
+          } else if (e.code == 'operation-not-allowed') {
+            message = 'ยังไม่ได้เปิดการเข้าสู่ระบบด้วยเบอร์โทรใน Firebase';
+          } else if (e.code == 'app-not-authorized') {
+            message =
+                'แอปนี้ยังไม่ได้รับอนุญาตจาก Firebase กรุณาตรวจสอบ SHA-1/SHA-256';
+          } else if (e.code == 'captcha-check-failed') {
+            message =
+                'ยืนยันความปลอดภัยของแอปไม่สำเร็จ กรุณาลองใหม่บนเครื่องจริง';
+          } else if (e.code == 'quota-exceeded') {
+            message = 'โควตา SMS OTP เต็ม กรุณาลองใหม่ภายหลัง';
           }
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(message),
-              backgroundColor: Colors.red,
-            ),
+            SnackBar(content: Text(message), backgroundColor: Colors.red),
           );
         },
         codeSent: (String verificationId, int? resendToken) {
@@ -150,15 +168,25 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text('เกิดข้อผิดพลาด: $e'), backgroundColor: Colors.red),
+          content: Text('เกิดข้อผิดพลาด: $e'),
+          backgroundColor: Colors.red,
+        ),
       );
     }
   }
 
   Future<void> _verifyOtp() async {
-    if (_otpController.text.length != 6) {
+    final otp = _otpController.text.trim();
+    if (!RegExp(r'^\d{6}$').hasMatch(otp)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอก OTP 6 หลัก')),
+        const SnackBar(content: Text('OTP ต้องเป็นตัวเลข 6 หลัก')),
+      );
+      return;
+    }
+
+    if (_verificationId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากดส่ง OTP อีกครั้งก่อนยืนยัน')),
       );
       return;
     }
@@ -170,39 +198,46 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     try {
       PhoneAuthCredential credential = PhoneAuthProvider.credential(
         verificationId: _verificationId,
-        smsCode: _otpController.text.trim(),
+        smsCode: otp,
       );
 
       await _signInWithCredential(credential);
-    } catch (e) {
+    } on FirebaseAuthException catch (e) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
       });
 
       String message = 'OTP ไม่ถูกต้อง';
-      if (e.toString().contains('invalid-verification-code')) {
+      if (e.code == 'invalid-verification-code') {
         message = 'รหัส OTP ไม่ถูกต้อง';
-      } else if (e.toString().contains('session-expired')) {
+      } else if (e.code == 'session-expired') {
         message = 'OTP หมดอายุ กรุณาขอรหัสใหม่';
+      } else if (e.code == 'invalid-verification-id') {
+        message = 'รหัสยืนยันหมดอายุ กรุณากดส่ง OTP อีกครั้ง';
+      } else if (e.code == 'credential-already-in-use') {
+        message = 'เบอร์นี้ผูกกับบัญชีอื่นแล้ว';
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
       );
     }
   }
 
   Future<void> _signInWithCredential(PhoneAuthCredential credential) async {
     try {
-      UserCredential userCredential = await _auth.signInWithCredential(credential);
-      
+      UserCredential userCredential = await _auth.signInWithCredential(
+        credential,
+      );
+
       if (userCredential.user != null) {
-        final normalizedPhone = PhoneLoginHelper.normalize(_phoneController.text.trim());
-        final bool hasPassword = _passwordForRegistration != null && _passwordForRegistration!.isNotEmpty;
+        final normalizedPhone = PhoneLoginHelper.normalize(
+          _phoneController.text.trim(),
+        );
+        final bool hasPassword =
+            _passwordForRegistration != null &&
+            _passwordForRegistration!.isNotEmpty;
         final firebaseUser = userCredential.user!;
 
         if (hasPassword) {
@@ -221,23 +256,25 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
             }
           }
 
-          await FirebaseFirestore.instance.collection('users').doc(firebaseUser.uid).set(
-            {
-              'loginEmail': pseudoEmail,
-              'loginProvider': 'phone',
-            },
-            SetOptions(merge: true),
-          );
+          await FirebaseFirestore.instance
+              .collection('users')
+              .doc(firebaseUser.uid)
+              .set({
+                'loginEmail': pseudoEmail,
+                'loginProvider': 'phone',
+                ...?_branchAssignmentForRegistration,
+              }, SetOptions(merge: true));
           _passwordForRegistration = null;
         }
 
-        await FirebaseFirestore.instance.collection('users').doc(firebaseUser.uid).set(
-          {
-            'phoneNumber': normalizedPhone,
-            'phoneVerifiedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(firebaseUser.uid)
+            .set({
+              'phoneNumber': normalizedPhone,
+              'phoneVerifiedAt': FieldValue.serverTimestamp(),
+              ...?_branchAssignmentForRegistration,
+            }, SetOptions(merge: true));
 
         try {
           await NotificationService().saveUserFcmToken(firebaseUser.uid);
@@ -245,21 +282,27 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
           debugPrint('Failed to sync FCM token after phone auth: $e');
         }
 
-        if (mounted) { // mounted check
+        if (mounted) {
+          // mounted check
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('ยืนยันเบอร์โทรสำเร็จ! เข้าสู่ระบบแล้ว'),
               backgroundColor: Colors.green,
             ),
           );
-          
+
           // ตรวจสอบสถานะและนำทางอัตโนมัติ
           // ถ้ามี serviceType มาจากการลงทะเบียน ให้บันทึกลงใน contract ก่อน
-          if (_serviceTypeForRegistration != null && userCredential.user != null) {
-            await FirebaseFirestore.instance.collection('contracts').doc(userCredential.user!.uid).set({
-              'serviceType': _serviceTypeForRegistration,
-              'status': 'pending_acceptance', // สถานะเริ่มต้น
-            }, SetOptions(merge: true));
+          if (_serviceTypeForRegistration != null &&
+              userCredential.user != null) {
+            await FirebaseFirestore.instance
+                .collection('contracts')
+                .doc(userCredential.user!.uid)
+                .set({
+                  'serviceType': _serviceTypeForRegistration,
+                  'status': 'pending_acceptance', // สถานะเริ่มต้น
+                  ...?_branchAssignmentForRegistration,
+                }, SetOptions(merge: true));
           }
 
           // ใช้ NavigationHelper เพื่อนำทาง
@@ -268,7 +311,9 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
           if (user != null) {
             await NavigationHelper.navigateBasedOnUserStatus(context, user);
           } else {
-            Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
+            Navigator.of(
+              context,
+            ).pushNamedAndRemoveUntil('/home', (route) => false);
           }
         }
       }
@@ -293,7 +338,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('ยืนยันเบอร์โทร'),
-  backgroundColor: AppColors.accent,
+        backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
         elevation: 0,
       ),
@@ -303,16 +348,12 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const SizedBox(height: 40),
-            
+
             // Phone Icon
-            const Icon(
-              Icons.phone_android,
-              size: 80,
-              color: AppColors.accent,
-            ),
-            
+            const Icon(Icons.phone_android, size: 80, color: AppColors.accent),
+
             const SizedBox(height: 24),
-            
+
             // Title
             Text(
               _isOtpSent ? 'ยืนยันรหัส OTP' : 'เข้าสู่ระบบด้วยเบอร์โทร',
@@ -323,28 +364,28 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                 color: Color(0xFF2C3E50),
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             // Description
             Text(
-              _isOtpSent 
+              _isOtpSent
                   ? 'กรุณากรอกรหัส OTP 6 หลักที่ส่งไปที่\n${_phoneController.text}'
                   : 'กรุณากรอกเบอร์โทรศัพท์เพื่อรับรหัส OTP',
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 16,
-                color: Colors.grey,
-              ),
+              style: const TextStyle(fontSize: 16, color: Colors.grey),
             ),
-            
+
             const SizedBox(height: 32),
-            
+
             if (!_isOtpSent) ...[
               // Phone Number Field
               TextFormField(
                 controller: _phoneController,
                 keyboardType: TextInputType.phone,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9+\-\s]')),
+                ],
                 decoration: InputDecoration(
                   labelText: 'เบอร์โทรศัพท์',
                   hintText: '+66812345678',
@@ -356,9 +397,9 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                   fillColor: Colors.grey[50],
                 ),
               ),
-              
+
               const SizedBox(height: 24),
-              
+
               // Send OTP Button
               ElevatedButton(
                 onPressed: _isLoading ? null : _sendOtp,
@@ -381,7 +422,10 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                       )
                     : const Text(
                         'ส่งรหัส OTP',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
               ),
             ] else ...[
@@ -389,6 +433,10 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
               TextFormField(
                 controller: _otpController,
                 keyboardType: TextInputType.number,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(6),
+                ],
                 textAlign: TextAlign.center,
                 maxLength: 6,
                 style: const TextStyle(
@@ -407,9 +455,9 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                   fillColor: Colors.grey[50],
                 ),
               ),
-              
+
               const SizedBox(height: 24),
-              
+
               // Verify OTP Button
               ElevatedButton(
                 onPressed: _isLoading ? null : _verifyOtp,
@@ -432,12 +480,15 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                       )
                     : const Text(
                         'ยืนยัน OTP',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
               ),
-              
+
               const SizedBox(height: 16),
-              
+
               // Resend OTP Button
               ValueListenableBuilder<bool>(
                 valueListenable: ValueNotifier(_countdownSeconds > 0),
@@ -448,15 +499,18 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                       isCountingDown
                           ? 'ส่งรหัส OTP อีกครั้ง (${_countdownSeconds}s)'
                           : 'ส่งรหัส OTP อีกครั้ง',
-                      style: TextStyle(color: isCountingDown ? Colors.grey : AppColors.accent, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        color: isCountingDown ? Colors.grey : AppColors.accent,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   );
                 },
               ),
             ],
-            
+
             const SizedBox(height: 24),
-            
+
             // Back to login
             TextButton(
               onPressed: () {
@@ -470,7 +524,6 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
                 ),
               ),
             ),
-            
           ],
         ),
       ),

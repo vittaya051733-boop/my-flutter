@@ -5,6 +5,10 @@ import 'operating_hours.dart';
 class ShopOperationsSettings {
   const ShopOperationsSettings({
     required this.autoAcceptOrders,
+    required this.autoListenIncomingOrders,
+    required this.notifyNewOrders,
+    required this.notifyLowStock,
+    required this.emailMonthlyReports,
     required this.pauseNewOrders,
     required this.operatingHours,
     this.pauseUntil,
@@ -12,6 +16,10 @@ class ShopOperationsSettings {
   });
 
   final bool autoAcceptOrders;
+  final bool autoListenIncomingOrders;
+  final bool notifyNewOrders;
+  final bool notifyLowStock;
+  final bool emailMonthlyReports;
   final bool pauseNewOrders;
   final OperatingHours operatingHours;
   final DateTime? pauseUntil;
@@ -20,6 +28,10 @@ class ShopOperationsSettings {
   static ShopOperationsSettings defaults() {
     return ShopOperationsSettings(
       autoAcceptOrders: false,
+      autoListenIncomingOrders: true,
+      notifyNewOrders: true,
+      notifyLowStock: true,
+      emailMonthlyReports: false,
       pauseNewOrders: false,
       operatingHours: OperatingHours.defaultWeek(),
     );
@@ -38,6 +50,14 @@ class ShopOperationsSettings {
     }
     return ShopOperationsSettings(
       autoAcceptOrders: map['autoAcceptOrders'] as bool? ?? false,
+      autoListenIncomingOrders:
+          map['autoListenIncomingOrders'] as bool? ?? true,
+      notifyNewOrders: map['notifyNewOrders'] as bool? ?? true,
+      notifyLowStock: map['notifyLowStock'] as bool? ?? true,
+      emailMonthlyReports:
+          map['emailMonthlyReports'] as bool? ??
+          map['emailDailyReports'] as bool? ??
+          false,
       pauseNewOrders: map['pauseNewOrders'] as bool? ?? false,
       operatingHours: OperatingHours.fromMap(map['operatingHours'] as Map<String, dynamic>?),
       pauseUntil: (map['pauseUntil'] as Timestamp?)?.toDate(),
@@ -47,6 +67,10 @@ class ShopOperationsSettings {
 
   ShopOperationsSettings copyWith({
     bool? autoAcceptOrders,
+    bool? autoListenIncomingOrders,
+    bool? notifyNewOrders,
+    bool? notifyLowStock,
+    bool? emailMonthlyReports,
     bool? pauseNewOrders,
     OperatingHours? operatingHours,
     DateTime? pauseUntil,
@@ -54,6 +78,11 @@ class ShopOperationsSettings {
   }) {
     return ShopOperationsSettings(
       autoAcceptOrders: autoAcceptOrders ?? this.autoAcceptOrders,
+      autoListenIncomingOrders:
+          autoListenIncomingOrders ?? this.autoListenIncomingOrders,
+      notifyNewOrders: notifyNewOrders ?? this.notifyNewOrders,
+      notifyLowStock: notifyLowStock ?? this.notifyLowStock,
+      emailMonthlyReports: emailMonthlyReports ?? this.emailMonthlyReports,
       pauseNewOrders: pauseNewOrders ?? this.pauseNewOrders,
       operatingHours: operatingHours ?? this.operatingHours,
       pauseUntil: pauseUntil ?? this.pauseUntil,
@@ -64,6 +93,11 @@ class ShopOperationsSettings {
   Map<String, dynamic> toMap() {
     return <String, dynamic>{
       'autoAcceptOrders': autoAcceptOrders,
+      'autoListenIncomingOrders': autoListenIncomingOrders,
+      'notifyNewOrders': notifyNewOrders,
+      'notifyLowStock': notifyLowStock,
+      'emailMonthlyReports': emailMonthlyReports,
+      'emailDailyReports': emailMonthlyReports,
       'pauseNewOrders': pauseNewOrders,
       'operatingHours': operatingHours.toMap(),
       if (pauseUntil != null) 'pauseUntil': Timestamp.fromDate(pauseUntil!),

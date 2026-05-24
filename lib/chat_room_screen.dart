@@ -32,6 +32,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final ImagePicker _imagePicker = ImagePicker();
 
   UserProfile? _currentProfile;
+  late UserProfile _friendProfile;
   bool _sending = false;
   bool _uploading = false;
   bool _startingCall = false;
@@ -40,12 +41,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
   String get _chatId => _chatService.chatIdFor(
         _currentProfile?.uid ?? '',
-        widget.friendProfile.uid,
+        _friendProfile.uid,
       );
 
   @override
   void initState() {
     super.initState();
+    _friendProfile = widget.friendProfile;
     _loadProfile();
   }
 
@@ -69,13 +71,18 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       return;
     }
 
+    final refreshedFriend =
+        await _friendService.getProfile(widget.friendProfile.uid) ??
+        widget.friendProfile;
+
     try {
       await _chatService.ensureChatAvailable(
         sender: profile,
-        target: widget.friendProfile,
+        target: refreshedFriend,
       );
-      await _chatService.purgeExpiredMessages(_chatId);
-      await _chatService.markChatAsRead(owner: profile, friend: widget.friendProfile);
+      final chatId = _chatService.chatIdFor(profile.uid, refreshedFriend.uid);
+      await _chatService.purgeExpiredMessages(chatId);
+      await _chatService.markChatAsRead(owner: profile, friend: refreshedFriend);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = 'ไม่สามารถเริ่มห้องแชทได้: $e');
@@ -83,31 +90,41 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     }
 
     if (!mounted) return;
-    setState(() => _currentProfile = profile);
+    setState(() {
+      _currentProfile = profile;
+      _friendProfile = refreshedFriend;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final profile = _currentProfile;
-    final friendName = widget.friendProfile.displayName.trim();
+    final friendProfile = _friendProfile;
+    final friendName = friendProfile.displayName.trim();
     final friendInitial =
         friendName.isNotEmpty ? friendName.characters.first.toUpperCase() : '?';
     return Scaffold(
       appBar: AppBar(
         title: Row(
           children: [
-            CircleAvatar(
-              backgroundImage: widget.friendProfile.photoUrl != null
-                  ? NetworkImage(widget.friendProfile.photoUrl!)
-                  : null,
-              child: widget.friendProfile.photoUrl == null
-                  ? Text(friendInitial)
-                  : null,
+            ClipOval(
+              child: SizedBox(
+                width: 40,
+                height: 40,
+                child: friendProfile.photoUrl != null
+                    ? CachedAppImage(
+                        imageUrl: friendProfile.photoUrl!,
+                        width: 40,
+                        height: 40,
+                        errorWidget: _AvatarFallback(initial: friendInitial),
+                      )
+                    : _AvatarFallback(initial: friendInitial),
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                widget.friendProfile.displayName,
+                friendProfile.displayName,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -177,7 +194,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _markingAsRead = true;
     unawaited(() async {
       try {
-        await _chatService.markChatAsRead(owner: profile, friend: widget.friendProfile);
+        await _chatService.markChatAsRead(owner: profile, friend: _friendProfile);
       } finally {
         _markingAsRead = false;
       }
@@ -232,7 +249,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     try {
       await _chatService.sendTextMessage(
         sender: profile,
-        target: widget.friendProfile,
+        target: _friendProfile,
         text: text,
       );
       _messageController.clear();
@@ -329,7 +346,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     try {
       await _chatService.sendMediaMessage(
         sender: profile,
-        target: widget.friendProfile,
+        target: _friendProfile,
         file: file,
         messageType: type,
         fileName: fileName,
@@ -361,14 +378,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       // 1. เรียก Cloud Function ผ่าน NotificationService เพื่อสร้าง token และส่ง notification
       final callData = await _notificationService.initiateCall(
         caller: caller,
-        callee: widget.friendProfile,
+        callee: _friendProfile,
         isVideo: isVideo,
       );
 
       if (!mounted) return;
 
       // 2. สร้างโปรไฟล์เป้าหมายจากข้อมูลที่ Cloud Function ส่งกลับ (ถ้ามี)
-      UserProfile targetProfile = widget.friendProfile;
+      UserProfile targetProfile = _friendProfile;
       final calleeProfileData = callData['calleeProfile'];
       if (calleeProfileData is Map<String, dynamic>) {
         targetProfile = targetProfile.copyWith(
@@ -399,7 +416,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
       await _chatService.logCallEvent(
         initiator: caller,
-        target: widget.friendProfile,
+        target: _friendProfile,
         isVideo: isVideo,
         answered: answered,
         duration: durationMillis != null ? Duration(milliseconds: durationMillis) : null,
@@ -416,6 +433,24 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         setState(() => _startingCall = false);
       }
     }
+  }
+}
+
+class _AvatarFallback extends StatelessWidget {
+  const _AvatarFallback({required this.initial});
+
+  final String initial;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Theme.of(context).colorScheme.surfaceVariant,
+      alignment: Alignment.center,
+      child: Text(
+        initial,
+        style: const TextStyle(fontWeight: FontWeight.w700),
+      ),
+    );
   }
 }
  

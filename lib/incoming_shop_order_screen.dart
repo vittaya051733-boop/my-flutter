@@ -1,5 +1,8 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'chat_room_screen.dart';
 import 'models/order_model.dart';
@@ -13,6 +16,7 @@ class IncomingShopOrderScreen extends StatefulWidget {
     required this.order,
     required this.onAccept,
     required this.onReject,
+    this.autoStartVoiceListening = true,
     this.title,
     this.message,
   });
@@ -20,6 +24,7 @@ class IncomingShopOrderScreen extends StatefulWidget {
   final DetailedOrder order;
   final Future<void> Function() onAccept;
   final Future<void> Function() onReject;
+  final bool autoStartVoiceListening;
   final String? title;
   final String? message;
 
@@ -28,8 +33,261 @@ class IncomingShopOrderScreen extends StatefulWidget {
       _IncomingShopOrderScreenState();
 }
 
-class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen> {
+class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
+    with WidgetsBindingObserver {
+  static const double _voiceNoiseGateDelta = 5;
+  static const double _voiceNoiseGateMinimumPeak = 7;
+  final stt.SpeechToText _speech = stt.SpeechToText();
   bool _isSubmitting = false;
+  bool _voiceAvailable = false;
+  bool _voiceReady = false;
+  bool _isListening = false;
+  bool _hasAutoStartedVoice = false;
+  double _voiceAmbientLevel = 0;
+  double _voicePeakLevel = 0;
+  int _voiceLevelSamples = 0;
+  String _lastVoiceText = '';
+  String? _voiceMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _voiceMessage = 'กดปุ่มไมค์เพื่อใช้คำสั่งเสียง';
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future<void>.microtask(_maybeAutoStartVoiceListening);
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _speech.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      Future<void>.microtask(_maybeAutoStartVoiceListening);
+    } else {
+      _hasAutoStartedVoice = false;
+    }
+  }
+
+  Future<void> _initVoiceCommands() async {
+    try {
+      final available = await _speech.initialize(
+        onStatus: _handleSpeechStatus,
+        onError: (error) {
+          if (!mounted) return;
+          setState(() {
+            _isListening = false;
+            _voiceMessage = 'ไมค์ยังฟังไม่ได้: ${error.errorMsg}';
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _voiceAvailable = available;
+        _voiceReady = true;
+        _voiceMessage = available ? 'พร้อมรับคำสั่งเสียง' : 'ไม่พบระบบรับเสียง';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _voiceReady = true;
+        _voiceAvailable = false;
+        _voiceMessage = 'เปิดระบบเสียงไม่สำเร็จ';
+      });
+    }
+  }
+
+  void _handleSpeechStatus(String status) {
+    if (!mounted) return;
+    if (status == 'done' || status == 'notListening') {
+      setState(() => _isListening = false);
+    }
+  }
+
+  Future<void> _toggleVoiceListening() async {
+    if (_isSubmitting) return;
+    if (_isListening) {
+      await _speech.stop();
+      if (!mounted) return;
+      setState(() => _isListening = false);
+      return;
+    }
+
+    final micAllowed = await _requestMicrophonePermission();
+    if (!micAllowed) return;
+
+    if (!_voiceReady) {
+      await _initVoiceCommands();
+    }
+    if (!_voiceAvailable) {
+      if (!mounted) return;
+      setState(() => _voiceMessage = 'กรุณาอนุญาตไมค์ก่อนใช้คำสั่งเสียง');
+      return;
+    }
+
+    setState(() {
+      _isListening = true;
+      _lastVoiceText = '';
+      _voiceMessage = 'กำลังฟัง...';
+    });
+    _resetVoiceNoiseGate();
+
+    await _speech.listen(
+      localeId: 'th_TH',
+      listenFor: const Duration(seconds: 8),
+      pauseFor: const Duration(seconds: 2),
+      partialResults: false,
+      cancelOnError: false,
+      onSoundLevelChange: _trackVoiceSoundLevel,
+      listenMode: stt.ListenMode.confirmation,
+      onResult: (result) {
+        _handleVoiceResult(result.recognizedWords, isFinal: result.finalResult);
+      },
+    );
+  }
+
+  void _resetVoiceNoiseGate() {
+    _voiceAmbientLevel = 0;
+    _voicePeakLevel = 0;
+    _voiceLevelSamples = 0;
+  }
+
+  void _trackVoiceSoundLevel(double level) {
+    if (!level.isFinite) return;
+    final sanitized = level < 0 ? 0.0 : level;
+    if (sanitized > _voicePeakLevel) {
+      _voicePeakLevel = sanitized;
+    }
+
+    final shouldLearnAmbient =
+        _voiceLevelSamples < 8 ||
+        sanitized <= (_voiceAmbientLevel + (_voiceNoiseGateDelta / 2));
+    if (!shouldLearnAmbient) {
+      return;
+    }
+
+    if (_voiceLevelSamples == 0) {
+      _voiceAmbientLevel = sanitized;
+    } else {
+      _voiceAmbientLevel = (_voiceAmbientLevel * 0.8) + (sanitized * 0.2);
+    }
+    _voiceLevelSamples++;
+  }
+
+  bool _passesVoiceNoiseGate() {
+    final requiredPeak = math.max(
+      _voiceNoiseGateMinimumPeak,
+      _voiceAmbientLevel + _voiceNoiseGateDelta,
+    );
+    return _voicePeakLevel >= requiredPeak;
+  }
+
+  Future<void> _maybeAutoStartVoiceListening() async {
+    if (!mounted ||
+        !widget.autoStartVoiceListening ||
+        _isSubmitting ||
+        _isListening ||
+        _hasAutoStartedVoice) {
+      return;
+    }
+
+    final status = await Permission.microphone.status;
+    if (!mounted || !status.isGranted) {
+      return;
+    }
+
+    _hasAutoStartedVoice = true;
+    await _toggleVoiceListening();
+  }
+
+  Future<bool> _requestMicrophonePermission() async {
+    final status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+
+    final requested = await Permission.microphone.request();
+    if (requested.isGranted) return true;
+
+    if (!mounted) return false;
+    setState(() {
+      _voiceReady = false;
+      _voiceAvailable = false;
+      _isListening = false;
+      _voiceMessage = requested.isPermanentlyDenied
+          ? 'กรุณาเปิดสิทธิ์ไมค์ในตั้งค่าเครื่องก่อนใช้คำสั่งเสียง'
+          : 'ต้องอนุญาตไมค์ก่อนใช้คำสั่งเสียง';
+    });
+    return false;
+  }
+
+  Future<void> _openMicrophoneSettings() async {
+    await openAppSettings();
+  }
+
+  bool get _showOpenSettingsAction {
+    final message = _voiceMessage?.trim() ?? '';
+    return message.contains('ตั้งค่าเครื่อง') || message.contains('อนุญาตไมค์');
+  }
+
+  void _handleVoiceResult(String words, {required bool isFinal}) {
+    if (!mounted || words.trim().isEmpty || !isFinal) return;
+    final command = _matchVoiceCommand(words);
+    if (!_passesVoiceNoiseGate()) {
+      if (command != null && !_isSubmitting) {
+        _speech.stop();
+        setState(() {
+          _lastVoiceText = words.trim();
+          _voiceMessage = null;
+          _isListening = false;
+        });
+        _submit(accept: command);
+        return;
+      }
+      setState(() {
+        _lastVoiceText = words.trim();
+        _voiceMessage = 'เสียงรบกวนมากเกินไป ลองพูดใกล้ไมค์อีกครั้ง';
+      });
+      return;
+    }
+    setState(() {
+      _lastVoiceText = words.trim();
+      _voiceMessage = command == null ? 'ได้ยิน: ${words.trim()}' : null;
+    });
+
+    if (command == null || _isSubmitting) return;
+    _speech.stop();
+    setState(() => _isListening = false);
+    _submit(accept: command);
+  }
+
+  bool? _matchVoiceCommand(String words) {
+    final normalized = words.toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    final hasAccept =
+        normalized.contains('รับออเดอร์เข้า') ||
+        normalized.contains('รับออเดอร์') ||
+        normalized == 'รับ' ||
+        normalized.contains('ตกลง') ||
+        normalized.contains('ยืนยันออเดอร์') ||
+        normalized.contains('ยืนยัน') ||
+        normalized.contains('รับorder') ||
+        normalized.contains('acceptorder');
+    final hasReject =
+        normalized.contains('ปฏิเสธออเดอร์ออก') ||
+        normalized.contains('ปฏิเสธออเดอร์') ||
+        normalized.contains('ปฏิเสธ') ||
+        normalized.contains('ยกเลิก') ||
+        normalized.contains('ไม่รับออเดอร์') ||
+        normalized.contains('ไม่รับ') ||
+        normalized.contains('rejectorder');
+
+    if (hasAccept == hasReject) return null;
+    return hasAccept;
+  }
 
   Future<void> _submit({required bool accept}) async {
     if (_isSubmitting) return;
@@ -231,6 +489,18 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen> {
                         ),
                       ),
                       Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                        child: _VoiceCommandPanel(
+                          isListening: _isListening,
+                          isEnabled: !_isSubmitting,
+                          showOpenSettingsAction: _showOpenSettingsAction,
+                          message: _voiceMessage,
+                          lastText: _lastVoiceText,
+                          onTap: _toggleVoiceListening,
+                          onOpenSettings: _openMicrophoneSettings,
+                        ),
+                      ),
+                      Padding(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                         child: Row(
                           children: <Widget>[
@@ -289,6 +559,89 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _VoiceCommandPanel extends StatelessWidget {
+  const _VoiceCommandPanel({
+    required this.isListening,
+    required this.isEnabled,
+    required this.showOpenSettingsAction,
+    required this.onTap,
+    required this.onOpenSettings,
+    this.message,
+    this.lastText,
+  });
+
+  final bool isListening;
+  final bool isEnabled;
+  final bool showOpenSettingsAction;
+  final VoidCallback onTap;
+  final VoidCallback onOpenSettings;
+  final String? message;
+  final String? lastText;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusText = message?.trim().isNotEmpty == true
+        ? message!.trim()
+        : (isListening ? 'กำลังฟัง...' : 'สั่งงานด้วยเสียง');
+    final recognizedText = lastText?.trim();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: isListening ? const Color(0xFFFFF7ED) : const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isListening ? AppColors.accent : const Color(0xFFE2E8F0),
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          IconButton.filledTonal(
+            onPressed: isEnabled ? onTap : null,
+            icon: Icon(
+              isListening ? Icons.mic_rounded : Icons.mic_none_rounded,
+            ),
+            tooltip: isListening ? 'หยุดฟัง' : 'เริ่มฟังคำสั่งเสียง',
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  statusText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  recognizedText?.isNotEmpty == true
+                      ? recognizedText!
+                      : 'รับออเดอร์เข้า / ปฏิเสธออเดอร์ออก',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (showOpenSettingsAction) ...<Widget>[
+            const SizedBox(width: 10),
+            TextButton(
+              onPressed: onOpenSettings,
+              child: const Text('ตั้งค่าไมค์'),
+            ),
+          ],
+        ],
       ),
     );
   }

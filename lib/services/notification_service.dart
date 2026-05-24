@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -15,10 +16,158 @@ import '../models/order_model.dart';
 import '../incoming_shop_order_screen.dart';
 import '../order_management_screen_new.dart';
 import '../models/user_profile.dart';
+import '../services/shop_operations_service.dart';
 import '../call_screen.dart';
+import '../firebase_options.dart';
 import '../main.dart';
 import '../widgets/chat_message_popup.dart';
 import '../chat_room_screen.dart';
+
+String _normalizeInboxKeyPart(String? value) {
+  final normalized = (value ?? '').trim().toLowerCase();
+  if (normalized.isEmpty) {
+    return 'na';
+  }
+  return normalized.replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+}
+
+String _buildVan1InboxNotificationId({
+  required Map<String, dynamic> data,
+  String? messageId,
+}) {
+  final type = _normalizeInboxKeyPart(data['type'] as String?);
+  final action = _normalizeInboxKeyPart(
+    (data['action'] as String?) ??
+        (type == 'chat'
+            ? 'chat_message'
+            : type == 'call'
+            ? 'incoming_call'
+            : 'general'),
+  );
+  final notificationId = _normalizeInboxKeyPart(data['notificationId'] as String?);
+  final chatId = _normalizeInboxKeyPart(data['chatId'] as String?);
+  final channelId = _normalizeInboxKeyPart(data['channelId'] as String?);
+  final orderId = _normalizeInboxKeyPart(data['orderId'] as String?);
+  final senderId = _normalizeInboxKeyPart(data['senderId'] as String?);
+  final callerId = _normalizeInboxKeyPart(
+    (data['callerId'] as String?) ?? (data['caller_id'] as String?),
+  );
+  final bodySeed = _normalizeInboxKeyPart(
+    (data['message'] as String?) ?? (data['body'] as String?),
+  );
+  final remoteMessageId = _normalizeInboxKeyPart(messageId);
+
+  return <String>[
+    'van1',
+    type,
+    action,
+    notificationId,
+    chatId,
+    channelId,
+    orderId,
+    senderId,
+    callerId,
+    remoteMessageId,
+    bodySeed,
+  ].join('__');
+}
+
+Future<void> _persistVan1RemoteMessageToInbox(
+  Map<String, dynamic> data, {
+  String? messageId,
+  String? title,
+  String? body,
+}) async {
+  final existingNotificationId = (data['notificationId'] as String?)?.trim() ?? '';
+  if (existingNotificationId.isNotEmpty) {
+    return;
+  }
+
+  final currentUid = FirebaseAuth.instance.currentUser?.uid.trim();
+  final recipientUid = (data['recipientUid'] as String?)?.trim();
+  final targetUid = recipientUid?.isNotEmpty == true ? recipientUid! : currentUid;
+  if (targetUid == null || targetUid.isEmpty) {
+    return;
+  }
+
+  final type = (data['type'] as String?)?.trim() ?? 'app_notification';
+  final action = (data['action'] as String?)?.trim().isNotEmpty == true
+      ? (data['action'] as String).trim()
+      : type == 'chat'
+      ? 'chat_message'
+      : type == 'call'
+      ? 'incoming_call'
+      : 'general';
+  final senderName = (data['senderName'] as String?)?.trim();
+  final callerName = ((data['callerName'] as String?) ?? (data['caller_name'] as String?))?.trim();
+  final resolvedTitle = (() {
+    if (title?.trim().isNotEmpty == true) {
+      return title!.trim();
+    }
+    if (type == 'chat') {
+      return senderName?.isNotEmpty == true ? senderName! : 'ข้อความใหม่';
+    }
+    if (type == 'call') {
+      final isVideo = data['isVideo'] == true || data['isVideo'] == 'true';
+      return isVideo ? 'วิดีโอคอลเข้า' : 'สายเข้า';
+    }
+    return 'แจ้งเตือน';
+  })();
+  final resolvedBody = (() {
+    if (body?.trim().isNotEmpty == true) {
+      return body!.trim();
+    }
+    if (type == 'chat') {
+      return ((data['message'] as String?) ?? '').trim();
+    }
+    if (type == 'call') {
+      final displayName = callerName?.isNotEmpty == true ? callerName! : 'ผู้โทร';
+      final isVideo = data['isVideo'] == true || data['isVideo'] == 'true';
+      return isVideo ? '$displayName กำลังวิดีโอคอลเข้ามา' : '$displayName กำลังโทรเข้ามา';
+    }
+    return ((data['body'] as String?) ?? '').trim();
+  })();
+  if (resolvedTitle.isEmpty && resolvedBody.isEmpty) {
+    return;
+  }
+
+  final docId = _buildVan1InboxNotificationId(data: data, messageId: messageId);
+  await FirebaseFirestore.instance
+      .collection('app_notifications')
+      .doc(docId)
+      .set(<String, dynamic>{
+        'targetApp': 'van1',
+        'recipientUid': targetUid,
+        if ((data['orderId'] as String?)?.trim().isNotEmpty == true)
+          'orderId': (data['orderId'] as String).trim(),
+        if ((data['chatId'] as String?)?.trim().isNotEmpty == true)
+          'chatId': (data['chatId'] as String).trim(),
+        if ((data['senderId'] as String?)?.trim().isNotEmpty == true)
+          'senderId': (data['senderId'] as String).trim(),
+        if (senderName?.isNotEmpty == true) 'senderName': senderName,
+        if (((data['callerId'] as String?) ?? (data['caller_id'] as String?))?.trim().isNotEmpty == true)
+          'callerId': (((data['callerId'] as String?) ?? (data['caller_id'] as String?))!).trim(),
+        if (callerName?.isNotEmpty == true) 'callerName': callerName,
+        if ((data['callerPhotoUrl'] as String?)?.trim().isNotEmpty == true)
+          'callerPhotoUrl': (data['callerPhotoUrl'] as String).trim(),
+        if ((data['channelId'] as String?)?.trim().isNotEmpty == true)
+          'channelId': (data['channelId'] as String).trim(),
+        'title': resolvedTitle,
+        'body': resolvedBody,
+        'read': false,
+        'createdAt': FieldValue.serverTimestamp(),
+        'source': 'van1_received',
+        'sourceApp': 'van1',
+        'action': action,
+        'type': type,
+        if (messageId?.trim().isNotEmpty == true) 'messageId': messageId!.trim(),
+        if ((data['callType'] as String?)?.trim().isNotEmpty == true)
+          'callType': (data['callType'] as String).trim(),
+        if (data['isVideo'] != null) 'isVideo': data['isVideo'] == true || data['isVideo'] == 'true',
+        if ((data['message'] as String?)?.trim().isNotEmpty == true)
+          'message': (data['message'] as String).trim(),
+      }, SetOptions(merge: true));
+}
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -441,6 +590,13 @@ class NotificationService {
     final notification = message.notification;
     final data = message.data;
 
+    await _persistVan1RemoteMessageToInbox(
+      data,
+      messageId: message.messageId,
+      title: notification?.title,
+      body: notification?.body,
+    );
+
     if (data['type'] == 'call_cancel') {
       _handleCallCancelFromNative(data['channelId'] as String?);
       return;
@@ -628,6 +784,14 @@ class NotificationService {
   /// จัดการเมื่อกด notification จาก background
   void _handleNotificationTap(RemoteMessage message) {
     debugPrint('Notification tapped from background: ${message.messageId}');
+    unawaited(
+      _persistVan1RemoteMessageToInbox(
+        message.data,
+        messageId: message.messageId,
+        title: message.notification?.title,
+        body: message.notification?.body,
+      ),
+    );
     if (_isIncomingShopDecisionNotification(message.data)) {
       unawaited(_showIncomingOrderDecisionPrompt(message.data));
       return;
@@ -692,6 +856,46 @@ class NotificationService {
         }, SetOptions(merge: true));
   }
 
+  Future<void> createInboxNotification({
+    required String title,
+    required String body,
+    String? orderId,
+    String action = 'general',
+    String? recipientUid,
+    String? documentId,
+    Map<String, dynamic>? extraData,
+  }) async {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid.trim();
+    final toUid = recipientUid?.trim().isNotEmpty == true
+        ? recipientUid!.trim()
+        : currentUid;
+    if (toUid == null || toUid.isEmpty) {
+      return;
+    }
+
+    final collection = FirebaseFirestore.instance.collection('app_notifications');
+    final payload = <String, dynamic>{
+          'targetApp': 'van1',
+          'recipientUid': toUid,
+          if (orderId?.trim().isNotEmpty == true) 'orderId': orderId!.trim(),
+          'title': title.trim().isNotEmpty ? title.trim() : 'แจ้งเตือน',
+          'body': body.trim(),
+          'read': false,
+          'createdAt': FieldValue.serverTimestamp(),
+          'source': 'van1_shop',
+          'sourceApp': 'van1',
+          'action': action.trim().isNotEmpty ? action.trim() : 'general',
+          if (extraData != null) ...extraData,
+        };
+
+    if (documentId?.trim().isNotEmpty == true) {
+      await collection.doc(documentId!.trim()).set(payload, SetOptions(merge: true));
+      return;
+    }
+
+    await collection.add(payload);
+  }
+
   Future<DetailedOrder?> loadActionableShopOrder(String orderId) {
     return _loadActionableShopOrder(orderId);
   }
@@ -722,6 +926,10 @@ class NotificationService {
 
   void openOrderManagement([String? orderId]) {
     _openOrderManagement(orderId);
+  }
+
+  Future<void> openChatFromNotificationData(Map<String, dynamic> data) {
+    return _openChatFromNotificationData(data);
   }
 
   Future<void> _showIncomingOrderDecisionPrompt(
@@ -755,6 +963,13 @@ class NotificationService {
       return;
     }
 
+    final operationsSettings = await ShopOperationsService.fetchSettings(
+      order.shopId,
+    );
+    if (!operationsSettings.notifyNewOrders) {
+      return;
+    }
+
     _activeOrderPromptId = orderId;
     try {
       final accepted = await navigator!.push<bool>(
@@ -762,6 +977,8 @@ class NotificationService {
           fullscreenDialog: true,
           builder: (_) => IncomingShopOrderScreen(
             order: order,
+            autoStartVoiceListening:
+                operationsSettings.autoListenIncomingOrders,
             title: data['title'] as String?,
             message: data['body'] as String?,
             onAccept: () => acceptShopOrder(
@@ -1360,5 +1577,15 @@ Future<void> firebaseMessagingBackgroundHandlerVan1(
   RemoteMessage message,
 ) async {
   debugPrint('Background message received: ${message.messageId}');
-  // ไม่ต้องทำอะไร เพราะ Cloud Functions จะจัดการให้
+  if (Firebase.apps.isEmpty) {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  }
+  await _persistVan1RemoteMessageToInbox(
+    message.data,
+    messageId: message.messageId,
+    title: message.notification?.title,
+    body: message.notification?.body,
+  );
 }

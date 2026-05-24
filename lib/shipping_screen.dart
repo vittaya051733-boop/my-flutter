@@ -11,7 +11,9 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import 'models/order_model.dart';
 import 'utils/app_colors.dart';
+import 'widgets/cached_app_image.dart';
 
 enum _IncomePeriod { day, week, month }
 
@@ -23,6 +25,7 @@ class ShippingScreen extends StatefulWidget {
 }
 
 class _ShippingScreenState extends State<ShippingScreen> {
+  static const int _summaryRetentionMonths = 6;
   _IncomePeriod _period = _IncomePeriod.day;
   bool _exportingPdf = false;
   late final Future<void> _localeReady;
@@ -38,6 +41,186 @@ class _ShippingScreenState extends State<ShippingScreen> {
         .collection('orders')
         .where('shopOwnerId', isEqualTo: uid)
         .snapshots();
+  }
+
+  DateTime _summaryRetentionStart([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    return DateTime(reference.year, reference.month - _summaryRetentionMonths, reference.day);
+  }
+
+  Future<void> _showCompletedOrdersSummary(_IncomeReport report) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => _OrderSummarySheet(
+        title: 'สรุปออเดอร์สำเร็จแบบย่อ',
+        subtitle:
+            'แสดงเฉพาะข้อมูลสรุปที่ยังอยู่ในช่วงเก็บรักษา ${_summaryRetentionMonths} เดือนล่าสุด',
+        emptyText: 'ยังไม่มีออเดอร์ส่งสำเร็จในช่วงนี้',
+        summaryRows: <_SummaryRowData>[
+          _SummaryRowData('จำนวนออเดอร์สำเร็จ', '${report.orderCount}'),
+          _SummaryRowData('ยอดรวม', '฿${_money(report.totalRevenue)}'),
+          _SummaryRowData('ค่าสินค้า', '฿${_money(report.productRevenue)}'),
+        ],
+        children: report.orders
+            .map(
+              (order) => ListTile(
+                dense: true,
+                leading: const Icon(Icons.check_circle_outline, color: Colors.green),
+                title: Text(_orderDisplayCode(order.orderId, order.orderCode)),
+                subtitle: Text(
+                  '${DateFormat('d MMM yyyy HH:mm', 'th_TH').format(order.completedAt)} • ${order.customerName} • ฿${_money(order.total)}',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => _showOrderHistoryDetail(
+                  title: 'รายละเอียดออเดอร์สำเร็จ',
+                  eventLabel: 'ส่งสำเร็จเมื่อ',
+                  eventAt: order.completedAt,
+                  order: order.order,
+                ),
+              ),
+            )
+            .toList(growable: false),
+      ),
+    );
+  }
+
+  Future<void> _showRejectedOrdersSummary(_IncomeReport report) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => _OrderSummarySheet(
+        title: 'สรุปออเดอร์ที่ปฏิเสธแบบย่อ',
+        subtitle:
+            'แสดงเฉพาะข้อมูลสรุปที่ยังอยู่ในช่วงเก็บรักษา ${_summaryRetentionMonths} เดือนล่าสุด',
+        emptyText: 'ยังไม่มีออเดอร์ที่ปฏิเสธในช่วงนี้',
+        summaryRows: <_SummaryRowData>[
+          _SummaryRowData('จำนวนออเดอร์ที่ปฏิเสธ', '${report.rejectedOrderCount}'),
+          _SummaryRowData('ค่าปรับรวม', '฿${_money(report.penaltyFee)}'),
+        ],
+        children: report.rejectedOrders
+            .map(
+              (order) => ListTile(
+                dense: true,
+                leading: const Icon(Icons.cancel_outlined, color: Colors.red),
+                title: Text(_orderDisplayCode(order.orderId, order.orderCode)),
+                subtitle: Text(
+                  [
+                    DateFormat('d MMM yyyy HH:mm', 'th_TH').format(order.rejectedAt),
+                    if (order.reason.isNotEmpty) order.reason,
+                  ].join(' • '),
+                ),
+                trailing: Text(
+                  order.penalty > 0 ? '฿${_money(order.penalty)}' : 'ปฏิเสธ',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                onTap: () => _showOrderHistoryDetail(
+                  title: 'รายละเอียดออเดอร์ที่ปฏิเสธ',
+                  eventLabel: 'ปฏิเสธเมื่อ',
+                  eventAt: order.rejectedAt,
+                  order: order.order,
+                  rejectionReason: order.reason,
+                  penalty: order.penalty,
+                ),
+              ),
+            )
+            .toList(growable: false),
+      ),
+    );
+  }
+
+  Future<void> _showOrderHistoryDetail({
+    required String title,
+    required String eventLabel,
+    required DateTime eventAt,
+    required DetailedOrder order,
+    String? rejectionReason,
+    double? penalty,
+  }) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => _OrderHistoryDetailSheet(
+        title: title,
+        eventLabel: eventLabel,
+        eventAt: eventAt,
+        order: order,
+        rejectionReason: rejectionReason,
+        penalty: penalty,
+        onImageTap: _showHistoryImagePreview,
+      ),
+    );
+  }
+
+  Future<void> _showHistoryImagePreview(String imageUrl, String title) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        insetPadding: const EdgeInsets.all(20),
+        backgroundColor: Colors.black,
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              minScale: 0.8,
+              maxScale: 4,
+              child: Center(
+                child: CachedAppImage(
+                  imageUrl: imageUrl,
+                  fit: BoxFit.contain,
+                  placeholder: const SizedBox(
+                    height: 120,
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
+                  errorWidget: const SizedBox(
+                    height: 120,
+                    child: Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 12,
+              left: 16,
+              right: 56,
+              child: Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Positioned(
+              top: 6,
+              right: 6,
+              child: IconButton(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _exportPdf(_IncomeReport report) async {
@@ -294,6 +477,7 @@ class _ShippingScreenState extends State<ShippingScreen> {
               final report = _IncomeReport.fromDocs(
                 docs: snapshot.data?.docs ?? const [],
                 period: _period,
+                retentionStart: _summaryRetentionStart(),
               );
 
               return ListView(
@@ -306,7 +490,11 @@ class _ShippingScreenState extends State<ShippingScreen> {
                   const SizedBox(height: 14),
                   _SummaryHeader(report: report),
                   const SizedBox(height: 14),
-                  _MetricGrid(report: report),
+                  _MetricGrid(
+                    report: report,
+                    onCompletedTap: () => _showCompletedOrdersSummary(report),
+                    onRejectedTap: () => _showRejectedOrdersSummary(report),
+                  ),
                   const SizedBox(height: 14),
                   _ChartCard(report: report),
                   const SizedBox(height: 14),
@@ -349,6 +537,7 @@ class _IncomeReport {
     required this.period,
     required this.start,
     required this.end,
+    required this.retentionStart,
     required this.buckets,
     required this.orders,
     required this.rejectedOrders,
@@ -357,6 +546,7 @@ class _IncomeReport {
   final _IncomePeriod period;
   final DateTime start;
   final DateTime end;
+  final DateTime retentionStart;
   final List<_IncomeBucket> buckets;
   final List<_IncomeOrder> orders;
   final List<_RejectedOrder> rejectedOrders;
@@ -406,6 +596,7 @@ class _IncomeReport {
   static _IncomeReport fromDocs({
     required List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
     required _IncomePeriod period,
+    required DateTime retentionStart,
   }) {
     final now = DateTime.now();
     final start = _periodStart(now, period);
@@ -435,16 +626,12 @@ class _IncomeReport {
             _readDateTime(data['updatedAt']) ??
             _readDateTime(data['createdAt']);
         if (rejectedAt != null &&
+          !rejectedAt.isBefore(retentionStart) &&
             !rejectedAt.isBefore(start) &&
             rejectedAt.isBefore(end)) {
           rejectedOrders.add(
             _RejectedOrder(
-              orderId: doc.id,
-              orderCode:
-                  (data['orderCode'] ?? data['orderNumber'])
-                      ?.toString()
-                      .trim() ??
-                  '',
+              order: _buildDetailedOrder(doc.id, data),
               rejectedAt: rejectedAt,
               penalty: _readPenalty(data),
               reason:
@@ -465,6 +652,7 @@ class _IncomeReport {
           _readDateTime(data['updatedAt']) ??
           _readDateTime(data['createdAt']);
       if (completedAt == null ||
+          completedAt.isBefore(retentionStart) ||
           completedAt.isBefore(start) ||
           !completedAt.isBefore(end)) {
         continue;
@@ -486,9 +674,7 @@ class _IncomeReport {
         shipping: shipping,
       );
       final order = _IncomeOrder(
-        orderId: doc.id,
-        orderCode:
-            (data['orderCode'] ?? data['orderNumber'])?.toString().trim() ?? '',
+        order: _buildDetailedOrder(doc.id, data),
         completedAt: completedAt,
         total: total,
         productTotal: productTotal,
@@ -504,10 +690,33 @@ class _IncomeReport {
       period: period,
       start: start,
       end: end,
+      retentionStart: retentionStart,
       buckets: buckets,
       orders: orders,
       rejectedOrders: rejectedOrders,
     );
+  }
+
+  static DetailedOrder _buildDetailedOrder(
+    String orderId,
+    Map<String, dynamic> data,
+  ) {
+    final normalized = Map<String, dynamic>.from(data);
+    final createdAt =
+        _readDateTime(normalized['createdAt']) ??
+        _readDateTime(normalized['updatedAt']) ??
+        _readDateTime(normalized['deliveredAt']) ??
+        _readDateTime(normalized['shopRejectedAt']) ??
+        DateTime.now();
+    final updatedAt =
+        _readDateTime(normalized['updatedAt']) ??
+        _readDateTime(normalized['deliveredAt']) ??
+        _readDateTime(normalized['shopRejectedAt']) ??
+        createdAt;
+    normalized['orderId'] = orderId;
+    normalized['createdAt'] = Timestamp.fromDate(createdAt);
+    normalized['updatedAt'] = Timestamp.fromDate(updatedAt);
+    return DetailedOrder.fromMap(normalized);
   }
 }
 
@@ -526,36 +735,42 @@ class _IncomeBucket {
 
 class _IncomeOrder {
   const _IncomeOrder({
-    required this.orderId,
-    required this.orderCode,
+    required this.order,
     required this.completedAt,
     required this.total,
     required this.productTotal,
     required this.shippingFee,
   });
 
-  final String orderId;
-  final String orderCode;
+  final DetailedOrder order;
   final DateTime completedAt;
   final double total;
   final double productTotal;
   final double shippingFee;
+
+  String get orderId => order.orderId;
+  String get orderCode => order.orderCode?.trim() ?? '';
+  String get customerName {
+    final value = order.customerName.trim();
+    return value.isEmpty ? '-' : value;
+  }
 }
 
 class _RejectedOrder {
   const _RejectedOrder({
-    required this.orderId,
-    required this.orderCode,
+    required this.order,
     required this.rejectedAt,
     required this.penalty,
     required this.reason,
   });
 
-  final String orderId;
-  final String orderCode;
+  final DetailedOrder order;
   final DateTime rejectedAt;
   final double penalty;
   final String reason;
+
+  String get orderId => order.orderId;
+  String get orderCode => order.orderCode?.trim() ?? '';
 }
 
 class _PeriodSelector extends StatelessWidget {
@@ -624,9 +839,15 @@ class _SummaryHeader extends StatelessWidget {
 }
 
 class _MetricGrid extends StatelessWidget {
-  const _MetricGrid({required this.report});
+  const _MetricGrid({
+    required this.report,
+    required this.onCompletedTap,
+    required this.onRejectedTap,
+  });
 
   final _IncomeReport report;
+  final VoidCallback onCompletedTap;
+  final VoidCallback onRejectedTap;
 
   @override
   Widget build(BuildContext context) {
@@ -642,12 +863,14 @@ class _MetricGrid extends StatelessWidget {
         report.orderCount.toDouble(),
         Icons.receipt_long_outlined,
         isMoney: false,
+        onTap: onCompletedTap,
       ),
       _MetricData(
         'ปฏิเสธ',
         report.rejectedOrderCount.toDouble(),
         Icons.cancel_outlined,
         isMoney: false,
+        onTap: onRejectedTap,
       ),
     ];
 
@@ -667,12 +890,16 @@ class _MetricGrid extends StatelessWidget {
 }
 
 class _MetricData {
-  const _MetricData(this.label, this.value, this.icon, {this.isMoney = true});
+  const _MetricData(this.label, this.value, this.icon, {
+    this.isMoney = true,
+    this.onTap,
+  });
 
   final String label;
   final double value;
   final IconData icon;
   final bool isMoney;
+  final VoidCallback? onTap;
 }
 
 class _MetricTile extends StatelessWidget {
@@ -682,27 +909,443 @@ class _MetricTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: data.onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(data.icon, color: AppColors.accent),
+                  if (data.onTap != null) ...<Widget>[
+                    const Spacer(),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      color: Color(0xFF94A3B8),
+                    ),
+                  ],
+                ],
+              ),
+              Text(
+                data.label,
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+              ),
+              Text(
+                data.isMoney
+                    ? '฿${_money(data.value)}'
+                    : data.value.toInt().toString(),
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderSummarySheet extends StatelessWidget {
+  const _OrderSummarySheet({
+    required this.title,
+    required this.subtitle,
+    required this.emptyText,
+    required this.summaryRows,
+    required this.children,
+  });
+
+  final String title;
+  final String subtitle;
+  final String emptyText;
+  final List<_SummaryRowData> summaryRows;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.72,
+        minChildSize: 0.45,
+        maxChildSize: 0.92,
+        builder: (context, scrollController) {
+          return ListView(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFCBD5E1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                style: const TextStyle(color: Color(0xFF64748B)),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFE2E8F0)),
+                ),
+                child: Column(
+                  children: summaryRows
+                      .map(
+                        (row) => ListTile(
+                          dense: true,
+                          title: Text(row.label),
+                          trailing: Text(
+                            row.value,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      )
+                      .toList(growable: false),
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (children.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    emptyText,
+                    style: const TextStyle(color: Color(0xFF64748B)),
+                  ),
+                )
+              else
+                ...children,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SummaryRowData {
+  const _SummaryRowData(this.label, this.value);
+
+  final String label;
+  final String value;
+}
+
+class _OrderHistoryDetailSheet extends StatelessWidget {
+  const _OrderHistoryDetailSheet({
+    required this.title,
+    required this.eventLabel,
+    required this.eventAt,
+    required this.order,
+    required this.onImageTap,
+    this.rejectionReason,
+    this.penalty,
+  });
+
+  final String title;
+  final String eventLabel;
+  final DateTime eventAt;
+  final DetailedOrder order;
+  final Future<void> Function(String imageUrl, String title) onImageTap;
+  final String? rejectionReason;
+  final double? penalty;
+
+  @override
+  Widget build(BuildContext context) {
+    final rejectionText = rejectionReason?.trim() ?? '';
+    return SafeArea(
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.86,
+        minChildSize: 0.55,
+        maxChildSize: 0.96,
+        builder: (context, scrollController) {
+          return ListView(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFCBD5E1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 8),
+              _DetailInfoCard(
+                children: [
+                  _DetailRow(
+                    label: 'เลขออเดอร์',
+                    value: _orderDisplayCode(order.orderId, order.orderCode?.trim() ?? ''),
+                  ),
+                  _DetailRow(
+                    label: eventLabel,
+                    value: DateFormat('d MMM yyyy HH:mm', 'th_TH').format(eventAt),
+                  ),
+                  _DetailRow(
+                    label: 'สถานะ',
+                    value: _historyStatusLabel(order.status),
+                  ),
+                  _DetailRow(
+                    label: 'ลูกค้า',
+                    value: order.customerName.trim().isEmpty ? '-' : order.customerName.trim(),
+                  ),
+                  _DetailRow(
+                    label: 'เบอร์โทร',
+                    value: order.customerPhone.trim().isEmpty ? '-' : order.customerPhone.trim(),
+                  ),
+                  _DetailRow(
+                    label: 'ที่อยู่ลูกค้า',
+                    value: order.customerAddress.trim().isEmpty ? '-' : order.customerAddress.trim(),
+                  ),
+                  _DetailRow(
+                    label: 'ที่อยู่ร้าน',
+                    value: order.shopAddress.trim().isEmpty ? '-' : order.shopAddress.trim(),
+                  ),
+                  if (rejectionText.isNotEmpty)
+                    _DetailRow(label: 'เหตุผลที่ปฏิเสธ', value: rejectionText),
+                  if ((penalty ?? 0) > 0)
+                    _DetailRow(label: 'ค่าปรับ', value: '฿${_money(penalty ?? 0)}'),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _DetailInfoCard(
+                title: 'สรุปยอด',
+                children: [
+                  _DetailRow(
+                    label: 'ค่าสินค้า',
+                    value: '฿${_money(_detailProductSubtotal(order))}',
+                  ),
+                  _DetailRow(label: 'ค่าส่ง', value: '฿${_money(order.shippingFee)}'),
+                  _DetailRow(
+                    label: 'ยอดรวม',
+                    value: '฿${_money(order.totalAmount)}',
+                    emphasize: true,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _DetailInfoCard(
+                title: 'รายการสินค้า',
+                children: order.items.isEmpty
+                    ? const <Widget>[
+                        Padding(
+                          padding: EdgeInsets.symmetric(vertical: 4),
+                          child: Text(
+                            'ไม่มีข้อมูลรายการสินค้า',
+                            style: TextStyle(color: Color(0xFF64748B)),
+                          ),
+                        ),
+                      ]
+                    : order.items
+                        .map(
+                          (item) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _HistoryOrderItemTile(
+                              item: item,
+                              onImageTap: item.imageUrl?.trim().isNotEmpty == true
+                                  ? () => onImageTap(
+                                        item.imageUrl!.trim(),
+                                        item.productName.trim().isEmpty ? 'รูปสินค้า' : item.productName.trim(),
+                                      )
+                                  : null,
+                            ),
+                          ),
+                        )
+                        .toList(growable: false),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DetailInfoCard extends StatelessWidget {
+  const _DetailInfoCard({this.title, required this.children});
+
+  final String? title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xFFE2E8F0)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Icon(data.icon, color: AppColors.accent),
-          Text(
-            data.label,
-            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          if (title != null) ...[
+            Text(
+              title!,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 10),
+          ],
+          ...children,
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({required this.label, required this.value, this.emphasize = false});
+
+  final String label;
+  final String value;
+  final bool emphasize;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 108,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
-          Text(
-            data.isMoney
-                ? '฿${_money(data.value)}'
-                : data.value.toInt().toString(),
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontWeight: emphasize ? FontWeight.w800 : FontWeight.w600,
+                color: emphasize ? AppColors.accent : Colors.black87,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryOrderItemTile extends StatelessWidget {
+  const _HistoryOrderItemTile({required this.item, this.onImageTap});
+
+  final OrderItem item;
+  final VoidCallback? onImageTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final total = item.price * item.quantity;
+    final imageUrl = item.imageUrl?.trim();
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: onImageTap,
+            borderRadius: BorderRadius.circular(10),
+            child: Stack(
+              children: [
+                CachedAppImage(
+                  imageUrl: imageUrl,
+                  width: 72,
+                  height: 72,
+                  fit: BoxFit.cover,
+                  borderRadius: BorderRadius.circular(10),
+                  errorWidget: Container(
+                    width: 72,
+                    height: 72,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE2E8F0),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.fastfood_outlined, color: Color(0xFF94A3B8)),
+                  ),
+                ),
+                if (onImageTap != null)
+                  Positioned(
+                    right: 4,
+                    bottom: 4,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.55),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: const Icon(Icons.open_in_full, size: 14, color: Colors.white),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.productName.trim().isEmpty ? '-' : item.productName.trim(),
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                if (item.toppings?.trim().isNotEmpty == true) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'ท็อปปิ้ง: ${item.toppings!.trim()}',
+                    style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
+                  ),
+                ],
+                const SizedBox(height: 6),
+                Text(
+                  'จำนวน ${item.quantity} x ฿${_money(item.price)}',
+                  style: const TextStyle(color: Color(0xFF334155), fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'รวม ฿${_money(total)}',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -970,6 +1613,42 @@ String _bucketLabel(DateTime start, _IncomePeriod period, int index) {
     case _IncomePeriod.month:
       return '${index + 1}';
   }
+}
+
+String _orderDisplayCode(String orderId, String orderCode) {
+  if (orderCode.isNotEmpty) return orderCode;
+  return 'Order ${orderId.substring(0, math.min(8, orderId.length))}';
+}
+
+String _historyStatusLabel(String status) {
+  switch (status.trim().toLowerCase()) {
+    case 'delivered':
+      return 'ส่งสำเร็จ';
+    case 'ready':
+      return 'พร้อมส่ง';
+    case 'delivering':
+      return 'กำลังจัดส่ง';
+    case 'preparing':
+      return 'กำลังเตรียม';
+    case 'accepted':
+      return 'รับออเดอร์แล้ว';
+    case 'pending':
+      return 'รออนุมัติ';
+    case 'cancelled':
+      return 'ยกเลิก';
+    default:
+      return status.isEmpty ? '-' : status;
+  }
+}
+
+double _detailProductSubtotal(DetailedOrder order) {
+  final itemTotal = order.items.fold<double>(
+    0,
+    (runningTotal, item) => runningTotal + (item.price * item.quantity),
+  );
+  if (itemTotal > 0) return itemTotal;
+  final fallback = order.totalAmount - order.shippingFee;
+  return fallback > 0 ? fallback : order.totalAmount;
 }
 
 int _bucketIndex(DateTime start, _IncomePeriod period, DateTime date) {

@@ -491,167 +491,238 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
     return '$payloadBeforeCrc$crc';
   }
 
+  Widget _buildTopUpAmountForm(double? amount) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'เลือกจำนวนเงิน',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final preset in _presets)
+              ChoiceChip(
+                label: Text(preset.toStringAsFixed(0)),
+                selected: amount == preset,
+                onSelected: _isBusy ? null : (_) => _selectPreset(preset),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _customAmountController,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          enabled: !_isBusy,
+          decoration: const InputDecoration(
+            labelText: 'กำหนดเอง',
+            hintText: 'เช่น 1500',
+            border: OutlineInputBorder(),
+          ),
+          onChanged: _onCustomAmountChanged,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPromptPayQrCard({
+    required double amount,
+    required String nationalId,
+  }) {
+    final amountLabel = amount.toStringAsFixed(2);
+    final payload = _generatePromptPayPayload(
+      promptPayId: nationalId,
+      amount: amount,
+      purposeNote: _promptPayPurposeNote,
+    );
+
+    return Center(
+      child: Container(
+        width: double.infinity,
+        constraints: const BoxConstraints(maxWidth: 360),
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const _ThaiQrPaymentBar(),
+            const SizedBox(height: 10),
+            const _PromptPayWordmark(),
+            const SizedBox(height: 12),
+            if (payload.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 64),
+                child: Text('PromptPay ID ไม่ถูกต้อง'),
+              )
+            else
+              SizedBox(
+                width: 240,
+                height: 240,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    QrImageView(
+                      data: payload,
+                      size: 240,
+                      errorCorrectionLevel: QrErrorCorrectLevel.H,
+                      backgroundColor: Colors.white,
+                    ),
+                    const _QrCenterAppLogo(),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 12),
+            Text(
+              'Account ($nationalId)',
+              style: const TextStyle(
+                color: Color(0xFF2D2D2D),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Amount $amountLabel Baht',
+              style: const TextStyle(
+                color: Color(0xFF2D2D2D),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final canGenerateQr = _canGeneratePromptPayQr;
     final amount = _amount;
     final nationalId = _promptPayNationalId;
-    final amountLabel = (amount ?? 0).toStringAsFixed(2);
 
-    return AlertDialog(
+    return Scaffold(
       backgroundColor: Colors.white,
-      surfaceTintColor: Colors.white,
-      title: const Text('เติมเครดิต'),
-      content: SizedBox(
-        width: 420,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 0,
+        title: const Text('เติมเครดิต'),
+        leading: IconButton(
+          tooltip: 'ย้อนกลับ',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: _isBusy ? null : () => Navigator.of(context).pop(false),
+        ),
+      ),
+      body: SafeArea(
         child: _loadingConfig
-            ? const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: CircularProgressIndicator()),
-              )
-            : ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.sizeOf(context).height * 0.72,
-                ),
+            ? const Center(child: CircularProgressIndicator())
+            : Center(
                 child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('เลือกจำนวนเงิน'),
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final preset in _presets)
-                            ChoiceChip(
-                              label: Text(preset.toStringAsFixed(0)),
-                              selected: amount == preset,
-                              onSelected: _isBusy
-                                  ? null
-                                  : (_) => _selectPreset(preset),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _customAmountController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        enabled: !_isBusy,
-                        decoration: const InputDecoration(
-                          labelText: 'กำหนดเอง',
-                          hintText: 'เช่น 1500',
-                          border: OutlineInputBorder(),
-                        ),
-                        onChanged: _onCustomAmountChanged,
-                      ),
-                      const SizedBox(height: 14),
-                      if (!canGenerateQr)
-                        const Text('กรุณาเลือกจำนวนเงินเพื่อสร้าง QR')
-                      else
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Center(
-                              child: Container(
-                                width: 240,
-                                padding: const EdgeInsets.fromLTRB(
-                                  14,
-                                  10,
-                                  14,
-                                  14,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  border: Border.all(color: Colors.black12),
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      height: 34,
-                                      width: double.infinity,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF0E55AA),
-                                        borderRadius: BorderRadius.circular(6),
-                                      ),
-                                      alignment: Alignment.center,
-                                      child: const Text(
-                                        'PromptPay',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w800,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    SizedBox(
-                                      width: 170,
-                                      height: 170,
-                                      child: Builder(
-                                        builder: (context) {
-                                          final data =
-                                              _generatePromptPayPayload(
-                                                promptPayId: nationalId!,
-                                                amount: amount!,
-                                                purposeNote:
-                                                    _promptPayPurposeNote,
-                                              );
-                                          if (data.isEmpty) {
-                                            return const Center(
-                                              child: Text(
-                                                'PromptPay ID ไม่ถูกต้อง',
-                                              ),
-                                            );
-                                          }
-                                          return QrImageView(
-                                            data: data,
-                                            errorCorrectionLevel:
-                                                QrErrorCorrectLevel.Q,
-                                            backgroundColor: Colors.white,
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      'ยอด $amountLabel บาท',
-                                      style: const TextStyle(
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'Account ($nationalId)',
-                                      style: const TextStyle(fontSize: 12),
-                                      textAlign: TextAlign.center,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 430),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _buildTopUpAmountForm(amount),
+                        const SizedBox(height: 18),
+                        if (!canGenerateQr)
+                          Container(
+                            padding: const EdgeInsets.all(18),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF7ED),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: const Color(0xFFFED7AA),
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            _buildSlipPickerPanel(),
-                          ],
-                        ),
-                    ],
+                            child: const Text(
+                              'กรุณาเลือกจำนวนเงินเพื่อสร้าง QR',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          )
+                        else
+                          _buildPromptPayQrCard(
+                            amount: amount!,
+                            nationalId: nationalId!,
+                          ),
+                        const SizedBox(height: 14),
+                        _buildSlipPickerPanel(),
+                      ],
+                    ),
                   ),
                 ),
               ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _isBusy ? null : () => Navigator.of(context).pop(false),
-          child: const Text('ปิด'),
-        ),
-      ],
+    );
+  }
+}
+
+class _ThaiQrPaymentBar extends StatelessWidget {
+  const _ThaiQrPaymentBar();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: 32,
+      color: const Color(0xFF0E55AA),
+      alignment: Alignment.center,
+      child: Image.asset(
+        'assets/images/thai_qr_payment.png',
+        package: 'promptpay_qrcode_generate',
+        height: 25,
+        fit: BoxFit.contain,
+      ),
+    );
+  }
+}
+
+class _PromptPayWordmark extends StatelessWidget {
+  const _PromptPayWordmark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      'assets/images/prompt_pay_logo.png',
+      package: 'promptpay_qrcode_generate',
+      height: 31,
+      fit: BoxFit.contain,
+    );
+  }
+}
+
+class _QrCenterAppLogo extends StatelessWidget {
+  const _QrCenterAppLogo();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 28,
+      height: 28,
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Image.asset(
+        'assets/file_00000000be5472069245fc3bdb122dbb.png',
+        fit: BoxFit.cover,
+      ),
     );
   }
 }

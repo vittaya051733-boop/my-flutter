@@ -2,16 +2,21 @@ package van.merchant
 
 import android.app.NotificationManager
 import android.content.Intent
+import android.media.AudioManager
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.WindowManager
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
+	private var previousAudioMode: Int? = null
 
 	override fun onCreate(savedInstanceState: Bundle?) {
 		applyCallWindowFlags(intent)
@@ -59,7 +64,44 @@ class MainActivity : FlutterActivity() {
 					else -> result.notImplemented()
 				}
 			}
+		MethodChannel(flutterEngine.dartExecutor.binaryMessenger, VOICE_AUDIO_CHANNEL)
+			.setMethodCallHandler { call, result ->
+				when (call.method) {
+					METHOD_PREPARE_VOICE_AUDIO -> result.success(prepareVoiceAudio())
+					METHOD_RESTORE_VOICE_AUDIO -> {
+						restoreVoiceAudio()
+						result.success(null)
+					}
+					else -> result.notImplemented()
+				}
+			}
 		CallIntentRouter.register(flutterEngine)
+	}
+
+	private fun prepareVoiceAudio(): Map<String, Any> {
+		val audioManager = getSystemService(AudioManager::class.java)
+		var communicationModeApplied = false
+		if (audioManager != null) {
+			if (previousAudioMode == null) {
+				previousAudioMode = audioManager.mode
+			}
+			audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+			communicationModeApplied = audioManager.mode == AudioManager.MODE_IN_COMMUNICATION
+		}
+
+		return mapOf(
+			"communicationModeApplied" to communicationModeApplied,
+			"noiseSuppressorAvailable" to NoiseSuppressor.isAvailable(),
+			"automaticGainControlAvailable" to AutomaticGainControl.isAvailable(),
+			"acousticEchoCancelerAvailable" to AcousticEchoCanceler.isAvailable()
+		)
+	}
+
+	private fun restoreVoiceAudio() {
+		val audioManager = getSystemService(AudioManager::class.java) ?: return
+		val mode = previousAudioMode ?: AudioManager.MODE_NORMAL
+		audioManager.mode = mode
+		previousAudioMode = null
 	}
 
 	private fun showIncomingCallActivity(arguments: Any?) {
@@ -174,11 +216,14 @@ class MainActivity : FlutterActivity() {
 		const val EXTRA_SENDER_NAME = "extra_sender_name"
 		const val EXTRA_MESSAGE = "extra_message"
 		private const val APP_CONTROL_CHANNEL = "van.merchant/app_state"
+		private const val VOICE_AUDIO_CHANNEL = "van.merchant/voice_audio"
 		private const val METHOD_MOVE_TASK_TO_BACK = "move_task_to_back"
 		private const val METHOD_CAN_USE_FULL_SCREEN_INTENT = "can_use_full_screen_intent"
 		private const val METHOD_OPEN_FULL_SCREEN_INTENT_SETTINGS = "open_full_screen_intent_settings"
 		private const val METHOD_CAN_DRAW_OVERLAYS = "can_draw_overlays"
 		private const val METHOD_OPEN_OVERLAY_SETTINGS = "open_overlay_settings"
 		private const val METHOD_SHOW_INCOMING_CALL_ACTIVITY = "show_incoming_call_activity"
+		private const val METHOD_PREPARE_VOICE_AUDIO = "prepare_voice_audio"
+		private const val METHOD_RESTORE_VOICE_AUDIO = "restore_voice_audio"
 	}
 }

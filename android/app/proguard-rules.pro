@@ -21,6 +21,11 @@
 -keep class io.flutter.plugin.** { *; }
 -dontwarn io.flutter.embedding.**
 
+# ONNX runtime used by image_background_remover on Android release builds
+-keep class ai.onnxruntime.** { *; }
+-keep class com.masicai.flutteronnxruntime.** { *; }
+-dontwarn ai.onnxruntime.**
+
 # Firebase
 -keep class com.google.firebase.** { *; }
 -dontwarn com.google.firebase.**

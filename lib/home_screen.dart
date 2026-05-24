@@ -17,7 +17,9 @@ import 'utils/app_colors.dart';
 import 'chat_screen.dart';
 import 'widgets/product_video_player.dart';
 import 'services/product_cache_service.dart';
+import 'services/shop_operations_service.dart';
 import 'services/video_prefetch_service.dart';
+import 'models/shop_operations_settings.dart';
 import 'utils/shop_profile_resolver.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -36,8 +38,10 @@ class _HomeScreenState extends State<HomeScreen>
   String? _activeNotification;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _notificationSubscription;
+  StreamSubscription<ShopOperationsSettings>? _shopOperationsSubscription;
   Set<String> _knownNotificationIds = <String>{};
   bool _didPrimeNotifications = false;
+  bool _notifyNewOrdersEnabled = true;
   static const int _tabCount = 9;
 
   late final TabController _tabController;
@@ -76,6 +80,7 @@ class _HomeScreenState extends State<HomeScreen>
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
     _listenUnreadChats();
+    _listenShopOperationsSettings();
     _listenUnreadAppNotifications();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
@@ -87,6 +92,38 @@ class _HomeScreenState extends State<HomeScreen>
         systemNavigationBarContrastEnforced: false,
       ),
     );
+  }
+
+  void _listenShopOperationsSettings() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return;
+    }
+
+    _shopOperationsSubscription?.cancel();
+    _shopOperationsSubscription = ShopOperationsService.streamSettings(user.uid)
+        .listen((settings) {
+          final changed = _notifyNewOrdersEnabled != settings.notifyNewOrders;
+          if (!mounted) {
+            _notifyNewOrdersEnabled = settings.notifyNewOrders;
+            return;
+          }
+          setState(() {
+            _notifyNewOrdersEnabled = settings.notifyNewOrders;
+          });
+          if (changed) {
+            _listenUnreadAppNotifications();
+          }
+        }, onError: (error) {
+          debugPrint('Failed to listen shop operation settings: $error');
+        });
+  }
+
+  bool _isIncomingOrderNotification(Map<String, dynamic> data) {
+    final type = (data['type'] as String?)?.trim();
+    final action = (data['action'] as String?)?.trim();
+    return (type == null || type.isEmpty || type == 'app_notification') &&
+        action == 'order_accepted';
   }
 
   Future<void> _loadShopDetails() async {
@@ -196,7 +233,14 @@ class _HomeScreenState extends State<HomeScreen>
         .snapshots()
         .listen(
           (snapshot) {
-            final docs = snapshot.docs.toList(growable: false)
+            final docs = snapshot.docs
+                .where((doc) {
+                  if (_notifyNewOrdersEnabled) {
+                    return true;
+                  }
+                  return !_isIncomingOrderNotification(doc.data());
+                })
+                .toList(growable: false)
               ..sort((a, b) {
                 final aTime =
                     (a.data()['createdAt'] as Timestamp?)
@@ -550,6 +594,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void dispose() {
     _notificationSubscription?.cancel();
+    _shopOperationsSubscription?.cancel();
     _tabController.removeListener(_handleTabChange);
     _tabController.dispose();
     super.dispose();

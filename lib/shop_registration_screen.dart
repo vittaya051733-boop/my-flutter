@@ -1,4 +1,4 @@
-﻿import 'dart:collection';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -14,31 +14,89 @@ import 'firebase_options.dart';
 import 'utils/app_colors.dart';
 import 'utils/shop_profile_resolver.dart';
 import 'services/shop_profile_fetcher.dart';
+import 'services/branch_assignment_service.dart';
 import 'storage_helper.dart';
 import 'widgets/cached_app_image.dart';
 
 class ShopRegistrationScreen extends StatefulWidget {
   final String? serviceType;
   final DocumentSnapshot? shopData; // optional: existing shop doc to edit
-  final Map<String, dynamic>? prefilledData; // optional: cached/normalized map for offline mode
-  
-  const ShopRegistrationScreen({super.key, this.serviceType, this.shopData, this.prefilledData});
+  final Map<String, dynamic>?
+  prefilledData; // optional: cached/normalized map for offline mode
+
+  const ShopRegistrationScreen({
+    super.key,
+    this.serviceType,
+    this.shopData,
+    this.prefilledData,
+  });
 
   @override
   State<ShopRegistrationScreen> createState() => _ShopRegistrationScreenState();
 }
 
 class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
-  static const List<String> _nameKeys = <String>['shopName', 'name', 'displayName', 'businessName', 'storeName', 'brandName', 'title'];
-  static const List<String> _descriptionKeys = <String>['description', 'shopDescription', 'detail', 'summary', 'about'];
-  static const List<String> _addressKeys = <String>['address', 'shopAddress', 'addressLine', 'locationText'];
-  static const List<String> _phoneKeys = <String>['phone', 'phoneNumber', 'contactPhone', 'mobile', 'tel'];
+  static const List<String> _nameKeys = <String>[
+    'shopName',
+    'name',
+    'displayName',
+    'businessName',
+    'storeName',
+    'brandName',
+    'title',
+  ];
+  static const List<String> _descriptionKeys = <String>[
+    'description',
+    'shopDescription',
+    'detail',
+    'summary',
+    'about',
+  ];
+  static const List<String> _addressKeys = <String>[
+    'address',
+    'shopAddress',
+    'addressLine',
+    'locationText',
+  ];
+  static const List<String> _phoneKeys = <String>[
+    'phone',
+    'phoneNumber',
+    'contactPhone',
+    'mobile',
+    'tel',
+  ];
   static const List<String> _emailKeys = <String>['email', 'contactEmail'];
-  static const List<String> _bankNameKeys = <String>['bankName', 'bank', 'bankname', 'financialInstitution'];
-  static const List<String> _accountNumberKeys = <String>['accountNumber', 'bankAccountNumber', 'accountNo', 'acctNumber'];
-  static const List<String> _accountOwnerKeys = <String>['accountOwner', 'accountName', 'ownerName', 'accountHolder', 'accountHolderName'];
-  static const List<String> _serviceTypeKeys = <String>['serviceType', 'service_type', 'category', 'type'];
-  static const List<String> _bookBankImageKeys = <String>['bookBankImageUrl', 'bankBookImageUrl', 'bookBankImage', 'passbookImageUrl'];
+  static const List<String> _bankNameKeys = <String>[
+    'bankName',
+    'bank',
+    'bankname',
+    'financialInstitution',
+  ];
+  static const List<String> _accountNumberKeys = <String>[
+    'accountNumber',
+    'bankAccountNumber',
+    'accountNo',
+    'acctNumber',
+  ];
+  static const List<String> _accountOwnerKeys = <String>[
+    'accountOwner',
+    'accountName',
+    'ownerName',
+    'accountHolder',
+    'accountHolderName',
+  ];
+  static const List<String> _serviceTypeKeys = <String>[
+    'serviceType',
+    'service_type',
+    'category',
+    'type',
+  ];
+  static const List<String> _bookBankImageKeys = <String>[
+    'bookBankImageUrl',
+    'bankBookImageUrl',
+    'bookBankImage',
+    'passbookImageUrl',
+  ];
 
   final _formKey = GlobalKey<FormState>();
   AutovalidateMode _autoValidateMode = AutovalidateMode.disabled;
@@ -47,12 +105,12 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   final _addressController = TextEditingController();
   final _phoneController = TextEditingController();
   final _emailController = TextEditingController();
-  
+
   // ข้อมูลสมุดบัญชีธนาคาร
   final _bankNameController = TextEditingController();
   final _accountNumberController = TextEditingController();
   final _accountOwnerController = TextEditingController();
-  
+
   // รายชื่อธนาคารในประเทศไทยสำหรับตัวเลือก
   static const List<String> _thaiBanks = <String>[
     'ธนาคารกรุงเทพ (BBL)',
@@ -70,49 +128,53 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     'ธ.ก.ส. (ธนาคารเพื่อการเกษตรและสหกรณ์การเกษตร)',
     'อื่นๆ',
   ];
-  
+
   File? _selectedImage;
   bool _isSaving = false;
   String? _existingShopImageUrl;
-  
+
   File? _selectedBookBankImage;
   bool _isUploadingBookBank = false;
   String? _existingBookBankImageUrl;
   bool _isCheckingExisting = true;
   String? _resolvedServiceType;
   bool _hasAttemptedRemotePrefill = false;
-  
+
   // เก็บผล OCR จากรูปสมุดบัญชี
   String _ocrText = '';
 
   // อ่านข้อความด้วย Google Cloud Vision API
   Future<String> _extractTextWithBestOCR(File imageFile) async {
     return await _extractTextWithGoogleVisionAPI(imageFile);
-  } 
+  }
 
   // เรียก Google Cloud Vision API เพื่ออ่านข้อความจากรูป
   Future<String> _extractTextWithGoogleVisionAPI(File imageFile) async {
     // แก้ไข: อ่าน API Key จาก DefaultFirebaseOptions.currentPlatform.apiKey
     final apiKey = DefaultFirebaseOptions.currentPlatform.apiKey;
-    
+
     // เพิ่มการตรวจสอบว่าได้ตั้งค่า API Key มาจาก --dart-define หรือไม่
     if (apiKey.isEmpty) {
-      throw Exception('Google Cloud Vision API Key ไม่ได้ถูกตั้งค่าใน firebase_options.dart');
+      throw Exception(
+        'Google Cloud Vision API Key ไม่ได้ถูกตั้งค่าใน firebase_options.dart',
+      );
     }
 
     final bytes = await imageFile.readAsBytes();
     final base64Image = base64Encode(bytes);
-    final url = Uri.parse('https://vision.googleapis.com/v1/images:annotate?key=$apiKey');
+    final url = Uri.parse(
+      'https://vision.googleapis.com/v1/images:annotate?key=$apiKey',
+    );
     final requestBody = jsonEncode({
       'requests': [
         {
           'image': {'content': base64Image},
           'features': [
             // แก้ไข: เปลี่ยนเป็น DOCUMENT_TEXT_DETECTION เพื่อความแม่นยำในเอกสาร
-            {'type': 'DOCUMENT_TEXT_DETECTION'}
-          ]
-        }
-      ]
+            {'type': 'DOCUMENT_TEXT_DETECTION'},
+          ],
+        },
+      ],
     });
 
     final response = await http.post(
@@ -122,7 +184,8 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     );
     if (response.statusCode == 200) {
       final jsonResponse = jsonDecode(response.body);
-      final textAnnotations = jsonResponse['responses']?[0]?['textAnnotations'] as List?;
+      final textAnnotations =
+          jsonResponse['responses']?[0]?['textAnnotations'] as List?;
       if (textAnnotations == null || textAnnotations.isEmpty) {
         return '';
       }
@@ -134,12 +197,12 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       return '';
     }
   }
-  
+
   // ข้อความแจ้งเตือนแบบ real-time
   String? _bankNameError;
   String? _accountNumberError;
   String? _accountOwnerError;
-  
+
   // พิกัด GPS
   double? _latitude;
   double? _longitude;
@@ -148,7 +211,9 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   void initState() {
     super.initState();
     _loadUserEmail();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initRegistrationStatus());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _initRegistrationStatus(),
+    );
     _prefillIfEditing();
     Future.microtask(_ensureShopProfileLoaded);
   }
@@ -214,7 +279,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     String? serviceType = widget.serviceType;
     if (serviceType == null) {
       try {
-        final snapshot = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
+        final snapshot = await FirebaseFirestore.instance
+            .collection('contracts')
+            .doc(user.uid)
+            .get();
         serviceType = (snapshot.data()?['serviceType'] as String?)?.trim();
       } catch (e) {
         debugPrint('Failed to load serviceType: $e');
@@ -232,7 +300,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
 
     try {
       final collection = _collectionForService(serviceType);
-      final doc = await FirebaseFirestore.instance.collection(collection).doc(user.uid).get();
+      final doc = await FirebaseFirestore.instance
+          .collection(collection)
+          .doc(user.uid)
+          .get();
       if (doc.exists) {
         final Map<String, dynamic>? data = doc.data();
         final alreadyComplete = _hasCompletedProfile(data);
@@ -361,7 +432,12 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
           if (mounted) {
             ScaffoldMessenger.of(context).clearSnackBars();
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('❌ ไม่สามารถอ่านข้อมูลจากรูปสมุดบัญชี หรือภาพเบลอ กรุณาเลือกรูปใหม่'), backgroundColor: Colors.red)
+              SnackBar(
+                content: Text(
+                  '❌ ไม่สามารถอ่านข้อมูลจากรูปสมุดบัญชี หรือภาพเบลอ กรุณาเลือกรูปใหม่',
+                ),
+                backgroundColor: Colors.red,
+              ),
             );
             setState(() {
               _selectedBookBankImage = null;
@@ -374,7 +450,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).clearSnackBars();
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('✅ รูปภาพสมุดบัญชีผ่านการตรวจสอบความชัดเจน'), backgroundColor: Colors.green)
+            SnackBar(
+              content: Text('✅ รูปภาพสมุดบัญชีผ่านการตรวจสอบความชัดเจน'),
+              backgroundColor: Colors.green,
+            ),
           );
         }
       } catch (e) {
@@ -382,7 +461,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).clearSnackBars();
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('❌ เกิดข้อผิดพลาดในการตรวจสอบรูปภาพ'), backgroundColor: Colors.red)
+            SnackBar(
+              content: Text('❌ เกิดข้อผิดพลาดในการตรวจสอบรูปภาพ'),
+              backgroundColor: Colors.red,
+            ),
           );
           setState(() {
             _selectedBookBankImage = null;
@@ -397,9 +479,9 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
           });
         }
       }
-
     } // ปิด if (image != null)
   } // ปิด _pickBookBankImage
+
   void _validateFieldAgainstOCR(String fieldName) {
     if (_ocrText.isEmpty || _selectedBookBankImage == null) return;
 
@@ -422,24 +504,38 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
               .split(RegExp(r'\s+'))
               .where((segment) => segment.length >= 3)
               .any((segment) => lowerOcr.contains(segment));
-          _bankNameError = matchesBank ? null : 'ชื่อธนาคารไม่ตรงกับรูปสมุดบัญชี';
+          _bankNameError = matchesBank
+              ? null
+              : 'ชื่อธนาคารไม่ตรงกับรูปสมุดบัญชี';
         }
       }
 
       if (fieldName == 'account' || fieldName == 'all') {
-        final digits = _accountNumberController.text.replaceAll(RegExp(r'[\s\-\.]'), '');
+        final digits = _accountNumberController.text.replaceAll(
+          RegExp(r'[\s\-\.]'),
+          '',
+        );
         if (digits.length >= 8) {
           final ocrDigits = _ocrText.replaceAll(RegExp(r'\D'), '');
-          final minMatch = (digits.length * 0.5).round().clamp(4, digits.length);
+          final minMatch = (digits.length * 0.5).round().clamp(
+            4,
+            digits.length,
+          );
           final hasExact = ocrDigits.contains(digits);
-          final hasPartial = hasExact ||
-              List.generate(digits.length - minMatch + 1, (i) => digits.substring(i, i + minMatch))
-                  .any(ocrDigits.contains) ||
+          final hasPartial =
+              hasExact ||
+              List.generate(
+                digits.length - minMatch + 1,
+                (i) => digits.substring(i, i + minMatch),
+              ).any(ocrDigits.contains) ||
               (digits.length >= 10 &&
-                  List.generate(digits.length - 3, (i) => digits.substring(i, i + 4))
-                      .any(ocrDigits.contains));
-          _accountNumberError =
-              hasPartial ? null : 'หมายเลขบัญชีไม่ตรงกับรูปสมุดบัญชี';
+                  List.generate(
+                    digits.length - 3,
+                    (i) => digits.substring(i, i + 4),
+                  ).any(ocrDigits.contains));
+          _accountNumberError = hasPartial
+              ? null
+              : 'หมายเลขบัญชีไม่ตรงกับรูปสมุดบัญชี';
         } else {
           _accountNumberError = null;
         }
@@ -450,7 +546,10 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         if (owner.isEmpty) {
           _accountOwnerError = null;
         } else {
-          final tokens = owner.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
+          final tokens = owner
+              .split(RegExp(r'\s+'))
+              .where((t) => t.isNotEmpty)
+              .toList();
           final required = (tokens.length * 0.4).ceil();
           int matches = 0;
 
@@ -464,8 +563,9 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
             }
           }
 
-          _accountOwnerError =
-              matches >= required ? null : 'ชื่อเจ้าของบัญชีไม่ตรงกับรูปสมุดบัญชี';
+          _accountOwnerError = matches >= required
+              ? null
+              : 'ชื่อเจ้าของบัญชีไม่ตรงกับรูปสมุดบัญชี';
         }
       }
     });
@@ -476,7 +576,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     if (_accountOwnerController.text.isNotEmpty && _ocrText.isNotEmpty) {
       _validateFieldAgainstOCR('owner');
     }
-    
+
     final result = await Navigator.of(context).push<Map<String, double>>(
       MaterialPageRoute(
         builder: (context) => MapPickerScreen(
@@ -491,7 +591,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         _latitude = result['latitude'];
         _longitude = result['longitude'];
       });
-      
+
       _showSnackBar('✅ ปักหมุดตำแหน่งสำเร็จ!', Colors.green);
     }
   }
@@ -549,35 +649,40 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       }
 
       final collection = _collectionForService(serviceType);
-        final orderNumber = DateTime.now().millisecondsSinceEpoch;
+      final orderNumber = DateTime.now().millisecondsSinceEpoch;
+      final shopLatitude = _latitude ?? 0.0;
+      final shopLongitude = _longitude ?? 0.0;
+      final branchAssignment =
+          await BranchAssignmentService.resolveForCoordinates(
+            latitude: shopLatitude,
+            longitude: shopLongitude,
+          );
 
       // บันทึกข้อมูลร้านค้าลง Firestore (แต่ละประเภทเป็น Collection แยก)
-      await FirebaseFirestore.instance
-          .collection(collection)
-          .doc(user.uid)
-          .set({
-        'name': _shopNameController.text.trim(),
-        'serviceType': serviceType, // ใช้ field นี้เป็นหลัก
-        'rating': 0.0, // เริ่มต้นที่ 0 รอรีวิว
-        'location': {
-          'latitude': _latitude ?? 0.0,
-          'longitude': _longitude ?? 0.0,
+      await FirebaseFirestore.instance.collection(collection).doc(user.uid).set(
+        {
+          'name': _shopNameController.text.trim(),
+          'serviceType': serviceType, // ใช้ field นี้เป็นหลัก
+          'rating': 0.0, // เริ่มต้นที่ 0 รอรีวิว
+          'location': {'latitude': shopLatitude, 'longitude': shopLongitude},
+          ...branchAssignment.toFirestoreFields(),
+          'ownerId': user.uid,
+          'order': orderNumber, // ลำดับที่ของร้านในประเภทนี้
+          'description': _shopDescriptionController.text.trim(),
+          'address': _addressController.text.trim(), // ใช้ที่อยู่ที่กรอกเอง
+          'phone': _phoneController.text.trim(),
+          'email': _emailController.text.trim(),
+          'shopImageUrl': shopImageUrl,
+          'bookBankImageUrl': bookBankImageUrl,
+          'bankName': _bankNameController.text.trim(),
+          'accountNumber': _accountNumberController.text.trim(),
+          'accountOwner': _accountOwnerController.text.trim(),
+          'status': 'pending', // รอการอนุมัติ
+          'isProfileCompleted': true,
+          'createdAt': FieldValue.serverTimestamp(),
         },
-        'ownerId': user.uid,
-        'order': orderNumber, // ลำดับที่ของร้านในประเภทนี้
-        'description': _shopDescriptionController.text.trim(), 
-        'address': _addressController.text.trim(), // ใช้ที่อยู่ที่กรอกเอง
-        'phone': _phoneController.text.trim(),
-        'email': _emailController.text.trim(),
-        'shopImageUrl': shopImageUrl,
-        'bookBankImageUrl': bookBankImageUrl,
-        'bankName': _bankNameController.text.trim(),
-        'accountNumber': _accountNumberController.text.trim(),
-        'accountOwner': _accountOwnerController.text.trim(),
-        'status': 'pending', // รอการอนุมัติ
-        'isProfileCompleted': true,
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+        SetOptions(merge: true),
+      );
 
       await _upsertPublicShopProfile(
         ownerUid: user.uid,
@@ -585,11 +690,17 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
         shopImageUrl: shopImageUrl,
         latitude: _latitude ?? 0.0,
         longitude: _longitude ?? 0.0,
+        branchAssignment: branchAssignment,
         serviceType: serviceType,
         address: _addressController.text.trim(),
         phone: _phoneController.text.trim(),
         email: _emailController.text.trim(),
       );
+
+      await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(user.uid)
+          .set(branchAssignment.toFirestoreFields(), SetOptions(merge: true));
 
       _showSnackBar('✅ ลงทะเบียนร้านค้าสำเร็จ!', Colors.green);
 
@@ -620,6 +731,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     String? shopImageUrl,
     required double latitude,
     required double longitude,
+    required BranchAssignment branchAssignment,
     required String serviceType,
     String? address,
     String? phone,
@@ -648,6 +760,7 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       },
       'shopLatitude': latitude,
       'shopLongitude': longitude,
+      ...branchAssignment.toFirestoreFields(),
       'updatedAt': FieldValue.serverTimestamp(),
     };
 
@@ -705,7 +818,9 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       errors.add('• ที่อยู่: กรุณาปักหมุดตำแหน่งร้านค้าบนแผนที่');
     }
     if (phone.isEmpty || !_isValidThaiPhone(phone)) {
-      errors.add('• เบอร์โทรศัพท์: รูปแบบไม่ถูกต้อง (เช่น 0812345678 หรือ +66812345678)');
+      errors.add(
+        '• เบอร์โทรศัพท์: รูปแบบไม่ถูกต้อง (เช่น 0812345678 หรือ +66812345678)',
+      );
     }
     if (email.isEmpty || !_isValidEmail(email)) {
       errors.add('• อีเมล: รูปแบบไม่ถูกต้อง');
@@ -722,9 +837,15 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     final errors = _validateFields(); // รวบรวมข้อผิดพลาดพื้นฐาน
 
     // เพิ่มข้อผิดพลาดจาก OCR-based validation
-    if (_bankNameError != null) errors.add('• ธนาคาร: $_bankNameError');
-    if (_accountNumberError != null) errors.add('• หมายเลขบัญชี: $_accountNumberError');
-    if (_accountOwnerError != null) errors.add('• ชื่อเจ้าของบัญชี: $_accountOwnerError');
+    if (_bankNameError != null) {
+      errors.add('• ธนาคาร: $_bankNameError');
+    }
+    if (_accountNumberError != null) {
+      errors.add('• หมายเลขบัญชี: $_accountNumberError');
+    }
+    if (_accountOwnerError != null) {
+      errors.add('• ชื่อเจ้าของบัญชี: $_accountOwnerError');
+    }
 
     // ตรวจสอบว่ามีรูปสมุดบัญชีหรือไม่ ถ้ามีแต่ข้อมูลไม่ครบ ก็ควรแจ้ง
     // (แต่ตอนนี้ OCR validation จะจัดการเรื่องนี้อยู่แล้ว)
@@ -765,13 +886,15 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   }
 
   // เพิ่มฟังก์ชัน _uploadImage ที่หายไป เพื่อให้อัปโหลดรูปร้านค้าได้
-Future<String?> _uploadImage() async {
+  Future<String?> _uploadImage() async {
     if (_selectedImage == null) {
       debugPrint('❌ _selectedImage is null');
       return null;
     }
     if (!await _selectedImage!.exists()) {
-      debugPrint('❌ _selectedImage file does not exist: ${_selectedImage!.path}');
+      debugPrint(
+        '❌ _selectedImage file does not exist: ${_selectedImage!.path}',
+      );
       return null;
     }
     try {
@@ -801,12 +924,14 @@ Future<String?> _uploadImage() async {
       debugPrint('❌ อัปโหลดรูปร้านค้าล้มเหลว: $e');
       throw Exception('อัปโหลดรูปร้านค้าล้มเหลว: $e');
     }
-}
+  }
 
   void _hydrateFromMap(Map<String, dynamic> rawData) {
     final Map<String, dynamic> data = _stringKeyedMap(rawData);
 
-    final String? shopName = ShopProfileResolver.resolveName(data) ?? _resolveStringField(data, _nameKeys);
+    final String? shopName =
+        ShopProfileResolver.resolveName(data) ??
+        _resolveStringField(data, _nameKeys);
     _setTextIfEmpty(_shopNameController, shopName);
 
     final String? description = _resolveStringField(data, _descriptionKeys);
@@ -831,12 +956,16 @@ Future<String?> _uploadImage() async {
     _setTextIfEmpty(_accountOwnerController, accountOwner);
 
     final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(data);
-    if (shopImageUrl != null && shopImageUrl.isNotEmpty && _existingShopImageUrl == null) {
+    if (shopImageUrl != null &&
+        shopImageUrl.isNotEmpty &&
+        _existingShopImageUrl == null) {
       _existingShopImageUrl = shopImageUrl;
     }
 
     final String? bookBankImage = _resolveStringField(data, _bookBankImageKeys);
-    if (bookBankImage != null && bookBankImage.isNotEmpty && _existingBookBankImageUrl == null) {
+    if (bookBankImage != null &&
+        bookBankImage.isNotEmpty &&
+        _existingBookBankImageUrl == null) {
       _existingBookBankImageUrl = bookBankImage;
     }
 
@@ -849,13 +978,27 @@ Future<String?> _uploadImage() async {
   }
 
   void _applyLocationFromData(Map<String, dynamic> data) {
-    final dynamic locationValue = data['location'] ?? data['coordinates'] ?? data['geo'] ?? data['position'] ?? data['shopLocation'];
+    final dynamic locationValue =
+        data['location'] ??
+        data['coordinates'] ??
+        data['geo'] ??
+        data['position'] ??
+        data['shopLocation'];
     if (_tryApplyLocation(locationValue)) {
       return;
     }
 
-    final String? latString = _resolveStringField(data, const <String>['lat', 'latitude', 'y']);
-    final String? lngString = _resolveStringField(data, const <String>['lng', 'long', 'longitude', 'x']);
+    final String? latString = _resolveStringField(data, const <String>[
+      'lat',
+      'latitude',
+      'y',
+    ]);
+    final String? lngString = _resolveStringField(data, const <String>[
+      'lng',
+      'long',
+      'longitude',
+      'x',
+    ]);
     final double? lat = latString != null ? double.tryParse(latString) : null;
     final double? lng = lngString != null ? double.tryParse(lngString) : null;
     if (lat != null && lng != null) {
@@ -873,8 +1016,12 @@ Future<String?> _uploadImage() async {
     }
     if (value is Map) {
       final Map<String, dynamic> map = _stringKeyedMap(value);
-      final double? lat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
-      final double? lng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
+      final double? lat = _parseDouble(
+        map['latitude'] ?? map['lat'] ?? map['y'],
+      );
+      final double? lng = _parseDouble(
+        map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x'],
+      );
       if (lat != null && lng != null) {
         _latitude = lat;
         _longitude = lng;
@@ -895,9 +1042,14 @@ Future<String?> _uploadImage() async {
     return null;
   }
 
-  String? _resolveStringField(Map<String, dynamic> source, List<String> candidateKeys) {
+  String? _resolveStringField(
+    Map<String, dynamic> source,
+    List<String> candidateKeys,
+  ) {
     if (source.isEmpty) return null;
-    final Set<String> normalized = candidateKeys.map((key) => key.toLowerCase()).toSet();
+    final Set<String> normalized = candidateKeys
+        .map((key) => key.toLowerCase())
+        .toSet();
     final Queue<Map<String, dynamic>> queue = Queue<Map<String, dynamic>>();
     queue.add(_stringKeyedMap(source));
 
@@ -931,7 +1083,10 @@ Future<String?> _uploadImage() async {
   }
 
   Map<String, dynamic> _stringKeyedMap(Map<dynamic, dynamic> source) {
-    return source.map((dynamic key, dynamic value) => MapEntry<String, dynamic>(key.toString(), value));
+    return source.map(
+      (dynamic key, dynamic value) =>
+          MapEntry<String, dynamic>(key.toString(), value),
+    );
   }
 
   void _setTextIfEmpty(TextEditingController controller, String? value) {
@@ -940,31 +1095,31 @@ Future<String?> _uploadImage() async {
     controller.text = value.trim();
   }
 
-// เพิ่มฟังก์ชัน _uploadBookBankImage ที่หายไป เพื่อให้อัปโหลดรูปสมุดบัญชีได้
-Future<String?> _uploadBookBankImage() async {
-  if (_selectedBookBankImage == null) return null;
-  try {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final fileName = 'contracts/${user.uid}/book_bank_images/$timestamp.png';
-    final storageRef = StorageHelper.instance.ref().child(fileName);
+  // เพิ่มฟังก์ชัน _uploadBookBankImage ที่หายไป เพื่อให้อัปโหลดรูปสมุดบัญชีได้
+  Future<String?> _uploadBookBankImage() async {
+    if (_selectedBookBankImage == null) return null;
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('ไม่พบข้อมูลผู้ใช้');
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'contracts/${user.uid}/book_bank_images/$timestamp.png';
+      final storageRef = StorageHelper.instance.ref().child(fileName);
 
-    final bytes = await _selectedBookBankImage!.readAsBytes();
-    final image = img.decodeImage(bytes);
-    if (image == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
-    final pngBytes = img.encodePng(image);
+      final bytes = await _selectedBookBankImage!.readAsBytes();
+      final image = img.decodeImage(bytes);
+      if (image == null) throw Exception('ไม่สามารถอ่านรูปภาพได้');
+      final pngBytes = img.encodePng(image);
 
-    final uploadTask = await storageRef.putData(
-      Uint8List.fromList(pngBytes),
-      SettableMetadata(contentType: 'image/png'),
-    );
-    final downloadUrl = await uploadTask.ref.getDownloadURL();
-    return downloadUrl;
-  } catch (e) {
-    throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว: $e');
+      final uploadTask = await storageRef.putData(
+        Uint8List.fromList(pngBytes),
+        SettableMetadata(contentType: 'image/png'),
+      );
+      final downloadUrl = await uploadTask.ref.getDownloadURL();
+      return downloadUrl;
+    } catch (e) {
+      throw Exception('อัปโหลดรูปสมุดบัญชีล้มเหลว: $e');
+    }
   }
-}
 
   @override
   Widget build(BuildContext context) {
@@ -972,7 +1127,7 @@ Future<String?> _uploadBookBankImage() async {
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('ลงทะเบียนร้านค้า'),
-  backgroundColor: AppColors.accent,
+        backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
@@ -1022,11 +1177,13 @@ Future<String?> _uploadBookBankImage() async {
                       validator: (value) {
                         final v = value?.trim() ?? '';
                         if (v.isEmpty) return 'กรุณากรอกชื่อร้านค้า';
-                        if (v.length < 2) return 'กรุณากรอกชื่อร้านค้าอย่างน้อย 2 ตัวอักษร';
+                        if (v.length < 2) {
+                          return 'กรุณากรอกชื่อร้านค้าอย่างน้อย 2 ตัวอักษร';
+                        }
                         return null;
                       },
                     ),
-                    
+
                     const SizedBox(height: 16),
 
                     // คำอธิบายร้านค้า (ย้ายมาใต้ชื่อร้าน และให้สูงเท่าช่องทั่วไป)
@@ -1056,7 +1213,7 @@ Future<String?> _uploadBookBankImage() async {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    
+
                     GestureDetector(
                       onTap: _isSaving ? null : _pickImage,
                       child: Container(
@@ -1068,46 +1225,45 @@ Future<String?> _uploadBookBankImage() async {
                           border: Border.all(color: Colors.grey.shade300),
                         ),
                         child: _isSaving
-                            ? const Center(
-                                child: CircularProgressIndicator(),
+                            ? const Center(child: CircularProgressIndicator())
+                            : _selectedImage != null
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.file(
+                                  _selectedImage!,
+                                  fit: BoxFit.cover,
+                                ),
                               )
-                              : _selectedImage != null
-                                ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: Image.file(
-                                      _selectedImage!,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  )
-                                  : (_existingShopImageUrl != null && _existingShopImageUrl!.isNotEmpty)
-                                      ? ClipRRect(
-                                          borderRadius: BorderRadius.circular(12),
-                                          child: CachedAppImage(
-                                            imageUrl: _existingShopImageUrl!,
-                                            fit: BoxFit.cover,
-                                          ),
-                                        )
-                                : Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(
-                                        Icons.add_photo_alternate,
-                                        size: 64,
-                                        color: Colors.grey.shade400,
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        'คลิกเพื่อเลือกรูปภาพ',
-                                        style: TextStyle(
-                                          color: Colors.grey.shade600,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                    ],
+                            : (_existingShopImageUrl != null &&
+                                  _existingShopImageUrl!.isNotEmpty)
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: CachedAppImage(
+                                  imageUrl: _existingShopImageUrl!,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            : Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.add_photo_alternate,
+                                    size: 64,
+                                    color: Colors.grey.shade400,
                                   ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'คลิกเพื่อเลือกรูปภาพ',
+                                    style: TextStyle(
+                                      color: Colors.grey.shade600,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                ],
+                              ),
                       ),
                     ),
-                    
+
                     const SizedBox(height: 24),
 
                     // สมุดบัญชีธนาคาร
@@ -1134,44 +1290,48 @@ Future<String?> _uploadBookBankImage() async {
                         child: _isUploadingBookBank
                             ? const Center(child: CircularProgressIndicator())
                             : _selectedBookBankImage != null
-                                ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: Image.file(
-                                      _selectedBookBankImage!,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  )
-                                : (_existingBookBankImageUrl != null && _existingBookBankImageUrl!.isNotEmpty)
-                                    ? ClipRRect(
-                                        borderRadius: BorderRadius.circular(12),
-                                        child: CachedAppImage(
-                                          imageUrl: _existingBookBankImageUrl!,
-                                          fit: BoxFit.cover,
-                                        ),
-                                      )
-                                : Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(
-                                        Icons.credit_card,
-                                        size: 56,
-                                        color: Colors.grey.shade400,
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        'คลิกเพื่ออัปโหลดรูปหน้าสมุดบัญชี',
-                                        style: TextStyle(
-                                          color: Colors.grey.shade600,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      const Text(
-                                        'ควรให้เห็นชื่อบัญชีและเลขบัญชีชัดเจน',
-                                        style: TextStyle(fontSize: 12, color: Colors.grey),
-                                      )
-                                    ],
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.file(
+                                  _selectedBookBankImage!,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            : (_existingBookBankImageUrl != null &&
+                                  _existingBookBankImageUrl!.isNotEmpty)
+                            ? ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: CachedAppImage(
+                                  imageUrl: _existingBookBankImageUrl!,
+                                  fit: BoxFit.cover,
+                                ),
+                              )
+                            : Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.credit_card,
+                                    size: 56,
+                                    color: Colors.grey.shade400,
                                   ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'คลิกเพื่ออัปโหลดรูปหน้าสมุดบัญชี',
+                                    style: TextStyle(
+                                      color: Colors.grey.shade600,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  const Text(
+                                    'ควรให้เห็นชื่อบัญชีและเลขบัญชีชัดเจน',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
                       ),
                     ),
 
@@ -1180,15 +1340,20 @@ Future<String?> _uploadBookBankImage() async {
                     // ชื่อธนาคาร (ตัวเลือกแบบ Dropdown)
                     DropdownButtonFormField<String>(
                       isExpanded: true, // To prevent overflow
-                      initialValue: _thaiBanks.contains(_bankNameController.text) ? _bankNameController.text : null,
+                      initialValue:
+                          _thaiBanks.contains(_bankNameController.text)
+                          ? _bankNameController.text
+                          : null,
                       items: _thaiBanks
-                          .map((bank) => DropdownMenuItem<String>(
-                                value: bank,
-                                child: Text(
-                                  bank,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ))
+                          .map(
+                            (bank) => DropdownMenuItem<String>(
+                              value: bank,
+                              child: Text(
+                                bank,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          )
                           .toList(),
                       decoration: InputDecoration(
                         labelText: 'ชื่อธนาคาร *',
@@ -1227,7 +1392,10 @@ Future<String?> _uploadBookBankImage() async {
                         labelText: 'หมายเลขบัญชี *',
                         hintText: 'เช่น 1643440349',
                         helperText: 'ใส่ได้เฉพาะตัวเลขเท่านั้น',
-                        helperStyle: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                        helperStyle: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
                         prefixIcon: const Icon(Icons.credit_card),
                         errorText: _accountNumberError,
                         border: OutlineInputBorder(
@@ -1235,7 +1403,8 @@ Future<String?> _uploadBookBankImage() async {
                         ),
                       ),
                       onTap: () {
-                        if (_bankNameController.text.isNotEmpty && _ocrText.isNotEmpty) {
+                        if (_bankNameController.text.isNotEmpty &&
+                            _ocrText.isNotEmpty) {
                           _validateFieldAgainstOCR('bank');
                         }
                       },
@@ -1258,7 +1427,11 @@ Future<String?> _uploadBookBankImage() async {
                     // ชื่อเจ้าของบัญชี
                     TextFormField(
                       controller: _accountOwnerController,
-                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[ก-๙a-zA-Z\s]'))],
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'[ก-๙a-zA-Z\s]'),
+                        ),
+                      ],
                       decoration: InputDecoration(
                         labelText: 'ชื่อเจ้าของบัญชี *',
                         hintText: 'เช่น นาย สมชาย ใจดี',
@@ -1270,7 +1443,8 @@ Future<String?> _uploadBookBankImage() async {
                         ),
                       ),
                       onTap: () {
-                        if (_accountNumberController.text.isNotEmpty && _ocrText.isNotEmpty) {
+                        if (_accountNumberController.text.isNotEmpty &&
+                            _ocrText.isNotEmpty) {
                           _validateFieldAgainstOCR('account');
                         }
                       },
@@ -1297,7 +1471,7 @@ Future<String?> _uploadBookBankImage() async {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    
+
                     // ปุ่มปักหมุด
                     InkWell(
                       onTap: _pickLocationFromMap,
@@ -1321,9 +1495,9 @@ Future<String?> _uploadBookBankImage() async {
                             Container(
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
-                color: _latitude != null && _longitude != null
-                  ? Colors.green.shade100
-                  : AppColors.accentLight,
+                                color: _latitude != null && _longitude != null
+                                    ? Colors.green.shade100
+                                    : AppColors.accentLight,
                                 shape: BoxShape.circle,
                               ),
                               child: Icon(
@@ -1346,7 +1520,9 @@ Future<String?> _uploadBookBankImage() async {
                                     style: TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.bold,
-                                      color: _latitude != null && _longitude != null
+                                      color:
+                                          _latitude != null &&
+                                              _longitude != null
                                           ? Colors.green.shade700
                                           : Colors.grey.shade700,
                                     ),
@@ -1358,7 +1534,9 @@ Future<String?> _uploadBookBankImage() async {
                                         : 'คลิกเพื่อเปิดแผนที่และเลือกตำแหน่ง',
                                     style: TextStyle(
                                       fontSize: 13,
-                                      color: _latitude != null && _longitude != null
+                                      color:
+                                          _latitude != null &&
+                                              _longitude != null
                                           ? Colors.green.shade600
                                           : Colors.grey.shade600,
                                     ),
@@ -1375,7 +1553,7 @@ Future<String?> _uploadBookBankImage() async {
                         ),
                       ),
                     ),
-                    
+
                     const SizedBox(height: 16),
 
                     // เบอร์โทรศัพท์
@@ -1399,7 +1577,7 @@ Future<String?> _uploadBookBankImage() async {
                         return null;
                       },
                     ),
-                    
+
                     const SizedBox(height: 16),
 
                     // อีเมล
@@ -1421,7 +1599,7 @@ Future<String?> _uploadBookBankImage() async {
                         return null;
                       },
                     ),
-                    
+
                     const SizedBox(height: 32),
 
                     // ปุ่มบันทึก
@@ -1446,7 +1624,9 @@ Future<String?> _uploadBookBankImage() async {
                                 height: 20,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
                                 ),
                               )
                             : const Text(
@@ -1458,7 +1638,7 @@ Future<String?> _uploadBookBankImage() async {
                               ),
                       ),
                     ),
-                    
+
                     const SizedBox(height: 16),
 
                     // ข้อความเพิ่มเติม

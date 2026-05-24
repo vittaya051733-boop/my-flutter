@@ -1,8 +1,8 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'widgets/cached_app_image.dart';
 import 'widgets/product_video_player.dart';
 import 'package:image_picker/image_picker.dart';
@@ -49,33 +49,58 @@ class _ProductVideoUploadResult {
   });
 }
 
-class _AiProductImageResult {
-  const _AiProductImageResult({
-    required this.imageBytes,
+class _AiProductAnalysisResult {
+  const _AiProductAnalysisResult({
+    this.productName,
     this.description,
     this.taxStatus,
     this.taxReason,
     this.productCategory,
+    this.productType,
+    this.isLegalInThailand,
+    this.legalReason,
     this.isFreshProduct,
     this.isProcessed,
     this.canShipNationwide,
     this.nationwideShippingReason,
   });
 
-  final Uint8List imageBytes;
+  final String? productName;
   final String? description;
   final String? taxStatus;
   final String? taxReason;
   final String? productCategory;
+  final String? productType;
+  final bool? isLegalInThailand;
+  final String? legalReason;
   final bool? isFreshProduct;
   final bool? isProcessed;
   final bool? canShipNationwide;
   final String? nationwideShippingReason;
 }
 
+/// แอดมิน (van4) อัปโหลดสินค้าแทนร้าน — ใช้ UI เดียวกับฝั่งร้านค้า
+class AdminProductUploadContext {
+  const AdminProductUploadContext({
+    required this.ownerUid,
+    required this.shopName,
+    required this.serviceType,
+  });
+
+  final String ownerUid;
+  final String shopName;
+  final String serviceType;
+}
+
 class AddProductScreen extends StatefulWidget {
   final Product? productToEdit;
-  const AddProductScreen({super.key, this.productToEdit});
+  final AdminProductUploadContext? adminUploadContext;
+
+  const AddProductScreen({
+    super.key,
+    this.productToEdit,
+    this.adminUploadContext,
+  });
 
   @override
   AddProductScreenState createState() => AddProductScreenState();
@@ -83,6 +108,12 @@ class AddProductScreen extends StatefulWidget {
 
 class AddProductScreenState extends State<AddProductScreen> {
   static const double _gpRate = 0.18;
+
+  bool get _isAdminDelegatedUpload => widget.adminUploadContext != null;
+
+  String? get _effectiveOwnerUid =>
+      widget.adminUploadContext?.ownerUid ??
+      FirebaseAuth.instance.currentUser?.uid;
 
   // Controllers to get text from TextFields
   final _nameController = TextEditingController();
@@ -95,6 +126,7 @@ class AddProductScreenState extends State<AddProductScreen> {
   final _sizesController = TextEditingController();
   final _weightController = TextEditingController();
   final FocusNode _priceFocusNode = FocusNode();
+  final FocusNode _toppingsFocusNode = FocusNode();
   String _weightUnit = 'g';
   final _otherUnitController = TextEditingController();
 
@@ -112,36 +144,56 @@ class AddProductScreenState extends State<AddProductScreen> {
   bool _isResolvingServiceType = true;
   bool _showPriceGuidance = false;
   bool _showPreparationTimeGuidance = false;
+  bool _showToppingsGuidance = false;
   bool _priceGuidanceDismissedWhileFocused = false;
   bool _isGeneratingAiDescription = false;
+  bool _isAnalyzingProductWithAi = false;
   bool _hasUsedAiDescriptionForProduct = false;
-  bool _hasUsedAiWhiteBgForProduct = false;
+  bool _hasUsedAiProductAnalysisForProduct = false;
   String? _aiTaxAnalysisReason;
   bool _hasAiTaxAnalysis = false;
+  bool? _aiIsLegalInThailand;
+  String? _aiLegalAnalysisReason;
+  String? _aiProductType;
   bool? _aiCanShipNationwide;
   String? _aiNationwideShippingReason;
   bool _manualCanShipNationwide = false;
-  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _aiQueueSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _aiQueueSubscription;
   String? _aiQueueStatusText;
   bool _aiQueueExternalRecommendation = false;
-  final Map<String, Uint8List> _aiWhiteBgImagesByKey = {};
-  final Set<String> _aiWhiteBgProcessingKeys = {};
-  Uint8List? _videoAiOriginalPreviewBytes;
-  Uint8List? _videoAiWhiteBgBytes;
-  bool _isProcessingVideoAiWhiteBg = false;
   double? _uploadProgress;
   String? _uploadStatusText;
 
   static const int _shopMaxImageCount = 10;
   static const int _defaultMaxImageCount = 1;
   static const Duration _maxVideoDuration = Duration(minutes: 5);
-  static const int _videoCompressionSkipThresholdBytes = 15 * 1024 * 1024; // 15 MB
+  int? _adminMaxImageCount;
+  bool? _adminCanUploadVideo;
+  static const int _videoCompressionSkipThresholdBytes =
+      15 * 1024 * 1024; // 15 MB
+  static const int _pickerImageQuality = 75;
+  static const int _uploadImageQuality = 78;
+  static const int _thumbnailImageQuality = 60;
   String? _serviceType;
 
-  int get _currentImageCount => _existingImageUrls.length + _newImageFiles.length;
-  bool get _isShopServiceType => _normalizeServiceType(_serviceType) == 'ร้านค้า';
-  bool get _canAddVideo => _isShopServiceType;
-  int get _maxImageCount => _isShopServiceType ? _shopMaxImageCount : _defaultMaxImageCount;
+  int get _currentImageCount =>
+      _existingImageUrls.length + _newImageFiles.length;
+  bool get _isShopServiceType =>
+      _normalizeServiceType(_serviceType) == 'ร้านค้า';
+  bool get _canAddVideo {
+    if (_adminCanUploadVideo != null) {
+      return _adminCanUploadVideo!;
+    }
+    return _isShopServiceType;
+  }
+
+  int get _maxImageCount {
+    if (_adminMaxImageCount != null && _adminMaxImageCount! > 0) {
+      return _adminMaxImageCount!;
+    }
+    return _isShopServiceType ? _shopMaxImageCount : _defaultMaxImageCount;
+  }
 
   String? _selectedUnit = 'ชิ้น';
   final List<String> _units = ['ชิ้น', 'มัด', 'ถุง', 'แพ็ค', 'กล่อง', 'อื่นๆ'];
@@ -165,20 +217,38 @@ class AddProductScreenState extends State<AddProductScreen> {
       setState(() {
         if (_priceFocusNode.hasFocus) {
           _showPriceGuidance = !_priceGuidanceDismissedWhileFocused;
+          _showToppingsGuidance = false;
         } else {
           _priceGuidanceDismissedWhileFocused = false;
           _showPriceGuidance = false;
         }
       });
     });
-    _loadCurrentServiceType();
+    _toppingsFocusNode.addListener(() {
+      if (!mounted) return;
+      setState(() {
+        _showToppingsGuidance = _toppingsFocusNode.hasFocus;
+        if (_toppingsFocusNode.hasFocus) {
+          _showPriceGuidance = false;
+          _showPreparationTimeGuidance = false;
+        }
+      });
+    });
+    if (widget.adminUploadContext != null) {
+      _serviceType = widget.adminUploadContext!.serviceType;
+      _isResolvingServiceType = false;
+    } else {
+      _loadCurrentServiceType();
+    }
+    unawaited(_loadAdminMediaSettings());
     if (widget.productToEdit != null) {
       final p = widget.productToEdit!;
       _nameController.text = p.name;
-          _productDescriptionController.text = p.description;
-          final existingToppings = p.toppings?.trim();
-          // Fall back to the old description value if this product was created before toppings existed.
-        _descriptionController.text = (existingToppings != null && existingToppings.isNotEmpty)
+      _productDescriptionController.text = p.description;
+      final existingToppings = p.toppings?.trim();
+      // Fall back to the old description value if this product was created before toppings existed.
+      _descriptionController.text =
+          (existingToppings != null && existingToppings.isNotEmpty)
           ? existingToppings
           : p.description;
       _priceController.text = p.price.toString();
@@ -198,16 +268,19 @@ class AddProductScreenState extends State<AddProductScreen> {
           : null;
       _isFreshProduct = p.isFreshProduct;
       _isProcessed = p.isProcessed;
-        _pharmacyIsTaxable = p.taxStatus != 'exempt';
+      _pharmacyIsTaxable = p.taxStatus != 'exempt';
       _hasUsedAiDescriptionForProduct = p.aiDescriptionRequested;
-      _hasUsedAiWhiteBgForProduct = p.aiWhiteBackgroundRequested;
+      _hasUsedAiProductAnalysisForProduct = p.aiProductAnalysisRequested;
       _aiTaxAnalysisReason = p.taxAiReason;
       _hasAiTaxAnalysis = (p.taxAiReason ?? '').trim().isNotEmpty;
+      _aiIsLegalInThailand = p.aiIsLegalInThailand;
+      _aiLegalAnalysisReason = p.aiLegalAnalysisReason;
+      _aiProductType = p.aiProductType;
       _aiCanShipNationwide = p.canShipNationwide;
       _aiNationwideShippingReason = p.nationwideShippingReason;
       _manualCanShipNationwide = p.canShipNationwide ?? false;
-        _existingImageUrls = List<String>.from(p.imageUrls);
-        _existingThumbnailUrls = p.thumbnailUrls.isNotEmpty
+      _existingImageUrls = List<String>.from(p.imageUrls);
+      _existingThumbnailUrls = p.thumbnailUrls.isNotEmpty
           ? List<String>.from(p.thumbnailUrls)
           : List<String>.from(p.imageUrls);
       _existingVideoUrl = p.videoUrl;
@@ -224,6 +297,7 @@ class AddProductScreenState extends State<AddProductScreen> {
     _productDescriptionController.dispose();
     _priceController.dispose();
     _priceFocusNode.dispose();
+    _toppingsFocusNode.dispose();
     _stockController.dispose();
     _preparationTimeController.dispose();
     _colorsController.dispose();
@@ -259,21 +333,25 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   void _showSnack(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _hideFieldGuidance() {
-    if (!_showPriceGuidance && !_showPreparationTimeGuidance) return;
+    if (!_showPriceGuidance &&
+        !_showPreparationTimeGuidance &&
+        !_showToppingsGuidance) {
+      return;
+    }
     setState(() {
       _showPriceGuidance = false;
       _showPreparationTimeGuidance = false;
+      _showToppingsGuidance = false;
     });
   }
 
-  Widget _buildDismissibleGuidance({
-    required String message,
-    Widget? footer,
-  }) {
+  Widget _buildDismissibleGuidance({required String message, Widget? footer}) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
@@ -306,10 +384,7 @@ class AddProductScreenState extends State<AddProductScreen> {
           ),
           if (footer != null) ...[
             const SizedBox(height: 6),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: footer,
-            ),
+            Align(alignment: Alignment.centerLeft, child: footer),
           ],
         ],
       ),
@@ -340,7 +415,8 @@ class AddProductScreenState extends State<AddProductScreen> {
     );
   }
 
-  bool get _isPharmacyCategory => _selectedProductCategory == 'ร้านขายยาและเวชภัณฑ์';
+  bool get _isPharmacyCategory =>
+      _selectedProductCategory == 'ร้านขายยาและเวชภัณฑ์';
 
   String get _computedTaxStatus {
     if (_isPharmacyCategory) {
@@ -376,11 +452,14 @@ class AddProductScreenState extends State<AddProductScreen> {
     return 'สินค้าไม่ได้เข้ากลุ่มของสดไม่แปรรูป';
   }
 
-  bool get _resolvedCanShipNationwide => _aiCanShipNationwide ?? _manualCanShipNationwide;
+  bool get _resolvedCanShipNationwide =>
+      _aiCanShipNationwide ?? _manualCanShipNationwide;
 
   String get _resolvedNationwideShippingReason {
     final aiReason = _aiNationwideShippingReason?.trim();
-    if (_aiCanShipNationwide != null && aiReason != null && aiReason.isNotEmpty) {
+    if (_aiCanShipNationwide != null &&
+        aiReason != null &&
+        aiReason.isNotEmpty) {
       return aiReason;
     }
     return _manualCanShipNationwide
@@ -442,7 +521,11 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   Map<String, double?> _extractLocation(Map<String, dynamic>? data) {
     final dynamic locationValue =
-        data?['location'] ?? data?['coordinates'] ?? data?['geo'] ?? data?['position'] ?? data?['shopLocation'];
+        data?['location'] ??
+        data?['coordinates'] ??
+        data?['geo'] ??
+        data?['position'] ??
+        data?['shopLocation'];
 
     if (locationValue is GeoPoint) {
       return <String, double?>{
@@ -454,16 +537,17 @@ class AddProductScreenState extends State<AddProductScreen> {
     if (locationValue is Map) {
       final map = Map<String, dynamic>.from(locationValue);
       final lat = _parseDouble(map['latitude'] ?? map['lat'] ?? map['y']);
-      final lng = _parseDouble(map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x']);
-      return <String, double?>{
-        'latitude': lat,
-        'longitude': lng,
-      };
+      final lng = _parseDouble(
+        map['longitude'] ?? map['lng'] ?? map['long'] ?? map['x'],
+      );
+      return <String, double?>{'latitude': lat, 'longitude': lng};
     }
 
     return <String, double?>{
       'latitude': _parseDouble(data?['latitude'] ?? data?['lat'] ?? data?['y']),
-      'longitude': _parseDouble(data?['longitude'] ?? data?['lng'] ?? data?['long'] ?? data?['x']),
+      'longitude': _parseDouble(
+        data?['longitude'] ?? data?['lng'] ?? data?['long'] ?? data?['x'],
+      ),
     };
   }
 
@@ -480,18 +564,27 @@ class AddProductScreenState extends State<AddProductScreen> {
         return directDoc;
       }
 
-      final ownerQuery = await col.where('ownerId', isEqualTo: userId).limit(1).get();
+      final ownerQuery = await col
+          .where('ownerId', isEqualTo: userId)
+          .limit(1)
+          .get();
       if (ownerQuery.docs.isNotEmpty) {
         return ownerQuery.docs.first;
       }
 
       final normalizedEmail = email?.trim().toLowerCase();
       if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
-        final emailQuery = await col.where('email', isEqualTo: normalizedEmail).limit(1).get();
+        final emailQuery = await col
+            .where('email', isEqualTo: normalizedEmail)
+            .limit(1)
+            .get();
         if (emailQuery.docs.isNotEmpty) {
           return emailQuery.docs.first;
         }
-        final rawEmailQuery = await col.where('email', isEqualTo: email).limit(1).get();
+        final rawEmailQuery = await col
+            .where('email', isEqualTo: email)
+            .limit(1)
+            .get();
         if (rawEmailQuery.docs.isNotEmpty) {
           return rawEmailQuery.docs.first;
         }
@@ -500,7 +593,9 @@ class AddProductScreenState extends State<AddProductScreen> {
       if (e.code != 'permission-denied') {
         rethrow;
       }
-      debugPrint('Skipping inaccessible registration collection $collection: ${e.message ?? e.code}');
+      debugPrint(
+        'Skipping inaccessible registration collection $collection: ${e.message ?? e.code}',
+      );
     }
 
     return null;
@@ -529,8 +624,12 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     String? hintedServiceType = normalizedServiceType;
     try {
-      final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(userId).get();
-      hintedServiceType = _normalizeServiceType(
+      final contractDoc = await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(userId)
+          .get();
+      hintedServiceType =
+          _normalizeServiceType(
             contractDoc.data()?['serviceType']?.toString(),
           ) ??
           hintedServiceType;
@@ -539,7 +638,8 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
 
     final prioritizedCollections = <String>[
-      if (hintedServiceType != null && collectionByType.containsKey(hintedServiceType))
+      if (hintedServiceType != null &&
+          collectionByType.containsKey(hintedServiceType))
         collectionByType[hintedServiceType]!,
       ...collectionByType.values,
     ];
@@ -553,6 +653,43 @@ class AddProductScreenState extends State<AddProductScreen> {
       final data = Map<String, dynamic>.from(doc.data() ?? <String, dynamic>{});
       data.putIfAbsent('serviceType', () => serviceByCollection[collection]);
       return data;
+    }
+
+    // Fallback for accounts whose registration docs are unavailable/incomplete.
+    // These documents are self-owned and allowed by current rules.
+    final fallbackCollections = <String>['public_shops', 'users', 'contracts'];
+    Map<String, dynamic>? mergedFallback;
+    for (final collection in fallbackCollections) {
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection(collection)
+            .doc(userId)
+            .get();
+        if (!doc.exists || doc.data() == null) {
+          continue;
+        }
+
+        final data = Map<String, dynamic>.from(doc.data()!);
+        mergedFallback ??= <String, dynamic>{};
+        mergedFallback.addAll(data);
+      } on FirebaseException catch (e) {
+        if (e.code != 'permission-denied') {
+          rethrow;
+        }
+        debugPrint(
+          'Skipping inaccessible fallback profile collection $collection: ${e.message ?? e.code}',
+        );
+      }
+    }
+
+    if (mergedFallback != null) {
+      if (email != null && email.trim().isNotEmpty) {
+        mergedFallback.putIfAbsent('email', () => email.trim());
+      }
+      if (normalizedServiceType != null) {
+        mergedFallback.putIfAbsent('serviceType', () => normalizedServiceType);
+      }
+      return mergedFallback;
     }
 
     return null;
@@ -569,14 +706,19 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     for (final entry in registrationCollections) {
       try {
-        final doc = await FirebaseFirestore.instance.collection(entry.key).doc(userId).get();
+        final doc = await FirebaseFirestore.instance
+            .collection(entry.key)
+            .doc(userId)
+            .get();
         if (!doc.exists) continue;
         return _readServiceTypeFromData(doc.data()) ?? entry.value;
       } on FirebaseException catch (e) {
         if (e.code != 'permission-denied') {
           rethrow;
         }
-        debugPrint('Skipping inaccessible service registration ${entry.key}: ${e.message ?? e.code}');
+        debugPrint(
+          'Skipping inaccessible service registration ${entry.key}: ${e.message ?? e.code}',
+        );
       }
     }
 
@@ -595,11 +737,17 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
 
     try {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
       String? serviceType = _readServiceTypeFromData(userDoc.data());
 
       if (serviceType == null) {
-        final contractDoc = await FirebaseFirestore.instance.collection('contracts').doc(user.uid).get();
+        final contractDoc = await FirebaseFirestore.instance
+            .collection('contracts')
+            .doc(user.uid)
+            .get();
         serviceType = _readServiceTypeFromData(contractDoc.data());
       }
 
@@ -621,6 +769,41 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
+  Future<void> _loadAdminMediaSettings() async {
+    final ownerUid = _effectiveOwnerUid;
+    if (ownerUid == null) {
+      return;
+    }
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('public_shops')
+          .doc(ownerUid)
+          .get();
+      final data = snapshot.data();
+      if (!mounted || data == null) {
+        return;
+      }
+
+      final maxImagesRaw = data['adminMaxImageCount'];
+      final maxImages = maxImagesRaw is num
+          ? maxImagesRaw.toInt()
+          : int.tryParse(maxImagesRaw?.toString() ?? '');
+      final canUploadVideo = data['adminCanUploadVideo'];
+
+      setState(() {
+        if (maxImages != null && maxImages > 0) {
+          _adminMaxImageCount = maxImages.clamp(1, 30);
+        }
+        if (canUploadVideo is bool) {
+          _adminCanUploadVideo = canUploadVideo;
+        }
+      });
+    } catch (error) {
+      debugPrint('Failed to load admin media settings: $error');
+    }
+  }
+
   Future<void> _pickImagesFromGallery() async {
     if (_isResolvingServiceType) return;
 
@@ -632,18 +815,26 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     final List<XFile> picks;
     if (_maxImageCount == 1) {
-      final singlePick = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70);
+      final singlePick = await _picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: _pickerImageQuality,
+      );
       picks = singlePick == null ? <XFile>[] : <XFile>[singlePick];
     } else {
-      picks = await _picker.pickMultiImage(imageQuality: 70);
+      picks = await _picker.pickMultiImage(imageQuality: _pickerImageQuality);
     }
     if (picks.isEmpty) return;
 
     final imagesToAdd = picks.take(remainingSlots).toList();
-    setState(() => _newImageFiles.addAll(imagesToAdd));
+    final compressedToAdd = await _compressPickedImages(imagesToAdd);
+    if (compressedToAdd.isEmpty) return;
+    setState(() => _newImageFiles.addAll(compressedToAdd));
+    unawaited(_analyzeProductWithAi(automatic: true));
 
     if (picks.length > remainingSlots) {
-      _showSnack('ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${imagesToAdd.length} รูปแรก');
+      _showSnack(
+        'ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${imagesToAdd.length} รูปแรก',
+      );
     }
   }
 
@@ -655,9 +846,40 @@ class AddProductScreenState extends State<AddProductScreen> {
       return;
     }
 
-    final XFile? photo = await _picker.pickImage(source: ImageSource.camera, imageQuality: 70);
+    final XFile? photo = await _picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: _pickerImageQuality,
+    );
     if (photo == null) return;
-    setState(() => _newImageFiles.add(photo));
+    final compressed = await _compressPickedImages(<XFile>[photo]);
+    if (compressed.isEmpty) return;
+    setState(() => _newImageFiles.add(compressed.first));
+    unawaited(_analyzeProductWithAi(automatic: true));
+  }
+
+  Future<List<XFile>> _compressPickedImages(List<XFile> picks) async {
+    final compressed = <XFile>[];
+    for (final pick in picks) {
+      try {
+        final sourceFile = File(pick.path);
+        final compressedFile = await _compressImageFile(
+          sourceFile,
+          forThumbnail: false,
+          qualityOverride: _uploadImageQuality,
+          minDimensionOverride: 1400,
+          suffixOverride: 'pick',
+        );
+        if (compressedFile.path == sourceFile.path) {
+          compressed.add(pick);
+        } else {
+          compressed.add(XFile(compressedFile.path, name: pick.name));
+        }
+      } catch (e) {
+        debugPrint('Failed to pre-compress picked image: $e');
+        compressed.add(pick);
+      }
+    }
+    return compressed;
   }
 
   Future<void> _pickVideo() async {
@@ -690,23 +912,22 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     if (source == null) return;
 
-    final XFile? video = await _picker.pickVideo(source: source, maxDuration: _maxVideoDuration);
+    final XFile? video = await _picker.pickVideo(
+      source: source,
+      maxDuration: _maxVideoDuration,
+    );
     if (video == null) return;
 
     setState(() {
       _videoFile = video;
       _existingVideoUrl = null;
       _existingVideoThumbnailUrl = null;
-      _videoAiOriginalPreviewBytes = null;
-      _videoAiWhiteBgBytes = null;
     });
   }
 
   void _removeExistingImageAt(int index) {
     setState(() {
       if (index >= 0 && index < _existingImageUrls.length) {
-        _aiWhiteBgImagesByKey.remove('existing:${_existingImageUrls[index]}');
-        _aiWhiteBgProcessingKeys.remove('existing:${_existingImageUrls[index]}');
         _localMediaPaths.remove(_existingImageUrls[index]);
         _existingImageUrls.removeAt(index);
       }
@@ -719,11 +940,6 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   void _removeNewImageAt(int index) {
     setState(() {
-      if (index >= 0 && index < _newImageFiles.length) {
-        final key = 'new:${_newImageFiles[index].path}';
-        _aiWhiteBgImagesByKey.remove(key);
-        _aiWhiteBgProcessingKeys.remove(key);
-      }
       _newImageFiles.removeAt(index);
     });
   }
@@ -739,9 +955,6 @@ class AddProductScreenState extends State<AddProductScreen> {
       _videoFile = null;
       _existingVideoUrl = null;
       _existingVideoThumbnailUrl = null;
-      _videoAiOriginalPreviewBytes = null;
-      _videoAiWhiteBgBytes = null;
-      _isProcessingVideoAiWhiteBg = false;
     });
   }
 
@@ -760,11 +973,20 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
-  Future<File> _compressImageFile(File sourceFile, {required bool forThumbnail}) async {
-    final suffix = forThumbnail ? 'thumb' : 'full';
-    final targetPath = '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix.webp';
-    final minDimension = forThumbnail ? 600 : 1600;
-    final quality = forThumbnail ? 60 : 82;
+  Future<File> _compressImageFile(
+    File sourceFile, {
+    required bool forThumbnail,
+    int? qualityOverride,
+    int? minDimensionOverride,
+    String? suffixOverride,
+  }) async {
+    final suffix = suffixOverride ?? (forThumbnail ? 'thumb' : 'full');
+    final targetPath =
+        '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix.webp';
+    final minDimension = minDimensionOverride ?? (forThumbnail ? 600 : 1600);
+    final quality =
+        qualityOverride ??
+        (forThumbnail ? _thumbnailImageQuality : _uploadImageQuality);
 
     try {
       final compressed = await FlutterImageCompress.compressAndGetFile(
@@ -806,8 +1028,12 @@ class AddProductScreenState extends State<AddProductScreen> {
     return sourceFile;
   }
 
-  Future<File> _writeBytesToTempFile(Uint8List data, {required String suffix}) async {
-    final tempPath = '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix';
+  Future<File> _writeBytesToTempFile(
+    Uint8List data, {
+    required String suffix,
+  }) async {
+    final tempPath =
+        '${Directory.systemTemp.path}/product_${DateTime.now().microsecondsSinceEpoch}_$suffix';
     final file = File(tempPath);
     await file.writeAsBytes(data, flush: true);
     return file;
@@ -871,7 +1097,9 @@ class AddProductScreenState extends State<AddProductScreen> {
     final normalized = pathOrUrl.toLowerCase();
     if (normalized.endsWith('.png')) return 'image/png';
     if (normalized.endsWith('.webp')) return 'image/webp';
-    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) return 'image/jpeg';
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+      return 'image/jpeg';
+    }
     return 'image/jpeg';
   }
 
@@ -890,7 +1118,8 @@ class AddProductScreenState extends State<AddProductScreen> {
   String _createAiRequestId() {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
     final millis = DateTime.now().millisecondsSinceEpoch;
-    return '${uid}_${millis}_${DateTime.now().microsecondsSinceEpoch}'.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    return '${uid}_${millis}_${DateTime.now().microsecondsSinceEpoch}'
+        .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
   }
 
   String _formatAiWait(int seconds) {
@@ -902,15 +1131,21 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   String _buildAiQueueText(Map<String, dynamic> data) {
     final status = (data['status'] ?? '').toString();
-    final position = data['position'] is num ? (data['position'] as num).toInt() : null;
+    final position = data['position'] is num
+        ? (data['position'] as num).toInt()
+        : null;
     final estimatedSeconds = data['estimatedWaitSeconds'] is num
         ? (data['estimatedWaitSeconds'] as num).toInt()
         : null;
     final message = (data['message'] ?? '').toString().trim();
 
     if (status == 'queued') {
-      final positionText = position != null && position > 0 ? 'คิวที่ $position' : 'กำลังรอคิว';
-      final waitText = estimatedSeconds != null ? ' ${_formatAiWait(estimatedSeconds)}' : '';
+      final positionText = position != null && position > 0
+          ? 'คิวที่ $position'
+          : 'กำลังรอคิว';
+      final waitText = estimatedSeconds != null
+          ? ' ${_formatAiWait(estimatedSeconds)}'
+          : '';
       return '$positionText$waitText';
     }
     if (status == 'processing') {
@@ -919,7 +1154,7 @@ class AddProductScreenState extends State<AddProductScreen> {
     if (status == 'rejected') {
       return message.isNotEmpty
           ? message
-          : 'คิว AI เยอะมาก แนะนำใช้ AI ภายนอกเปลี่ยนพื้นหลังเป็นสีขาวก่อน แล้วค่อยอัปโหลดรูปเข้าระบบ';
+          : 'คิว AI เยอะมาก กรุณาลองวิเคราะห์สินค้าใหม่ภายหลัง';
     }
     if (status == 'failed') {
       return message.isNotEmpty ? message : 'AI ประมวลผลไม่สำเร็จ';
@@ -943,20 +1178,24 @@ class AddProductScreenState extends State<AddProductScreen> {
         .collection('ai_processing_queue')
         .doc(requestId)
         .snapshots()
-        .listen((snapshot) {
-      if (!mounted || !snapshot.exists) return;
-      final data = snapshot.data() ?? <String, dynamic>{};
-      setState(() {
-        _aiQueueStatusText = _buildAiQueueText(data);
-        _aiQueueExternalRecommendation = data['externalAiRecommended'] == true;
-      });
-    }, onError: (_) {
-      if (!mounted) return;
-      setState(() {
-        _aiQueueStatusText = 'กำลังเข้าคิว AI...';
-        _aiQueueExternalRecommendation = false;
-      });
-    });
+        .listen(
+          (snapshot) {
+            if (!mounted || !snapshot.exists) return;
+            final data = snapshot.data() ?? <String, dynamic>{};
+            setState(() {
+              _aiQueueStatusText = _buildAiQueueText(data);
+              _aiQueueExternalRecommendation =
+                  data['externalAiRecommended'] == true;
+            });
+          },
+          onError: (_) {
+            if (!mounted) return;
+            setState(() {
+              _aiQueueStatusText = 'กำลังเข้าคิว AI...';
+              _aiQueueExternalRecommendation = false;
+            });
+          },
+        );
   }
 
   void _clearAiQueueStatus() {
@@ -972,76 +1211,148 @@ class AddProductScreenState extends State<AddProductScreen> {
   String _aiFunctionErrorMessage(FirebaseFunctionsException e) {
     final details = e.details;
     if (details is Map && details['externalAiRecommended'] == true) {
-      final position = details['queuePosition'] is num ? (details['queuePosition'] as num).toInt() : null;
+      final position = details['queuePosition'] is num
+          ? (details['queuePosition'] as num).toInt()
+          : null;
       final estimatedSeconds = details['estimatedWaitSeconds'] is num
           ? (details['estimatedWaitSeconds'] as num).toInt()
           : null;
-      final queueText = position != null ? 'คิวที่ $position' : 'คิว AI เยอะมาก';
-      final waitText = estimatedSeconds != null ? ' ${_formatAiWait(estimatedSeconds)}' : '';
-      return '$queueText$waitText แนะนำใช้ AI ภายนอกเปลี่ยนพื้นหลังเป็นสีขาวก่อน แล้วค่อยอัปโหลดรูปเข้าระบบ';
+      final queueText = position != null
+          ? 'คิวที่ $position'
+          : 'คิว AI เยอะมาก';
+      final waitText = estimatedSeconds != null
+          ? ' ${_formatAiWait(estimatedSeconds)}'
+          : '';
+      return '$queueText$waitText ระบบ AI ยังไม่พร้อม กรุณาลองใหม่ภายหลัง';
     }
-    return e.message ?? 'AI ทำพื้นหลังขาวไม่สำเร็จ (${e.code})';
+    return e.message ?? 'AI วิเคราะห์สินค้าไม่สำเร็จ (${e.code})';
   }
 
-  Future<_AiProductImageResult> _requestWhiteBackgroundImage({
+  Future<_AiProductAnalysisResult> _requestProductAnalysis({
     required Uint8List imageBytes,
     required String mimeType,
   }) async {
     final requestId = _createAiRequestId();
     _listenAiQueueStatus(requestId);
-    final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
-        .httpsCallable('replaceImageBackgroundWhite');
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'asia-southeast1',
+    ).httpsCallable('analyzeProductWithAi');
     try {
       final response = await callable.call(<String, dynamic>{
         'requestId': requestId,
         'imageBase64': base64Encode(imageBytes),
         'mimeType': mimeType,
         'productName': _nameController.text.trim(),
+        'description': _productDescriptionController.text.trim(),
         'category': (_selectedProductCategory ?? '').trim(),
         'price': _priceController.text.trim(),
-        'unit': _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '').trim(),
+        'unit': _selectedUnit == 'อื่นๆ'
+            ? _otherUnitController.text.trim()
+            : (_selectedUnit ?? '').trim(),
       });
       final data = response.data;
       if (data is! Map) {
         throw Exception('รูปแบบข้อมูลจาก AI ไม่ถูกต้อง');
       }
-      final imageBase64 = (data['imageBase64'] ?? '').toString().trim();
-      if (imageBase64.isEmpty) {
-        throw Exception('AI ไม่ได้ส่งรูปกลับมา');
-      }
-      return _AiProductImageResult(
-        imageBytes: base64Decode(imageBase64),
+      return _AiProductAnalysisResult(
+        productName: (data['productName'] ?? '').toString().trim(),
         description: (data['description'] ?? '').toString().trim(),
         taxStatus: (data['taxStatus'] ?? '').toString().trim(),
         taxReason: (data['taxReason'] ?? '').toString().trim(),
         productCategory: (data['productCategory'] ?? '').toString().trim(),
-        isFreshProduct: data['isFreshProduct'] is bool ? data['isFreshProduct'] as bool : null,
-        isProcessed: data['isProcessed'] is bool ? data['isProcessed'] as bool : null,
-        canShipNationwide: data['canShipNationwide'] is bool ? data['canShipNationwide'] as bool : null,
-        nationwideShippingReason: (data['nationwideShippingReason'] ?? '').toString().trim(),
+        productType: (data['productType'] ?? '').toString().trim(),
+        isLegalInThailand: data['isLegalInThailand'] is bool
+            ? data['isLegalInThailand'] as bool
+            : null,
+        legalReason: (data['legalReason'] ?? '').toString().trim(),
+        isFreshProduct: data['isFreshProduct'] is bool
+            ? data['isFreshProduct'] as bool
+            : null,
+        isProcessed: data['isProcessed'] is bool
+            ? data['isProcessed'] as bool
+            : null,
+        canShipNationwide: data['canShipNationwide'] is bool
+            ? data['canShipNationwide'] as bool
+            : null,
+        nationwideShippingReason: (data['nationwideShippingReason'] ?? '')
+            .toString()
+            .trim(),
       );
     } finally {
       _clearAiQueueStatus();
     }
   }
 
-  void _applyAiProductAnalysis(_AiProductImageResult result) {
+  Future<({Uint8List bytes, String mimeType})?> _readProductImageForAi() async {
+    if (_newImageFiles.isNotEmpty) {
+      final file = _newImageFiles.first;
+      return (
+        bytes: await File(file.path).readAsBytes(),
+        mimeType: _mimeTypeFromPathOrUrl(file.path),
+      );
+    }
+
+    if (_existingImageUrls.isNotEmpty) {
+      final sourceUrl = _existingThumbnailUrls.isNotEmpty
+          ? _existingThumbnailUrls.first
+          : _existingImageUrls.first;
+      return (
+        bytes: await _downloadBytes(sourceUrl),
+        mimeType: _mimeTypeFromPathOrUrl(sourceUrl),
+      );
+    }
+
+    if (_videoFile != null) {
+      final thumbBytes = await VideoCompress.getByteThumbnail(
+        _videoFile!.path,
+        quality: 75,
+        position: -1,
+      );
+      if (thumbBytes != null && thumbBytes.isNotEmpty) {
+        return (bytes: thumbBytes, mimeType: 'image/jpeg');
+      }
+    }
+
+    if ((_existingVideoThumbnailUrl ?? '').isNotEmpty) {
+      return (
+        bytes: await _downloadBytes(_existingVideoThumbnailUrl!),
+        mimeType: _mimeTypeFromPathOrUrl(_existingVideoThumbnailUrl!),
+      );
+    }
+
+    return null;
+  }
+
+  void _applyAiProductAnalysis(_AiProductAnalysisResult result) {
+    final productName = result.productName?.trim();
     final description = result.description?.trim();
     final category = result.productCategory?.trim();
+    final productType = result.productType?.trim();
     final taxStatus = result.taxStatus?.trim().toLowerCase();
     final taxReason = result.taxReason?.trim();
+    final legalReason = result.legalReason?.trim();
     final nationwideReason = result.nationwideShippingReason?.trim();
 
     setState(() {
+      if (productName != null &&
+          productName.isNotEmpty &&
+          _nameController.text.trim().isEmpty) {
+        _nameController.text = productName;
+      }
+
       if (description != null && description.isNotEmpty) {
         _productDescriptionController.text = description;
         _hasUsedAiDescriptionForProduct = true;
       }
 
-      if (category != null && category.isNotEmpty && _productCategories.contains(category)) {
+      if (category != null &&
+          category.isNotEmpty &&
+          _productCategories.contains(category)) {
         _selectedProductCategory = category;
       } else if ((_selectedProductCategory ?? '').isEmpty) {
-        _selectedProductCategory = taxStatus == 'exempt' ? 'ของสด' : 'สินค้าทั่วไป';
+        _selectedProductCategory = taxStatus == 'exempt'
+            ? 'ของสด'
+            : 'สินค้าทั่วไป';
       }
 
       if (_isPharmacyCategory) {
@@ -1065,7 +1376,20 @@ class AddProductScreenState extends State<AddProductScreen> {
         _aiTaxAnalysisReason = taxReason;
       }
 
-      if (taxStatus == 'taxable' || taxStatus == 'exempt' || (taxReason != null && taxReason.isNotEmpty)) {
+      if (productType != null && productType.isNotEmpty) {
+        _aiProductType = productType;
+      }
+
+      if (result.isLegalInThailand != null) {
+        _aiIsLegalInThailand = result.isLegalInThailand;
+      }
+      if (legalReason != null && legalReason.isNotEmpty) {
+        _aiLegalAnalysisReason = legalReason;
+      }
+
+      if (taxStatus == 'taxable' ||
+          taxStatus == 'exempt' ||
+          (taxReason != null && taxReason.isNotEmpty)) {
         _hasAiTaxAnalysis = true;
       }
 
@@ -1078,239 +1402,123 @@ class AddProductScreenState extends State<AddProductScreen> {
     });
   }
 
+  Future<void> _analyzeProductWithAi({bool automatic = false}) async {
+    if (_hasUsedAiProductAnalysisForProduct) {
+      if (automatic) return;
+      _showSnack(
+        'สินค้านี้ใช้ AI วิเคราะห์สินค้าไปแล้ว ใช้ได้ 1 ครั้งต่อสินค้า',
+      );
+      return;
+    }
+
+    final productName = _nameController.text.trim();
+    if (!automatic && productName.isEmpty) {
+      _showSnack('กรุณากรอกชื่อสินค้าก่อนให้ AI วิเคราะห์');
+      return;
+    }
+
+    final source = await _readProductImageForAi();
+    if (source == null || source.bytes.isEmpty) {
+      _showSnack('กรุณาเพิ่มรูปสินค้าก่อนให้ AI วิเคราะห์');
+      return;
+    }
+
+    setState(() {
+      _isAnalyzingProductWithAi = true;
+      _hasUsedAiProductAnalysisForProduct = true;
+    });
+    await _persistProductAiUsageFlag('aiProductAnalysisRequested');
+
+    try {
+      final result = await _requestProductAnalysis(
+        imageBytes: source.bytes,
+        mimeType: source.mimeType,
+      );
+      if (!mounted) return;
+      _applyAiProductAnalysis(result);
+      if (!automatic) {
+        _showSnack('AI วิเคราะห์สินค้าเรียบร้อยแล้ว');
+      }
+    } on FirebaseFunctionsException catch (e) {
+      if (automatic && mounted) {
+        setState(() => _hasUsedAiProductAnalysisForProduct = false);
+      }
+      if (!automatic) {
+        _showSnack(_aiFunctionErrorMessage(e));
+      }
+    } catch (e) {
+      if (automatic && mounted) {
+        setState(() => _hasUsedAiProductAnalysisForProduct = false);
+      }
+      if (!automatic) {
+        _showSnack('AI วิเคราะห์สินค้าไม่สำเร็จ: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isAnalyzingProductWithAi = false);
+      }
+    }
+  }
+
   Future<void> _persistProductAiUsageFlag(String field) async {
     final targetId = widget.productToEdit?.id;
     if (targetId == null || targetId.isEmpty) return;
 
     try {
-      await FirebaseFirestore.instance.collection('products').doc(targetId).update(<String, dynamic>{
-        field: true,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+      await FirebaseFirestore.instance
+          .collection('products')
+          .doc(targetId)
+          .update(<String, dynamic>{
+            field: true,
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
     } catch (e) {
       debugPrint('Failed to persist $field on product $targetId: $e');
     }
   }
 
-  Future<bool> _markAiWhiteBgUsedForProduct() async {
-    if (_hasUsedAiWhiteBgForProduct) {
-      _showSnack('สินค้านี้ใช้ AI เปลี่ยนพื้นหลังไปแล้ว ใช้ได้ 1 ครั้งต่อสินค้า');
-      return false;
-    }
-
-    if (mounted) {
-      setState(() => _hasUsedAiWhiteBgForProduct = true);
-    } else {
-      _hasUsedAiWhiteBgForProduct = true;
-    }
-    await _persistProductAiUsageFlag('aiWhiteBackgroundRequested');
-    return true;
-  }
-
-  Future<void> _applyWhiteBackgroundToExistingImage(int index) async {
-    if (index < 0 || index >= _existingImageUrls.length) return;
-    final imageUrl = _existingImageUrls[index];
-    final key = 'existing:$imageUrl';
-    if (_aiWhiteBgProcessingKeys.contains(key)) return;
-    if (!await _markAiWhiteBgUsedForProduct()) return;
-
-    setState(() => _aiWhiteBgProcessingKeys.add(key));
-    try {
-      final sourceUrl = index < _existingThumbnailUrls.length
-          ? _existingThumbnailUrls[index]
-          : imageUrl;
-      final bytes = await _downloadBytes(sourceUrl);
-      final result = await _requestWhiteBackgroundImage(
-        imageBytes: bytes,
-        mimeType: _mimeTypeFromPathOrUrl(sourceUrl),
-      );
-      if (!mounted) return;
-      setState(() {
-        _aiWhiteBgImagesByKey[key] = result.imageBytes;
-      });
-      _applyAiProductAnalysis(result);
-      await _persistProductAiUsageFlag('aiDescriptionRequested');
-    } on FirebaseFunctionsException catch (e) {
-      _showSnack(_aiFunctionErrorMessage(e));
-    } catch (e) {
-      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _aiWhiteBgProcessingKeys.remove(key));
-      }
-    }
-  }
-
-  Future<void> _selectAiImageForExisting(int index) async {
-    if (index < 0 || index >= _existingImageUrls.length) return;
-    final imageUrl = _existingImageUrls[index];
-    final key = 'existing:$imageUrl';
-    final aiBytes = _aiWhiteBgImagesByKey[key];
-    if (aiBytes == null || aiBytes.isEmpty) {
-      _showSnack('ยังไม่มีรูป AI ให้เลือก');
-      return;
-    }
-
-    try {
-      final aiFile = await _writeBytesToTempFile(
-        aiBytes,
-        suffix: 'ai_white_bg_${DateTime.now().microsecondsSinceEpoch}.png',
-      );
-      if (!mounted) return;
-      setState(() {
-        if (index >= 0 && index < _existingImageUrls.length) {
-          _localMediaPaths.remove(_existingImageUrls[index]);
-          _existingImageUrls.removeAt(index);
-        }
-        if (index >= 0 && index < _existingThumbnailUrls.length) {
-          _localMediaPaths.remove(_existingThumbnailUrls[index]);
-          _existingThumbnailUrls.removeAt(index);
-        }
-        _aiWhiteBgImagesByKey.remove(key);
-        _aiWhiteBgProcessingKeys.remove(key);
-        _newImageFiles.add(XFile(aiFile.path));
-      });
-      _showSnack('เลือกรูปจาก AI แล้ว ระบบจะบันทึกรูปนี้แทนรูปเดิม');
-    } catch (e) {
-      _showSnack('เตรียมรูปลูก AI สำหรับบันทึกไม่สำเร็จ: $e');
-    }
-  }
-
-  Future<void> _applyWhiteBackgroundToNewImage(int index) async {
-    if (index < 0 || index >= _newImageFiles.length) return;
-    final file = _newImageFiles[index];
-    final key = 'new:${file.path}';
-    if (_aiWhiteBgProcessingKeys.contains(key)) return;
-    if (!await _markAiWhiteBgUsedForProduct()) return;
-
-    setState(() => _aiWhiteBgProcessingKeys.add(key));
-    try {
-      final bytes = await File(file.path).readAsBytes();
-      final result = await _requestWhiteBackgroundImage(
-        imageBytes: bytes,
-        mimeType: _mimeTypeFromPathOrUrl(file.path),
-      );
-      if (!mounted) return;
-      setState(() {
-        _aiWhiteBgImagesByKey[key] = result.imageBytes;
-      });
-      _applyAiProductAnalysis(result);
-      await _persistProductAiUsageFlag('aiDescriptionRequested');
-    } on FirebaseFunctionsException catch (e) {
-      _showSnack(_aiFunctionErrorMessage(e));
-    } catch (e) {
-      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _aiWhiteBgProcessingKeys.remove(key));
-      }
-    }
-  }
-
-  Future<void> _selectAiImageForNew(int index) async {
-    if (index < 0 || index >= _newImageFiles.length) return;
-    final file = _newImageFiles[index];
-    final key = 'new:${file.path}';
-    final aiBytes = _aiWhiteBgImagesByKey[key];
-    if (aiBytes == null || aiBytes.isEmpty) {
-      _showSnack('ยังไม่มีรูป AI ให้เลือก');
-      return;
-    }
-
-    try {
-      final aiFile = await _writeBytesToTempFile(
-        aiBytes,
-        suffix: 'ai_white_bg_${DateTime.now().microsecondsSinceEpoch}.png',
-      );
-      if (!mounted) return;
-      setState(() {
-        _newImageFiles[index] = XFile(aiFile.path);
-        _aiWhiteBgImagesByKey.remove(key);
-        _aiWhiteBgProcessingKeys.remove(key);
-      });
-      _showSnack('เลือกรูปจาก AI แล้ว ระบบจะบันทึกรูปนี้แทนรูปเดิม');
-    } catch (e) {
-      _showSnack('เตรียมรูปลูก AI สำหรับบันทึกไม่สำเร็จ: $e');
-    }
-  }
-
-  Future<void> _applyWhiteBackgroundToVideoPreview() async {
-    if (_isProcessingVideoAiWhiteBg) return;
-
-    try {
-      Uint8List? sourceBytes;
-      String mimeType = 'image/jpeg';
-
-      if (_videoFile != null) {
-        sourceBytes = await VideoCompress.getByteThumbnail(
-          _videoFile!.path,
-          quality: 75,
-          position: -1,
-        );
-      } else if ((_existingVideoThumbnailUrl ?? '').isNotEmpty) {
-        sourceBytes = await _downloadBytes(_existingVideoThumbnailUrl!);
-        mimeType = _mimeTypeFromPathOrUrl(_existingVideoThumbnailUrl!);
-      }
-
-      if (sourceBytes == null || sourceBytes.isEmpty) {
-        _showSnack('ยังไม่มีภาพตัวอย่างวิดีโอสำหรับประมวลผล AI');
-        return;
-      }
-
-      if (!await _markAiWhiteBgUsedForProduct()) return;
-
-      setState(() {
-        _isProcessingVideoAiWhiteBg = true;
-      });
-
-      final result = await _requestWhiteBackgroundImage(
-        imageBytes: sourceBytes,
-        mimeType: mimeType,
-      );
-
-      if (!mounted) return;
-      setState(() {
-        _videoAiOriginalPreviewBytes = sourceBytes;
-        _videoAiWhiteBgBytes = result.imageBytes;
-      });
-      _applyAiProductAnalysis(result);
-      await _persistProductAiUsageFlag('aiDescriptionRequested');
-    } on FirebaseFunctionsException catch (e) {
-      _showSnack(_aiFunctionErrorMessage(e));
-    } catch (e) {
-      _showSnack('AI ทำพื้นหลังขาวไม่สำเร็จ: $e');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isProcessingVideoAiWhiteBg = false;
-        });
-      }
-    }
-  }
-
   Future<_ProductImageUploadResult?> _uploadImageToFirebase(XFile image) async {
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) throw Exception("User not logged in");
+      final ownerUid = _effectiveOwnerUid;
+      if (ownerUid == null) throw Exception("User not logged in");
 
-      final sanitizedBase = image.name.split('.').first.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      final sanitizedBase = image.name
+          .split('.')
+          .first
+          .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
 
       final sourceFile = File(image.path);
-      final originalUploadFile = await _compressImageFile(sourceFile, forThumbnail: false);
+      final originalUploadFile = _isPrecompressedProductImage(sourceFile.path)
+          ? sourceFile
+          : await _compressImageFile(sourceFile, forThumbnail: false);
       final thumbnailBase = originalUploadFile;
-      final compressedThumbnail = await _compressImageFile(thumbnailBase, forThumbnail: true);
-      final originalExtension = _extensionFromPath(originalUploadFile.path, fallback: 'jpg');
-      final thumbnailExtension = _extensionFromPath(compressedThumbnail.path, fallback: 'jpg');
+      final compressedThumbnail = await _compressImageFile(
+        thumbnailBase,
+        forThumbnail: true,
+      );
+      final originalExtension = _extensionFromPath(
+        originalUploadFile.path,
+        fallback: 'jpg',
+      );
+      final thumbnailExtension = _extensionFromPath(
+        compressedThumbnail.path,
+        fallback: 'jpg',
+      );
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final fileName = '${timestamp}_$sanitizedBase.$originalExtension';
-      final thumbnailFileName = '${timestamp}_${sanitizedBase}_thumb.$thumbnailExtension';
-      final originalMetadata = SettableMetadata(contentType: _imageContentTypeFromExtension(originalExtension));
-      final thumbnailMetadata = SettableMetadata(contentType: _imageContentTypeFromExtension(thumbnailExtension));
+      final thumbnailFileName =
+          '${timestamp}_${sanitizedBase}_thumb.$thumbnailExtension';
+      final originalMetadata = SettableMetadata(
+        contentType: _imageContentTypeFromExtension(originalExtension),
+      );
+      final thumbnailMetadata = SettableMetadata(
+        contentType: _imageContentTypeFromExtension(thumbnailExtension),
+      );
 
       final baseRef = StorageHelper.instance
           .ref()
           .child('product_images')
-          .child(user.uid);
+          .child(ownerUid);
 
       final originalUrl = await _uploadFileWithOptionalProgress(
         baseRef.child(fileName),
@@ -1329,17 +1537,20 @@ class AddProductScreenState extends State<AddProductScreen> {
         url: originalUrl,
         bucket: MediaCacheBucket.image,
       );
-      final cachedThumbnail = await MediaCacheService.instance.cacheUploadedFile(
-        source: compressedThumbnail,
-        url: thumbnailUrl,
-        bucket: MediaCacheBucket.thumbnail,
-      );
+      final cachedThumbnail = await MediaCacheService.instance
+          .cacheUploadedFile(
+            source: compressedThumbnail,
+            url: thumbnailUrl,
+            bucket: MediaCacheBucket.thumbnail,
+          );
 
       try {
-        if (originalUploadFile.path != sourceFile.path && await originalUploadFile.exists()) {
+        if (originalUploadFile.path != sourceFile.path &&
+            await originalUploadFile.exists()) {
           await originalUploadFile.delete();
         }
-        if (compressedThumbnail.path != sourceFile.path && await compressedThumbnail.exists()) {
+        if (compressedThumbnail.path != sourceFile.path &&
+            await compressedThumbnail.exists()) {
           await compressedThumbnail.delete();
         }
       } catch (cleanupError) {
@@ -1354,7 +1565,9 @@ class AddProductScreenState extends State<AddProductScreen> {
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดรูป: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดรูป: $e')),
+        );
       }
       setState(() {
         _uploadProgress = null;
@@ -1363,18 +1576,31 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
+  bool _isPrecompressedProductImage(String path) {
+    final normalized = path.toLowerCase();
+    return normalized.endsWith('.webp') &&
+        normalized.contains('product_') &&
+        normalized.contains('_pick');
+  }
+
   Future<_ProductVideoUploadResult?> _uploadVideoToFirebase(XFile video) async {
     File? compressedFile;
     File? rawThumbFile;
     File? compressedThumbFile;
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) throw Exception('User not logged in');
+      final ownerUid = _effectiveOwnerUid;
+      if (ownerUid == null) throw Exception('User not logged in');
 
-      final sanitizedBase = video.name.split('.').first.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+      final sanitizedBase = video.name
+          .split('.')
+          .first
+          .replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final videoFileName = '${timestamp}_$sanitizedBase.mp4';
-      final refBase = StorageHelper.instance.ref().child('product_videos').child(user.uid);
+      final refBase = StorageHelper.instance
+          .ref()
+          .child('product_videos')
+          .child(ownerUid);
 
       final originalFile = File(video.path);
       final originalSize = await originalFile.length();
@@ -1411,10 +1637,20 @@ class AddProductScreenState extends State<AddProductScreen> {
           position: -1,
         );
         if (thumbBytes != null) {
-          rawThumbFile = await _writeBytesToTempFile(thumbBytes, suffix: 'video_thumb.jpg');
-          compressedThumbFile = await _compressImageFile(rawThumbFile, forThumbnail: true);
-          final thumbExtension = _extensionFromPath(compressedThumbFile.path, fallback: 'jpg');
-          final thumbName = '${timestamp}_${sanitizedBase}_thumb.$thumbExtension';
+          rawThumbFile = await _writeBytesToTempFile(
+            thumbBytes,
+            suffix: 'video_thumb.jpg',
+          );
+          compressedThumbFile = await _compressImageFile(
+            rawThumbFile,
+            forThumbnail: true,
+          );
+          final thumbExtension = _extensionFromPath(
+            compressedThumbFile.path,
+            fallback: 'jpg',
+          );
+          final thumbName =
+              '${timestamp}_${sanitizedBase}_thumb.$thumbExtension';
           thumbnailUrl = await _uploadFileWithOptionalProgress(
             refBase.child('thumbnails').child(thumbName),
             compressedThumbFile,
@@ -1449,9 +1685,13 @@ class AddProductScreenState extends State<AddProductScreen> {
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดวิดีโอ: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('เกิดข้อผิดพลาดในการอัปโหลดวิดีโอ: $e')),
+        );
       }
-      setState(() { _uploadProgress = null; });
+      setState(() {
+        _uploadProgress = null;
+      });
       return null;
     } finally {
       try {
@@ -1485,7 +1725,9 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     final category = (_selectedProductCategory ?? '').trim();
     final price = _priceController.text.trim();
-    final unit = _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '').trim();
+    final unit = _selectedUnit == 'อื่นๆ'
+        ? _otherUnitController.text.trim()
+        : (_selectedUnit ?? '').trim();
     final stock = _stockController.text.trim();
 
     setState(() {
@@ -1497,12 +1739,13 @@ class AddProductScreenState extends State<AddProductScreen> {
     final requestId = _createAiRequestId();
     _listenAiQueueStatus(requestId);
     try {
-      final callable = FirebaseFunctions.instanceFor(region: 'asia-southeast1')
-          .httpsCallable('askGeminiFlash');
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'asia-southeast1',
+      ).httpsCallable('askGeminiFlash');
       final response = await callable.call(<String, dynamic>{
-      'requestId': requestId,
+        'requestId': requestId,
         'prompt':
-            'ช่วยเขียนคำอธิบายสินค้าเป็นภาษาไทยแบบกระชับ น่าเชื่อถือ และเน้นการขาย สำหรับร้านค้าออนไลน์',
+            'ช่วยเขียนคำอธิบายสินค้าเป็นภาษาไทยประมาณ 2 บรรทัด อ่านเป็นธรรมชาติ น่าเชื่อถือ และเน้นการขายสำหรับร้านค้าออนไลน์',
         'productName': productName,
         'category': category,
         'price': price,
@@ -1537,40 +1780,56 @@ class AddProductScreenState extends State<AddProductScreen> {
   Future<void> _saveProduct() async {
     // Basic validation
     if (_currentImageCount == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')),
+      );
       return;
     }
 
     if (_nameController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกชื่อสินค้า')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกชื่อสินค้า')));
       return;
     }
 
     if (_weightController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกน้ำหนักสินค้า')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกน้ำหนักสินค้า')));
       return;
     }
     final String weightValue = '${_weightController.text.trim()} $_weightUnit';
 
     if (_priceController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกราคา')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกราคา')));
       return;
     }
 
     if ((_selectedProductCategory ?? '').trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอกข้อมูลภาษีสินค้าและเลือกประเภทสินค้า')),
+        const SnackBar(
+          content: Text('กรุณากรอกข้อมูลภาษีสินค้าและเลือกประเภทสินค้า'),
+        ),
       );
       return;
     }
 
     if (_stockController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')));
       return;
     }
 
-    final preparationTimeMinutes = int.tryParse(_preparationTimeController.text.trim());
-    if (preparationTimeMinutes == null || preparationTimeMinutes <= 0 || preparationTimeMinutes > 240) {
+    final preparationTimeMinutes = int.tryParse(
+      _preparationTimeController.text.trim(),
+    );
+    if (preparationTimeMinutes == null ||
+        preparationTimeMinutes <= 0 ||
+        preparationTimeMinutes > 240) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('กรุณากรอกเวลาเตรียมสินค้า 1-240 นาที')),
       );
@@ -1579,17 +1838,31 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ไม่พบข้อมูลผู้ใช้ กรุณาล็อกอินใหม่')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่พบข้อมูลผู้ใช้ กรุณาล็อกอินใหม่')),
+      );
       return;
     }
 
-    setState(() { _isSaving = true; });
+    final ownerUid = _effectiveOwnerUid;
+    if (ownerUid == null || ownerUid.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่พบข้อมูลร้านที่ต้องการอัปโหลด')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
 
     try {
-      await _backfillProductActiveFieldsForOwner(user.uid);
+      await _backfillProductActiveFieldsForOwner(ownerUid);
 
       final List<String> imageUrls = List<String>.from(_existingImageUrls);
-      final List<String> thumbnailUrls = List<String>.from(_existingThumbnailUrls);
+      final List<String> thumbnailUrls = List<String>.from(
+        _existingThumbnailUrls,
+      );
       if (_newImageFiles.isNotEmpty) {
         for (var index = 0; index < _newImageFiles.length; index++) {
           if (mounted) {
@@ -1643,10 +1916,13 @@ class AddProductScreenState extends State<AddProductScreen> {
           videoUrl = uploadedVideo.videoUrl;
           videoThumbnailUrl = uploadedVideo.thumbnailUrl;
           if (uploadedVideo.localVideoPath != null) {
-            _localMediaPaths[uploadedVideo.videoUrl] = uploadedVideo.localVideoPath!;
+            _localMediaPaths[uploadedVideo.videoUrl] =
+                uploadedVideo.localVideoPath!;
           }
-          if (uploadedVideo.localThumbnailPath != null && uploadedVideo.thumbnailUrl != null) {
-            _localMediaPaths[uploadedVideo.thumbnailUrl!] = uploadedVideo.localThumbnailPath!;
+          if (uploadedVideo.localThumbnailPath != null &&
+              uploadedVideo.thumbnailUrl != null) {
+            _localMediaPaths[uploadedVideo.thumbnailUrl!] =
+                uploadedVideo.localThumbnailPath!;
           }
         } else {
           throw Exception('การอัปโหลดวิดีโอล้มเหลว');
@@ -1668,34 +1944,57 @@ class AddProductScreenState extends State<AddProductScreen> {
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty)
           .toList();
-      final resolvedUnit = _selectedUnit == 'อื่นๆ' ? _otherUnitController.text.trim() : (_selectedUnit ?? '');
+      final resolvedUnit = _selectedUnit == 'อื่นๆ'
+          ? _otherUnitController.text.trim()
+          : (_selectedUnit ?? '');
       final taxStatus = _computedTaxStatus;
       final canShipNationwide = _resolvedCanShipNationwide;
       final nationwideShippingReason = _resolvedNationwideShippingReason;
       final normalizedServiceType = _normalizeServiceType(_serviceType);
-      final shopProfileData = await _resolveShopProfileData(user.uid, normalizedServiceType, user.email);
+      final shopProfileData = await _resolveShopProfileData(
+        ownerUid,
+        normalizedServiceType,
+        _isAdminDelegatedUpload ? null : user.email,
+      );
       if (shopProfileData == null) {
-        throw Exception('ไม่พบข้อมูลร้านจากคอลเลกชันที่ลงทะเบียน กรุณาตรวจสอบข้อมูลการสมัครร้าน');
+        throw Exception(
+          'ไม่พบข้อมูลร้านจากคอลเลกชันที่ลงทะเบียน กรุณาตรวจสอบข้อมูลการสมัครร้าน',
+        );
       }
       final shopName =
           ShopProfileResolver.resolveName(shopProfileData) ??
-          _resolveStringField(shopProfileData, const <String>['shopName', 'name', 'displayName', 'businessName', 'storeName']);
-      final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(shopProfileData);
-      final String shopQrCode = user.uid; // Wallet QR in this app is the shop UID.
+          _resolveStringField(shopProfileData, const <String>[
+            'shopName',
+            'name',
+            'displayName',
+            'businessName',
+            'storeName',
+          ]);
+      final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(
+        shopProfileData,
+      );
+      final String shopQrCode =
+          ownerUid; // Wallet QR in this app is the shop UID.
       if (shopName == null || shopName.trim().isEmpty) {
-        throw Exception('ไม่พบชื่อร้านจากข้อมูลที่สมัคร กรุณาแก้ไขข้อมูลร้านก่อนบันทึกสินค้า');
+        throw Exception(
+          'ไม่พบชื่อร้านจากข้อมูลที่สมัคร กรุณาแก้ไขข้อมูลร้านก่อนบันทึกสินค้า',
+        );
       }
       final shopLocation = _extractLocation(shopProfileData);
       final latitude = shopLocation['latitude'];
       final longitude = shopLocation['longitude'];
       if (latitude == null || longitude == null) {
-        throw Exception('ไม่พบพิกัดร้านจากข้อมูลที่สมัคร กรุณาแก้ไขพิกัดร้านก่อนบันทึกสินค้า');
+        throw Exception(
+          'ไม่พบพิกัดร้านจากข้อมูลที่สมัคร กรุณาแก้ไขพิกัดร้านก่อนบันทึกสินค้า',
+        );
       }
       final resolvedProductServiceType =
-          _readServiceTypeFromData(shopProfileData) ?? normalizedServiceType ?? '';
+          _readServiceTypeFromData(shopProfileData) ??
+          normalizedServiceType ??
+          '';
 
       await _upsertPublicShopProfile(
-        ownerUid: user.uid,
+        ownerUid: ownerUid,
         shopName: shopName,
         shopImageUrl: shopImageUrl,
         latitude: latitude,
@@ -1705,7 +2004,9 @@ class AddProductScreenState extends State<AddProductScreen> {
 
       final productData = <String, dynamic>{
         'name': _nameController.text,
-        'description': productDescription.isNotEmpty ? productDescription : toppingsText,
+        'description': productDescription.isNotEmpty
+            ? productDescription
+            : toppingsText,
         'productCategory': _selectedProductCategory,
         'isFreshProduct': _isFreshProduct,
         'isProcessed': _isProcessed,
@@ -1722,17 +2023,28 @@ class AddProductScreenState extends State<AddProductScreen> {
         'weight': weightValue,
         'unit': resolvedUnit,
         'shopName': shopName,
-        if (shopImageUrl != null && shopImageUrl.trim().isNotEmpty) 'shopImageUrl': shopImageUrl,
+        if (shopImageUrl != null && shopImageUrl.trim().isNotEmpty)
+          'shopImageUrl': shopImageUrl,
         'shopQrCode': shopQrCode,
         'location': <String, double?>{
           'latitude': latitude,
           'longitude': longitude,
         },
         'serviceType': resolvedProductServiceType,
-        'ownerUid': user.uid,
+        'ownerUid': ownerUid,
+        if (_isAdminDelegatedUpload) ...<String, dynamic>{
+          'uploadedByAdmin': true,
+          'adminUploadedBy': user.uid,
+        },
         'aiDescriptionRequested': _hasUsedAiDescriptionForProduct,
-        'aiWhiteBackgroundRequested': _hasUsedAiWhiteBgForProduct,
-        if ((_aiTaxAnalysisReason ?? '').trim().isNotEmpty) 'taxAiReason': _aiTaxAnalysisReason!.trim(),
+        'aiProductAnalysisRequested': _hasUsedAiProductAnalysisForProduct,
+        'aiIsLegalInThailand': _aiIsLegalInThailand,
+        if ((_aiLegalAnalysisReason ?? '').trim().isNotEmpty)
+          'aiLegalAnalysisReason': _aiLegalAnalysisReason!.trim(),
+        if ((_aiProductType ?? '').trim().isNotEmpty)
+          'aiProductType': _aiProductType!.trim(),
+        if ((_aiTaxAnalysisReason ?? '').trim().isNotEmpty)
+          'taxAiReason': _aiTaxAnalysisReason!.trim(),
         'canShipNationwide': canShipNationwide,
         'nationwideShippingReason': nationwideShippingReason,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -1746,14 +2058,94 @@ class AddProductScreenState extends State<AddProductScreen> {
 
       if (videoUrl != null) {
         productData['videoUrl'] = videoUrl;
-      } else if (widget.productToEdit != null && widget.productToEdit!.videoUrl != null) {
+      } else if (widget.productToEdit != null &&
+          widget.productToEdit!.videoUrl != null) {
         productData['videoUrl'] = FieldValue.delete();
       }
 
       if (videoThumbnailUrl != null) {
         productData['videoThumbnailUrl'] = videoThumbnailUrl;
-      } else if (widget.productToEdit != null && widget.productToEdit!.videoThumbnailUrl != null) {
+      } else if (widget.productToEdit != null &&
+          widget.productToEdit!.videoThumbnailUrl != null) {
         productData['videoThumbnailUrl'] = FieldValue.delete();
+      }
+
+      final specificationsData = <String, dynamic>{
+        'description': productDescription,
+        'toppings': toppingsText,
+        'productCategory': _selectedProductCategory,
+        'isFreshProduct': _isFreshProduct,
+        'isProcessed': _isProcessed,
+        'taxStatus': taxStatus,
+        'taxStatusLabel': _taxStatusLabel,
+        'taxReason': _taxReason,
+        'aiIsLegalInThailand': _aiIsLegalInThailand,
+        if ((_aiLegalAnalysisReason ?? '').trim().isNotEmpty)
+          'aiLegalAnalysisReason': _aiLegalAnalysisReason!.trim(),
+        if ((_aiProductType ?? '').trim().isNotEmpty)
+          'aiProductType': _aiProductType!.trim(),
+        'preparationTimeMinutes': preparationTimeMinutes,
+        'preparingDuration': preparationTimeMinutes * 60 * 1000,
+        'canShipNationwide': canShipNationwide,
+        'nationwideShippingReason': nationwideShippingReason,
+        'colors': colors,
+        'sizes': sizes,
+        'unit': resolvedUnit,
+        'weight': weightValue,
+        'headings': <String, String>{
+          'description': 'คำอธิบายสินค้า',
+          'toppings': 'ท็อปปิ้ง',
+          'productCategory': 'ประเภทสินค้า',
+          'isFreshProduct': 'เป็นของสด',
+          'isProcessed': 'ผ่านการแปรรูปแล้ว',
+          'taxStatus': 'สถานะภาษี',
+          'aiIsLegalInThailand': 'ถูกกฎหมายในประเทศไทย',
+          'aiLegalAnalysisReason': 'เหตุผลด้านกฎหมายจาก AI',
+          'aiProductType': 'ประเภทสินค้าที่ AI วิเคราะห์',
+          'preparationTimeMinutes': 'เวลาเตรียมสินค้า (นาที)',
+          'preparingDuration': 'เวลาเตรียมสินค้า (มิลลิวินาที)',
+          'canShipNationwide': 'ส่งได้ทั่วไทย',
+          'nationwideShippingReason': 'เหตุผลการส่งทั่วไทย',
+          'colors': 'สี',
+          'sizes': 'ขนาด',
+          'unit': 'หน่วย',
+          'weight': 'น้ำหนัก',
+        },
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      if (widget.productToEdit == null) {
+        specificationsData['createdAt'] = FieldValue.serverTimestamp();
+      }
+
+      if (_aiIsLegalInThailand == false) {
+        final reviewData = Map<String, dynamic>.from(productData)
+          ..['adminReviewStatus'] = 'pending'
+          ..['submittedAt'] = FieldValue.serverTimestamp()
+          ..['submittedByUid'] = user.uid
+          ..['reviewType'] = widget.productToEdit == null ? 'create' : 'update'
+          ..['specificationsPayload'] = specificationsData;
+        reviewData.remove('isActive');
+        reviewData.remove('activeAt');
+        if (widget.productToEdit?.id != null &&
+            widget.productToEdit!.id!.trim().isNotEmpty) {
+          reviewData['targetProductId'] = widget.productToEdit!.id!.trim();
+        }
+
+        await FirebaseFirestore.instance
+            .collection('product_admin_reviews')
+            .add(reviewData);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'AI ประเมินว่าสินค้านี้อาจผิดกฎหมาย — ส่งให้แอดมินตรวจสอบแล้ว จะขึ้นขายหลังได้รับการอนุมัติ',
+              ),
+            ),
+          );
+          Navigator.pop(context, true);
+        }
+        return;
       }
 
       final productsRef = FirebaseFirestore.instance.collection('products');
@@ -1772,72 +2164,46 @@ class AddProductScreenState extends State<AddProductScreen> {
         await docRef.update(productData);
       }
 
-      final specificationsData = <String, dynamic>{
-        'productId': docRef.id,
-        'ownerUid': user.uid,
-        'description': productDescription,
-        'toppings': toppingsText,
-        'productCategory': _selectedProductCategory,
-        'isFreshProduct': _isFreshProduct,
-        'isProcessed': _isProcessed,
-        'taxStatus': taxStatus,
-        'taxStatusLabel': _taxStatusLabel,
-        'taxReason': _taxReason,
-        'preparationTimeMinutes': preparationTimeMinutes,
-        'preparingDuration': preparationTimeMinutes * 60 * 1000,
-        'canShipNationwide': canShipNationwide,
-        'nationwideShippingReason': nationwideShippingReason,
-        'colors': colors,
-        'sizes': sizes,
-        'unit': resolvedUnit,
-        'weight': weightValue,
-        'headings': <String, String>{
-          'description': 'คำอธิบายสินค้า',
-          'toppings': 'ท็อปปิ้ง',
-          'productCategory': 'ประเภทสินค้า',
-          'isFreshProduct': 'เป็นของสด',
-          'isProcessed': 'ผ่านการแปรรูปแล้ว',
-          'taxStatus': 'สถานะภาษี',
-          'preparationTimeMinutes': 'เวลาเตรียมสินค้า (นาที)',
-          'preparingDuration': 'เวลาเตรียมสินค้า (มิลลิวินาที)',
-          'canShipNationwide': 'ส่งได้ทั่วไทย',
-          'nationwideShippingReason': 'เหตุผลการส่งทั่วไทย',
-          'colors': 'สี',
-          'sizes': 'ขนาด',
-          'unit': 'หน่วย',
-          'weight': 'น้ำหนัก',
-        },
-        'updatedAt': FieldValue.serverTimestamp(),
-      };
-      if (widget.productToEdit == null) {
-        specificationsData['createdAt'] = FieldValue.serverTimestamp();
-      }
+      specificationsData['productId'] = docRef.id;
+      specificationsData['ownerUid'] = ownerUid;
 
-      await docRef.collection('specifications').doc('main').set(specificationsData, SetOptions(merge: true));
+      await docRef
+          .collection('specifications')
+          .doc('main')
+          .set(specificationsData, SetOptions(merge: true));
 
       final latestSnapshot = await docRef.get();
       final latestData = latestSnapshot.data();
       if (latestData != null) {
-        await ProductCacheService.instance.saveProducts(
-          user.uid,
-          [CachedProduct(id: docRef.id, data: latestData)],
-        );
+        await ProductCacheService.instance.saveProducts(ownerUid, [
+          CachedProduct(id: docRef.id, data: latestData),
+        ]);
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('บันทึกสินค้าเรียบร้อยแล้ว')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('บันทึกสินค้าเรียบร้อยแล้ว')),
+        );
         Navigator.pop(context, true);
       }
     } on FirebaseException catch (e) {
-      final message = e.code == 'permission-denied'
-          ? 'ไม่มีสิทธิ์อ่านข้อมูลร้านหรือบันทึกสินค้า กรุณาตรวจสอบสิทธิ์ Firestore แล้วลองใหม่'
-          : 'เกิดข้อผิดพลาดในการบันทึก: $e';
+      final message = switch (e.code) {
+        'permission-denied' =>
+          'ไม่มีสิทธิ์อ่านข้อมูลร้านหรือบันทึกสินค้า กรุณาตรวจสอบสิทธิ์ Firestore แล้วลองใหม่',
+        'unavailable' || 'network-request-failed' =>
+          'ไม่สามารถเชื่อมต่อ Firebase ได้ชั่วคราว กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่',
+        _ => 'เกิดข้อผิดพลาดในการบันทึก: $e',
+      };
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(message)));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาดในการบันทึก: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('เกิดข้อผิดพลาดในการบันทึก: $e')),
+        );
       }
     } finally {
       if (mounted) {
@@ -1946,7 +2312,9 @@ class AddProductScreenState extends State<AddProductScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.productToEdit == null ? 'เพิ่มสินค้าใหม่' : 'แก้ไขสินค้า'),
+        title: Text(
+          widget.productToEdit == null ? 'เพิ่มสินค้าใหม่' : 'แก้ไขสินค้า',
+        ),
         backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
         elevation: 1,
@@ -1957,7 +2325,29 @@ class AddProductScreenState extends State<AddProductScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('รูปภาพและวิดีโอ', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            if (_isAdminDelegatedUpload) ...<Widget>[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF3E0),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFFCC80)),
+                ),
+                child: Text(
+                  'อัปโหลดให้ร้าน: ${widget.adminUploadContext!.shopName}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFE65100),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            const Text(
+              'รูปภาพและวิดีโอ',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 12),
             _buildMediaSection(),
             if (_uploadProgress != null || _uploadStatusText != null)
@@ -1978,11 +2368,19 @@ class AddProductScreenState extends State<AddProductScreen> {
               ),
             const SizedBox(height: 32),
 
-            const Text('รายละเอียดสินค้า', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text(
+              'รายละเอียดสินค้า',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 16),
             Row(
               children: [
-                Expanded(child: _buildTextField(label: 'ชื่อสินค้า', controller: _nameController)),
+                Expanded(
+                  child: _buildTextField(
+                    label: 'ชื่อสินค้า',
+                    controller: _nameController,
+                  ),
+                ),
                 const SizedBox(width: 16),
                 Expanded(child: _buildWeightField()),
               ],
@@ -1997,7 +2395,8 @@ class AddProductScreenState extends State<AddProductScreen> {
                     children: [
                       _buildGuidedFieldOverlay(
                         showGuidance: _showPriceGuidance,
-                        guidanceMessage: 'ระบบจะหักค่า GP 18% จากราคาที่ระบุ แนะนำให้บวกราคาเพิ่มจากราคาขายหน้าร้านปกติ ตามราคาที่เหมาะสม',
+                        guidanceMessage:
+                            'ระบบจะหักค่า GP 18% จากราคาที่ระบุ แนะนำให้บวกราคาเพิ่มจากราคาขายหน้าร้านปกติ ตามราคาที่เหมาะสม',
                         footer: Text(
                           _netPriceAfterGp == null
                               ? 'ราคาที่จะได้รับ: ระบุราคาก่อน'
@@ -2011,7 +2410,9 @@ class AddProductScreenState extends State<AddProductScreen> {
                         field: _buildTextField(
                           label: 'ราคา',
                           controller: _priceController,
-                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
                           focusNode: _priceFocusNode,
                           onTap: () {
                             setState(() {
@@ -2031,7 +2432,8 @@ class AddProductScreenState extends State<AddProductScreen> {
                       const SizedBox(height: 12),
                       _buildGuidedFieldOverlay(
                         showGuidance: _showPreparationTimeGuidance,
-                        guidanceMessage: 'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
+                        guidanceMessage:
+                            'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
                         field: _buildTextField(
                           label: 'เวลาเตรียมสินค้า/ออเดอร์ (นาที)',
                           controller: _preparationTimeController,
@@ -2048,10 +2450,18 @@ class AddProductScreenState extends State<AddProductScreen> {
                   ),
                 ),
                 const SizedBox(width: 16),
-                Expanded(child: _buildTextField(label: 'สต็อกทั้งหมด', controller: _stockController, keyboardType: TextInputType.number)),
+                Expanded(
+                  child: _buildTextField(
+                    label: 'สต็อกทั้งหมด',
+                    controller: _stockController,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 12),
+            _buildProductAnalysisSection(),
+            const SizedBox(height: 24),
             _buildNationwideShippingSection(),
             const SizedBox(height: 24),
             _buildTaxSection(),
@@ -2064,33 +2474,47 @@ class AddProductScreenState extends State<AddProductScreen> {
                   isScrollControlled: true,
                   backgroundColor: Colors.white,
                   shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(20),
+                    ),
                   ),
                   builder: (context) => _buildSpecificationSheet(),
                 );
               },
               icon: const Icon(Icons.tune),
-              label: const Text('ข้อมูลจำเพาะสินค้า (ท็อปปิ้ง, สี, ขนาด, หน่วย)', style: TextStyle(fontSize: 14)),
+              label: const Text(
+                'ข้อมูลจำเพาะสินค้า (ท็อปปิ้ง, สี, ขนาด, หน่วย)',
+                style: TextStyle(fontSize: 14),
+              ),
               style: OutlinedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 48),
                 side: BorderSide(color: AppColors.accent, width: 1.5),
                 foregroundColor: AppColors.accent,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
 
             const SizedBox(height: 40),
 
             ElevatedButton(
-              onPressed: (_isSaving || _isGeneratingAiDescription) ? null : _saveProduct, // Disable button while saving
+              onPressed: (_isSaving || _isGeneratingAiDescription)
+                  ? null
+                  : _saveProduct, // Disable button while saving
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
               ),
               child: _isSaving
                   ? const CircularProgressIndicator(color: Colors.white)
-                  : const Text('บันทึกสินค้า', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  : const Text(
+                      'บันทึกสินค้า',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
             ),
-
           ],
         ),
       ),
@@ -2099,7 +2523,8 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   Widget _buildMediaSection() {
     final bool hasImages = _currentImageCount > 0;
-    final bool hasVideo = _videoFile != null || (_existingVideoUrl?.isNotEmpty ?? false);
+    final bool hasVideo =
+        _videoFile != null || (_existingVideoUrl?.isNotEmpty ?? false);
     final bool showVideoControls = _canAddVideo || hasVideo;
 
     final Widget imageContent = hasImages
@@ -2110,11 +2535,11 @@ class AddProductScreenState extends State<AddProductScreen> {
           );
 
     final Widget videoContent = hasVideo
-      ? _buildVideoPreviewContent()
-      : _buildPlaceholderSquare(
-        icon: Icons.videocam_outlined,
-        label: 'ยังไม่มีวิดีโอ',
-        );
+        ? _buildVideoPreviewContent()
+        : _buildPlaceholderSquare(
+            icon: Icons.videocam_outlined,
+            label: 'ยังไม่มีวิดีโอ',
+          );
 
     final bool showCombinedRow = !hasImages && !hasVideo && showVideoControls;
 
@@ -2139,7 +2564,9 @@ class AddProductScreenState extends State<AddProductScreen> {
                 label: const Text('ถ่ายรูป'),
               ),
               ElevatedButton.icon(
-                onPressed: _isResolvingServiceType ? null : _pickImagesFromGallery,
+                onPressed: _isResolvingServiceType
+                    ? null
+                    : _pickImagesFromGallery,
                 icon: const Icon(Icons.photo_library_outlined),
                 label: Text('เลือกรูป (${_currentImageCount}/$_maxImageCount)'),
               ),
@@ -2202,52 +2629,45 @@ class AddProductScreenState extends State<AddProductScreen> {
 
     for (int i = 0; i < _existingImageUrls.length; i++) {
       final imageUrl = _existingImageUrls[i];
-      final displayUrl = i < _existingThumbnailUrls.length ? _existingThumbnailUrls[i] : imageUrl;
-      final key = 'existing:$imageUrl';
-      tiles.add(_buildImageTile(
-        image: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: _buildCachedImage(displayUrl),
+      final displayUrl = i < _existingThumbnailUrls.length
+          ? _existingThumbnailUrls[i]
+          : imageUrl;
+      tiles.add(
+        _buildImageTile(
+          image: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: _buildCachedImage(displayUrl),
+          ),
+          onRemove: () => _removeExistingImageAt(i),
         ),
-        onRemove: () => _removeExistingImageAt(i),
-        onApplyAi: () => _applyWhiteBackgroundToExistingImage(i),
-        onSelectAi: () => _selectAiImageForExisting(i),
-        aiImageBytes: _aiWhiteBgImagesByKey[key],
-        isApplyingAi: _aiWhiteBgProcessingKeys.contains(key),
-        canApplyAi: !_hasUsedAiWhiteBgForProduct,
-      ));
+      );
     }
 
     for (int i = 0; i < _newImageFiles.length; i++) {
       final file = _newImageFiles[i];
-      final key = 'new:${file.path}';
-      tiles.add(_buildImageTile(
-        image: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Image.file(
-            File(file.path),
-            width: 110,
-            height: 110,
-            fit: BoxFit.cover,
+      tiles.add(
+        _buildImageTile(
+          image: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.file(
+              File(file.path),
+              width: 110,
+              height: 110,
+              fit: BoxFit.cover,
+            ),
           ),
+          onRemove: () => _removeNewImageAt(i),
         ),
-        onRemove: () => _removeNewImageAt(i),
-        onApplyAi: () => _applyWhiteBackgroundToNewImage(i),
-        onSelectAi: () => _selectAiImageForNew(i),
-        aiImageBytes: _aiWhiteBgImagesByKey[key],
-        isApplyingAi: _aiWhiteBgProcessingKeys.contains(key),
-        canApplyAi: !_hasUsedAiWhiteBgForProduct,
-      ));
+      );
     }
 
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: tiles,
-    );
+    return Wrap(spacing: 12, runSpacing: 12, children: tiles);
   }
 
-  Widget _buildPlaceholderSquare({required IconData icon, required String label}) {
+  Widget _buildPlaceholderSquare({
+    required IconData icon,
+    required String label,
+  }) {
     return AspectRatio(
       aspectRatio: 1,
       child: Container(
@@ -2303,7 +2723,9 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   void _tryWarmLocalCache(String url) {
-    if (url.isEmpty || _localMediaPaths.containsKey(url) || _cacheLookupInProgress.contains(url)) {
+    if (url.isEmpty ||
+        _localMediaPaths.containsKey(url) ||
+        _cacheLookupInProgress.contains(url)) {
       return;
     }
     _cacheLookupInProgress.add(url);
@@ -2320,255 +2742,81 @@ class AddProductScreenState extends State<AddProductScreen> {
   Widget _buildImageTile({
     required Widget image,
     required VoidCallback onRemove,
-    required VoidCallback onApplyAi,
-    required VoidCallback onSelectAi,
-    required Uint8List? aiImageBytes,
-    required bool isApplyingAi,
-    required bool canApplyAi,
   }) {
-    final bool showAiPreview = aiImageBytes != null || isApplyingAi;
-    final bool hasAiResult = aiImageBytes != null && aiImageBytes.isNotEmpty;
-
-    Widget buildRemovableOriginal() {
-      return Stack(
-        clipBehavior: Clip.none,
-        children: [
-          SizedBox(width: 110, height: 110, child: image),
-          Positioned(
-            top: -8,
-            right: -8,
-            child: InkWell(
-              onTap: onRemove,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(166),
-                  shape: BoxShape.circle,
-                ),
-                padding: const EdgeInsets.all(4),
-                child: const Icon(Icons.close, size: 16, color: Colors.white),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    Widget buildAiPreviewBox() {
-      if (isApplyingAi) {
-        return Container(
-          width: 110,
-          height: 110,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.grey.shade300),
-          ),
-          alignment: Alignment.center,
-          child: const SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        );
-      }
-
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Image.memory(
-          aiImageBytes!,
-          width: 110,
-          height: 110,
-          fit: BoxFit.cover,
-        ),
-      );
-    }
-
-    final content = showAiPreview
-        ? Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              buildRemovableOriginal(),
-              const SizedBox(width: 8),
-              buildAiPreviewBox(),
-            ],
-          )
-        : buildRemovableOriginal();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Stack(
+      clipBehavior: Clip.none,
       children: [
-        content,
-        const SizedBox(height: 8),
-        SizedBox(
-          width: showAiPreview ? 228 : 110,
-          child: OutlinedButton.icon(
-            onPressed: isApplyingAi
-                ? null
-                : (hasAiResult ? onSelectAi : (canApplyAi ? onApplyAi : null)),
-            icon: isApplyingAi
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : Icon(
-                    hasAiResult ? Icons.check_circle_outline : Icons.auto_awesome_outlined,
-                    size: 16,
-                  ),
-            label: Text(
-              isApplyingAi
-                  ? 'กำลังประมวลผล...'
-                  : (hasAiResult
-                      ? 'เลือกรูปจาก AI เพื่อบันทึก'
-                    : (canApplyAi ? 'เปลี่ยนพื้นหลังด้วย AI' : 'ใช้ AI แล้ว')),
-            ),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              textStyle: const TextStyle(fontSize: 12),
-              foregroundColor: AppColors.accent,
+        SizedBox(width: 110, height: 110, child: image),
+        Positioned(
+          top: -8,
+          right: -8,
+          child: InkWell(
+            onTap: onRemove,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(166),
+                shape: BoxShape.circle,
+              ),
+              padding: const EdgeInsets.all(4),
+              child: const Icon(Icons.close, size: 16, color: Colors.white),
             ),
           ),
         ),
-        if (isApplyingAi && (_aiQueueStatusText ?? '').isNotEmpty) ...[
-          const SizedBox(height: 6),
-          SizedBox(
-            width: showAiPreview ? 228 : 180,
-            child: Text(
-              _aiQueueStatusText!,
-              style: TextStyle(
-                fontSize: 11,
-                color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
-              ),
-            ),
-          ),
-        ],
       ],
     );
   }
 
   Widget _buildVideoPreviewContent() {
-    final String? videoUrl = _videoFile != null
-        ? null
-        : _existingVideoUrl;
+    final String? videoUrl = _videoFile != null ? null : _existingVideoUrl;
     final bool hasVideo = _videoFile != null || (videoUrl?.isNotEmpty ?? false);
-    final String? cachedVideoPath = videoUrl != null ? _localMediaPaths[videoUrl] : null;
-    final String? thumbnailUrl = _videoFile != null ? null : _existingVideoThumbnailUrl;
-    final String? cachedThumbnailPath = thumbnailUrl != null ? _localMediaPaths[thumbnailUrl] : null;
+    final String? cachedVideoPath = videoUrl != null
+        ? _localMediaPaths[videoUrl]
+        : null;
+    final String? thumbnailUrl = _videoFile != null
+        ? null
+        : _existingVideoThumbnailUrl;
+    final String? cachedThumbnailPath = thumbnailUrl != null
+        ? _localMediaPaths[thumbnailUrl]
+        : null;
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 1,
       child: Column(
         children: [
           ListTile(
-            leading: const Icon(Icons.play_circle_fill, color: AppColors.accent, size: 36),
-            title: Text(_videoFile != null ? _videoFile!.name : 'วิดีโอที่อัปโหลดแล้ว', maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text('ความยาวไม่เกิน ${_maxVideoDuration.inMinutes} นาที'),
+            leading: const Icon(
+              Icons.play_circle_fill,
+              color: AppColors.accent,
+              size: 36,
+            ),
+            title: Text(
+              _videoFile != null ? _videoFile!.name : 'วิดีโอที่อัปโหลดแล้ว',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              'ความยาวไม่เกิน ${_maxVideoDuration.inMinutes} นาที',
+            ),
             trailing: IconButton(
               icon: const Icon(Icons.close),
               onPressed: _removeVideo,
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: (_isProcessingVideoAiWhiteBg || _hasUsedAiWhiteBgForProduct)
-                  ? null
-                  : _applyWhiteBackgroundToVideoPreview,
-                icon: _isProcessingVideoAiWhiteBg
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.auto_awesome_outlined, size: 16),
-                label: Text(
-                  _isProcessingVideoAiWhiteBg
-                      ? 'กำลังประมวลผล AI...'
-                      : (_hasUsedAiWhiteBgForProduct ? 'ใช้ AI แล้ว' : 'เปลี่ยนพื้นหลังด้วย AI'),
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.accent,
-                ),
-              ),
-            ),
-          ),
-          if (_isProcessingVideoAiWhiteBg && (_aiQueueStatusText ?? '').isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  _aiQueueStatusText!,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
-                  ),
-                ),
-              ),
-            ),
           if (hasVideo)
             Padding(
               padding: const EdgeInsets.all(8.0),
               child: SizedBox(
                 height: 220,
                 child: _videoFile != null
-                    ? ProductVideoPlayer(videoUrl: _videoFile!.path) // ส่วนนี้ถูกต้องแล้ว
+                    ? ProductVideoPlayer(
+                        videoUrl: _videoFile!.path,
+                      ) // ส่วนนี้ถูกต้องแล้ว
                     : (videoUrl != null
-                        ? ProductVideoPlayer(
-                            videoUrl: cachedVideoPath ?? videoUrl,
-                            thumbnailUrl: cachedThumbnailPath ?? thumbnailUrl,
-                          )
-                        : const Text('ไม่พบวิดีโอ')),
-              ),
-            ),
-          if (_videoAiOriginalPreviewBytes != null || _videoAiWhiteBgBytes != null || _isProcessingVideoAiWhiteBg)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _videoAiOriginalPreviewBytes == null
-                        ? _buildPlaceholderSquare(icon: Icons.image_outlined, label: 'ต้นฉบับ')
-                        : ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: Image.memory(
-                              _videoAiOriginalPreviewBytes!,
-                              height: 110,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _isProcessingVideoAiWhiteBg
-                        ? Container(
-                            height: 110,
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.grey.shade300),
-                            ),
-                            alignment: Alignment.center,
-                            child: const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          )
-                        : (_videoAiWhiteBgBytes == null
-                            ? _buildPlaceholderSquare(icon: Icons.auto_awesome_outlined, label: 'ผลลัพธ์ AI')
-                            : ClipRRect(
-                                borderRadius: BorderRadius.circular(12),
-                                child: Image.memory(
-                                  _videoAiWhiteBgBytes!,
-                                  height: 110,
-                                  fit: BoxFit.cover,
-                                ),
-                              )),
-                  ),
-                ],
+                          ? ProductVideoPlayer(
+                              videoUrl: cachedVideoPath ?? videoUrl,
+                              thumbnailUrl: cachedThumbnailPath ?? thumbnailUrl,
+                            )
+                          : const Text('ไม่พบวิดีโอ')),
               ),
             ),
         ],
@@ -2589,7 +2837,10 @@ class AddProductScreenState extends State<AddProductScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+        ),
         const SizedBox(height: 8),
         TextField(
           controller: controller,
@@ -2613,9 +2864,15 @@ class AddProductScreenState extends State<AddProductScreen> {
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(40),
-              borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
+              borderSide: const BorderSide(
+                color: AppColors.accentDark,
+                width: 2,
+              ),
             ),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 20,
+              vertical: 14,
+            ),
           ),
         ),
       ],
@@ -2626,7 +2883,10 @@ class AddProductScreenState extends State<AddProductScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('น้ำหนัก', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+        const Text(
+          'น้ำหนัก',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+        ),
         const SizedBox(height: 8),
         Container(
           height: 52,
@@ -2640,7 +2900,9 @@ class AddProductScreenState extends State<AddProductScreen> {
               Expanded(
                 child: TextField(
                   controller: _weightController,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
                   decoration: const InputDecoration(
                     hintText: 'ใส่น้ำหนัก',
                     border: InputBorder.none,
@@ -2648,16 +2910,15 @@ class AddProductScreenState extends State<AddProductScreen> {
                   ),
                 ),
               ),
-              Container(
-                width: 1,
-                height: 28,
-                color: Colors.grey.shade300,
-              ),
+              Container(width: 1, height: 28, color: Colors.grey.shade300),
               const SizedBox(width: 12),
               DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _weightUnit,
-                  icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.black54),
+                  icon: const Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    color: Colors.black54,
+                  ),
                   style: const TextStyle(fontSize: 16, color: Colors.black87),
                   onChanged: (value) {
                     if (value == null) return;
@@ -2723,7 +2984,9 @@ class AddProductScreenState extends State<AddProductScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            canShip ? 'สินค้านี้ส่งได้ทั่วไทย' : 'สินค้านี้ไม่เหมาะกับการส่งทั่วไทย',
+            canShip
+                ? 'สินค้านี้ส่งได้ทั่วไทย'
+                : 'สินค้านี้ไม่เหมาะกับการส่งทั่วไทย',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -2736,6 +2999,134 @@ class AddProductScreenState extends State<AddProductScreen> {
               reason,
               style: const TextStyle(fontSize: 13, color: Colors.black87),
             ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProductAnalysisSection() {
+    final legalKnown = _aiIsLegalInThailand != null;
+    final legalColor = _aiIsLegalInThailand == false
+        ? const Color(0xFFC62828)
+        : const Color(0xFF2E7D32);
+    final legalReason = (_aiLegalAnalysisReason ?? '').trim();
+    final productType = (_aiProductType ?? '').trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey[100],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'วิเคราะห์สินค้า',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed:
+                  (_isAnalyzingProductWithAi ||
+                      _hasUsedAiProductAnalysisForProduct)
+                  ? null
+                  : _analyzeProductWithAi,
+              icon: _isAnalyzingProductWithAi
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.auto_awesome_outlined),
+              label: Text(
+                _isAnalyzingProductWithAi
+                    ? 'AI กำลังวิเคราะห์สินค้า...'
+                    : (_hasUsedAiProductAnalysisForProduct
+                          ? 'ใช้ AI วิเคราะห์สินค้าแล้ว'
+                          : 'วิเคราะห์สินค้า'),
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.accent,
+                side: BorderSide(color: AppColors.accent.withOpacity(0.6)),
+              ),
+            ),
+          ),
+          if (_isAnalyzingProductWithAi &&
+              (_aiQueueStatusText ?? '').isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              _aiQueueStatusText!,
+              style: TextStyle(
+                fontSize: 12,
+                color: _aiQueueExternalRecommendation
+                    ? const Color(0xFFC62828)
+                    : Colors.black54,
+              ),
+            ),
+          ],
+          if (legalKnown || productType.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            if (legalKnown)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: legalColor.withAlpha(18),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: legalColor.withAlpha(90)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _aiIsLegalInThailand == true
+                          ? 'AI ประเมินว่าเป็นสินค้าที่ขายได้ตามกฎหมายไทย'
+                          : 'AI ประเมินว่าอาจเป็นสินค้าที่ห้ามหรือจำกัดการขายในไทย',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: legalColor,
+                      ),
+                    ),
+                    if (legalReason.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        legalReason,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            if (productType.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.accentLight.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.accent.withOpacity(0.35)),
+                ),
+                child: Text(
+                  'ประเภทสินค้า: $productType',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
+            ],
           ],
         ],
       ),
@@ -2777,12 +3168,18 @@ class AddProductScreenState extends State<AddProductScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('ภาษีสินค้า', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text(
+            'ภาษีสินค้า',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
           if (_hasAiTaxAnalysis) ...[
             _buildTaxSummaryCard(),
           ] else ...[
-            const Text('ประเภทสินค้า', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            const Text(
+              'ประเภทสินค้า',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               value: _selectedProductCategory,
@@ -2804,16 +3201,24 @@ class AddProductScreenState extends State<AddProductScreen> {
               decoration: InputDecoration(
                 hintText: 'เลือกประเภทสินค้า',
                 helperText: 'จำเป็นต้องเลือกก่อนบันทึกสินค้า',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(16),
                   borderSide: BorderSide(color: Colors.grey.shade400),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
+                  borderSide: const BorderSide(
+                    color: AppColors.accentDark,
+                    width: 2,
+                  ),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
               ),
             ),
             if (_isPharmacyCategory) ...[
@@ -2821,7 +3226,9 @@ class AddProductScreenState extends State<AddProductScreen> {
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('เสียภาษี'),
-                subtitle: const Text('ปิดสวิตช์หากยาหรือเวชภัณฑ์รายการนี้เป็นสินค้ายกเว้นภาษี'),
+                subtitle: const Text(
+                  'ปิดสวิตช์หากยาหรือเวชภัณฑ์รายการนี้เป็นสินค้ายกเว้นภาษี',
+                ),
                 value: _pharmacyIsTaxable,
                 onChanged: (value) {
                   setState(() {
@@ -2849,7 +3256,9 @@ class AddProductScreenState extends State<AddProductScreen> {
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('ผ่านการแปรรูปแล้ว'),
-                subtitle: const Text('เช่น หั่น หมัก ปรุง บรรจุพร้อมขาย หรือแปรรูปจากสภาพสด'),
+                subtitle: const Text(
+                  'เช่น หั่น หมัก ปรุง บรรจุพร้อมขาย หรือแปรรูปจากสภาพสด',
+                ),
                 value: _isProcessed,
                 onChanged: (value) {
                   setState(() {
@@ -2883,7 +3292,10 @@ class AddProductScreenState extends State<AddProductScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('ข้อมูลจำเพาะสินค้า', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const Text(
+                  'ข้อมูลจำเพาะสินค้า',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
                 IconButton(
                   onPressed: () => Navigator.pop(context),
                   icon: const Icon(Icons.close),
@@ -2901,9 +3313,11 @@ class AddProductScreenState extends State<AddProductScreen> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: (_isGeneratingAiDescription || _hasUsedAiDescriptionForProduct)
-                  ? null
-                  : _generateAiDescription,
+                onPressed:
+                    (_isGeneratingAiDescription ||
+                        _hasUsedAiDescriptionForProduct)
+                    ? null
+                    : _generateAiDescription,
                 icon: _isGeneratingAiDescription
                     ? const SizedBox(
                         width: 16,
@@ -2915,8 +3329,8 @@ class AddProductScreenState extends State<AddProductScreen> {
                   _isGeneratingAiDescription
                       ? 'AI กำลังเขียนคำอธิบาย...'
                       : (_hasUsedAiDescriptionForProduct
-                        ? 'ใช้ AI เขียนคำอธิบายแล้ว'
-                        : 'ให้ AI ช่วยเขียนคำอธิบายสินค้า'),
+                            ? 'ใช้ AI เขียนคำอธิบายแล้ว'
+                            : 'ให้ AI ช่วยเขียนคำอธิบายสินค้า'),
                 ),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: AppColors.accent,
@@ -2924,13 +3338,16 @@ class AddProductScreenState extends State<AddProductScreen> {
                 ),
               ),
             ),
-            if (_isGeneratingAiDescription && (_aiQueueStatusText ?? '').isNotEmpty) ...[
+            if (_isGeneratingAiDescription &&
+                (_aiQueueStatusText ?? '').isNotEmpty) ...[
               const SizedBox(height: 6),
               Text(
                 _aiQueueStatusText!,
                 style: TextStyle(
                   fontSize: 12,
-                  color: _aiQueueExternalRecommendation ? const Color(0xFFC62828) : Colors.black54,
+                  color: _aiQueueExternalRecommendation
+                      ? const Color(0xFFC62828)
+                      : Colors.black54,
                 ),
               ),
             ],
@@ -2938,46 +3355,54 @@ class AddProductScreenState extends State<AddProductScreen> {
             _buildTextField(
               label: 'ท็อปปิ้ง',
               controller: _descriptionController,
+              focusNode: _toppingsFocusNode,
               hint: 'เช่น (ระดับความเผ็ด) +เผ็ดน้อย+ เผ็ด+ กลาง+เผ็ดมาก',
+              onTap: () => setState(() {
+                _showPriceGuidance = false;
+                _showPreparationTimeGuidance = false;
+                _showToppingsGuidance = true;
+              }),
             ),
-            const SizedBox(height: 8),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF7ED),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFFED7AA)),
-              ),
-              child: const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'วิธีกรอกท็อปปิ้ง',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF9A3412),
+            if (_showToppingsGuidance) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF7ED),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFED7AA)),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'วิธีกรอกท็อปปิ้ง',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF9A3412),
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 6),
-                  Text(
-                    '1. ถ้าใส่วงเล็บ () จะใช้เป็นหัวข้อ',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    '2. ถ้าใส่เครื่องหมาย + นำหน้า และลงท้ายด้วย + จะใช้เป็นตัวเลือก',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    '3. ตัวอย่าง: (ระดับความเผ็ด) +เผ็ดน้อย+ เผ็ด+ กลาง+เผ็ดมาก (เพิ่ม)+หอย 20+ เพิ่มกุ้ง 20+เพิ่มแคบหมู 10+',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
-                  ),
-                ],
+                    SizedBox(height: 6),
+                    Text(
+                      '1. ถ้าใส่วงเล็บ () จะใช้เป็นหัวข้อ',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      '2. ถ้าใส่เครื่องหมาย + นำหน้า และลงท้ายด้วย + จะใช้เป็นตัวเลือก',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      '3. ตัวอย่าง: (ระดับความเผ็ด) +เผ็ดน้อย+ เผ็ด+ กลาง+เผ็ดมาก (เพิ่ม)+หอย 20+ เพิ่มกุ้ง 20+เพิ่มแคบหมู 10+',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF7C2D12)),
+                    ),
+                  ],
+                ),
               ),
-            ),
+            ],
             const SizedBox(height: 16),
             _buildTextField(
               label: 'สี (คั่นด้วยจุลภาค)',
@@ -2991,15 +3416,15 @@ class AddProductScreenState extends State<AddProductScreen> {
               hint: 'เช่น S, M, L, XL',
             ),
             const SizedBox(height: 16),
-            const Text('หน่วย', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            const Text(
+              'หน่วย',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
               value: _selectedUnit,
               items: _units.map((String unit) {
-                return DropdownMenuItem<String>(
-                  value: unit,
-                  child: Text(unit),
-                );
+                return DropdownMenuItem<String>(value: unit, child: Text(unit));
               }).toList(),
               onChanged: (newValue) {
                 setState(() {
@@ -3007,16 +3432,24 @@ class AddProductScreenState extends State<AddProductScreen> {
                 });
               },
               decoration: InputDecoration(
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(40)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(40),
+                ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(40),
                   borderSide: BorderSide(color: Colors.grey.shade400),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(40),
-                  borderSide: const BorderSide(color: AppColors.accentDark, width: 2),
+                  borderSide: const BorderSide(
+                    color: AppColors.accentDark,
+                    width: 2,
+                  ),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 14,
+                ),
               ),
             ),
             if (_selectedUnit == 'อื่นๆ') ...[
@@ -3035,7 +3468,10 @@ class AddProductScreenState extends State<AddProductScreen> {
                 backgroundColor: AppColors.accent,
                 foregroundColor: Colors.white,
               ),
-              child: const Text('บันทึก', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              child: const Text(
+                'บันทึก',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
             ),
           ],
         ),

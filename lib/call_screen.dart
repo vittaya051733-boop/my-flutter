@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import 'models/user_profile.dart';
+import 'services/friend_service.dart';
 import 'services/notification_service.dart';
 import 'widgets/cached_app_image.dart';
 
@@ -51,6 +52,8 @@ class _CallScreenState extends State<CallScreen> {
   bool _resultSent = false;
   Timer? _durationTimer;
   bool _cancelSignalSent = false;
+  late UserProfile _targetProfile;
+  final FriendService _friendService = FriendService();
 
   AudioPlayer? _ringbackPlayer;
   String? _fatalError;
@@ -75,6 +78,8 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    _targetProfile = widget.targetProfile;
+    unawaited(_refreshTargetProfile());
     // เปิดกล้องเฉพาะเมื่อผู้ใช้กดอนุญาตเอง
     _videoMuted = widget.isVideo;
     _activeToken = widget.tokenOverride?.trim() ?? '';
@@ -100,6 +105,20 @@ class _CallScreenState extends State<CallScreen> {
         _startRingtone('k-pop-ringtone-no-copyright-357142.mp3');
       });
     }
+  }
+
+  Future<void> _refreshTargetProfile() async {
+    final targetId = widget.targetProfile.uid.trim();
+    if (targetId.isEmpty) {
+      return;
+    }
+    try {
+      final profile = await _friendService.getProfile(targetId);
+      if (!mounted || profile == null) {
+        return;
+      }
+      setState(() => _targetProfile = profile);
+    } catch (_) {}
   }
 
   Future<void> _startOutgoingCall() async {
@@ -297,7 +316,7 @@ class _CallScreenState extends State<CallScreen> {
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
       if (_currentUserId != null) 'callerId': _currentUserId,
-      if (widget.targetProfile.uid.isNotEmpty) 'calleeId': widget.targetProfile.uid,
+      if (_targetProfile.uid.isNotEmpty) 'calleeId': _targetProfile.uid,
     };
     await docRef.set(payload, SetOptions(merge: true));
   }
@@ -433,7 +452,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget _buildIncomingContent() {
-    final displayName = widget.targetProfile.displayName.trim();
+    final displayName = _targetProfile.displayName.trim();
     final displayInitial =
         displayName.isNotEmpty ? displayName.characters.first.toUpperCase() : '?';
     return Container(
@@ -456,7 +475,7 @@ class _CallScreenState extends State<CallScreen> {
                   Text('มีสายเข้า', style: const TextStyle(color: Colors.white70, fontSize: 16)),
                   const SizedBox(height: 12),
                   Text(
-                    widget.targetProfile.displayName,
+                    _targetProfile.displayName,
                     style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
                   ),
                 ],
@@ -467,8 +486,8 @@ class _CallScreenState extends State<CallScreen> {
               height: 160,
               decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white10),
               child: ClipOval(
-                child: widget.targetProfile.photoUrl != null
-                  ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
+                child: _targetProfile.photoUrl != null
+                  ? CachedAppImage(imageUrl: _targetProfile.photoUrl!, fit: BoxFit.cover)
                     : Center(
                         child: Text(
                           displayInitial,
@@ -595,7 +614,7 @@ class _CallScreenState extends State<CallScreen> {
                   ],
                   const SizedBox(height: 12),
                   Text(
-                    widget.targetProfile.displayName,
+                    _targetProfile.displayName,
                     style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
                   ),
                 ],
@@ -613,7 +632,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Widget _buildCallingStatus() {
-    final displayName = widget.targetProfile.displayName.trim();
+    final displayName = _targetProfile.displayName.trim();
     final displayInitial =
         displayName.isNotEmpty ? displayName.characters.first.toUpperCase() : '?';
     return Column(
@@ -624,8 +643,8 @@ class _CallScreenState extends State<CallScreen> {
           height: 160,
           decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white10),
           child: ClipOval(
-            child: widget.targetProfile.photoUrl != null
-              ? CachedAppImage(imageUrl: widget.targetProfile.photoUrl!, fit: BoxFit.cover)
+            child: _targetProfile.photoUrl != null
+              ? CachedAppImage(imageUrl: _targetProfile.photoUrl!, fit: BoxFit.cover)
                 : Center(
                     child: Text(
                       displayInitial,
@@ -821,13 +840,13 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   Future<void> _notifyCallCancelled() async {
-    if (_cancelSignalSent || _activeChannelId.isEmpty || widget.targetProfile.uid.isEmpty) {
+    if (_cancelSignalSent || _activeChannelId.isEmpty || _targetProfile.uid.isEmpty) {
       return;
     }
     _cancelSignalSent = true;
     await NotificationService().cancelCallInvite(
       channelId: _activeChannelId,
-      calleeId: widget.targetProfile.uid,
+      calleeId: _targetProfile.uid,
     );
   }
 }

@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'navigation_helper.dart';
 import 'services/email_otp_service.dart';
@@ -9,7 +10,8 @@ class EmailVerificationScreen extends StatefulWidget {
   const EmailVerificationScreen({super.key});
 
   @override
-  State<EmailVerificationScreen> createState() => _EmailVerificationScreenState();
+  State<EmailVerificationScreen> createState() =>
+      _EmailVerificationScreenState();
 }
 
 class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
@@ -88,8 +90,8 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
 
   Future<void> _verifyOtp() async {
     final code = _otpController.text.trim();
-    if (code.length != 6) {
-      _showSnack('กรุณากรอก OTP 6 หลัก', Colors.red);
+    if (!RegExp(r'^\d{6}$').hasMatch(code)) {
+      _showSnack('OTP ต้องเป็นตัวเลข 6 หลัก', Colors.red);
       return;
     }
 
@@ -104,7 +106,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
 
       if (!mounted) return;
 
-      if (result.verified || result.alreadyVerified || refreshedUser?.emailVerified == true) {
+      if (result.verified ||
+          result.alreadyVerified ||
+          refreshedUser?.emailVerified == true) {
         _showSnack('ยืนยันอีเมลสำเร็จ', Colors.green);
         await _navigateAfterVerification(refreshedUser);
         return;
@@ -158,7 +162,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         );
         return;
       case 'home':
-        Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil('/home', (route) => false);
         return;
       default:
         await NavigationHelper.navigateBasedOnUserStatus(context, user);
@@ -191,15 +197,16 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.mark_email_unread_outlined, size: 80, color: AppColors.accent),
+              const Icon(
+                Icons.mark_email_unread_outlined,
+                size: 80,
+                color: AppColors.accent,
+              ),
               const SizedBox(height: 24),
               const Text(
                 'กรุณายืนยันอีเมลของคุณ',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 16),
               Text(
@@ -234,6 +241,10 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               TextField(
                 controller: _otpController,
                 keyboardType: TextInputType.number,
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(6),
+                ],
                 maxLength: 6,
                 decoration: const InputDecoration(
                   labelText: 'รหัส OTP 6 หลัก',
@@ -245,7 +256,14 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               ElevatedButton.icon(
                 onPressed: _isVerifyingOtp ? null : _verifyOtp,
                 icon: _isVerifyingOtp
-                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
                     : const Icon(Icons.verified_outlined),
                 label: Text(_isVerifyingOtp ? 'กำลังตรวจสอบ...' : 'ยืนยัน OTP'),
               ),
@@ -253,18 +271,33 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               ElevatedButton.icon(
                 onPressed: _isSendingOtp ? null : _sendOtp,
                 icon: _isSendingOtp
-                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
                     : const Icon(Icons.mail_outline),
-                label: Text(_isSendingOtp ? 'กำลังส่ง OTP...' : 'ส่ง OTP อีกครั้ง'),
+                label: Text(
+                  _isSendingOtp ? 'กำลังส่ง OTP...' : 'ส่ง OTP อีกครั้ง',
+                ),
               ),
               const SizedBox(height: 8),
               TextButton.icon(
                 onPressed: () {
-                  Navigator.pushNamed(context, '/email-helper', arguments: _currentEmail);
+                  Navigator.pushNamed(
+                    context,
+                    '/email-helper',
+                    arguments: _currentEmail,
+                  );
                 },
                 icon: const Icon(Icons.help_outline),
                 label: const Text('พบปัญหา?'),
-                style: TextButton.styleFrom(foregroundColor: Colors.blue.shade700),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.blue.shade700,
+                ),
               ),
 
               const SizedBox(height: 16),
@@ -272,10 +305,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                 onPressed: () async {
                   await FirebaseAuth.instance.signOut();
                   if (!context.mounted) return;
-                  Navigator.of(context).pushNamedAndRemoveUntil(
-                    '/welcome',
-                    (route) => false,
-                  );
+                  Navigator.of(
+                    context,
+                  ).pushNamedAndRemoveUntil('/welcome', (route) => false);
                 },
                 child: const Text('ออกจากระบบ'),
               ),

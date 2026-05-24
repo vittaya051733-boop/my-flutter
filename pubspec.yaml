@@ -22,6 +22,7 @@ dependencies:
   flutter_cache_manager: ^3.3.2
   flutter_local_notifications: ^19.5.0
   google_sign_in: ^7.2.0
+  local_auth: ^2.3.0
   shared_preferences: ^2.2.3
   flutter_svg: ^2.0.10+1
   image_picker: ^1.2.0
@@ -44,6 +45,7 @@ dependencies:
   image: ^4.2.0
   flutter_image_compress: ^2.3.0
   intl: ^0.20.2
+  promptpay_qrcode_generate: ^1.0.2
   qr_flutter: ^4.1.0
   blue_thermal_printer:
     path: local_packages/blue_thermal_printer
@@ -63,6 +65,7 @@ dependencies:
   permission_handler: ^12.0.1
   path_provider: ^2.1.4
   visibility_detector: ^0.4.0
+  speech_to_text: ^7.4.0
 
 dev_dependencies:
   flutter_test:
@@ -77,6 +80,7 @@ flutter:
   assets:
     - assets/
     - assets/topping-pop-sound-245150.mp3
+    - shorebird.yaml
 flutter_launcher_icons:
   android: true
   ios: true

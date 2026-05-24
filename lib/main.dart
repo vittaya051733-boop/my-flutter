@@ -5,6 +5,7 @@ import 'welcome_screen.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'register_screen.dart';
 import 'forgot_password_screen.dart';
 import 'email_verification_helper.dart';
@@ -53,6 +54,7 @@ void main() {
             options: DefaultFirebaseOptions.currentPlatform,
           );
         }
+        await initializeDateFormatting('th_TH');
       } catch (e) {
         final msg = e.toString();
         // ถ้าเป็น duplicate-app ให้ข้ามและใช้อินสแตนซ์เดิม

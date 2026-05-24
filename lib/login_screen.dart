@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'navigation_helper.dart';
+import 'services/biometric_auth_service.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
 
@@ -33,17 +33,40 @@ class _LoginScreenState extends State<LoginScreen> {
 
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final BiometricAuthService _biometricAuthService = BiometricAuthService();
   bool _isLoading = false;
   bool _isSocialLoading = false;
+  bool _isBiometricAvailable = false;
+  bool _isBiometricLoading = false;
   bool _isPasswordVisible = false;
   bool _isPasswordSaved = false;
   String? _socialLoadingKey;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBiometricLoginState();
+  }
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadBiometricLoginState() async {
+    final canUseBiometrics = await _biometricAuthService.canUseBiometrics();
+    final biometricLoginEnabled = await _biometricAuthService.isLoginEnabled();
+    final savedLogin = await _biometricAuthService.savedLoginId();
+    if (!mounted) return;
+    setState(() {
+      _isBiometricAvailable = canUseBiometrics && biometricLoginEnabled;
+      _isPasswordSaved = savedLogin != null && savedLogin.isNotEmpty;
+      if (_emailController.text.trim().isEmpty && savedLogin != null) {
+        _emailController.text = savedLogin;
+      }
+    });
   }
 
   Future<void> _signInWithEmailOrPhone() async {
@@ -75,6 +98,7 @@ class _LoginScreenState extends State<LoginScreen> {
             email: loginEmail,
             password: password,
           );
+          await _saveBiometricLoginIfRequested(input, password);
           if (!mounted) return;
           setState(() => _isLoading = false);
           await _handlePostLogin();
@@ -113,6 +137,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       // เช็คการลงทะเบียนร้านหลังล็อกอินสำเร็จ
       if (!mounted) return; // use_build_context_synchronously
+      await _saveBiometricLoginIfRequested(input, password);
       setState(() => _isLoading = false);
       await _handlePostLogin();
     } on FirebaseAuthException catch (e) {
@@ -197,6 +222,58 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _saveBiometricLoginIfRequested(
+    String loginId,
+    String password,
+  ) async {
+    final normalizedLoginId = loginId.trim();
+    if (!_isPasswordSaved || normalizedLoginId.isEmpty || password.isEmpty) {
+      return;
+    }
+    await _biometricAuthService.saveLoginCredentials(
+      loginId: normalizedLoginId,
+      password: password,
+    );
+  }
+
+  Future<void> _signInWithBiometrics() async {
+    if (_isLoading || _isSocialLoading || _isBiometricLoading) {
+      return;
+    }
+
+    final typedLoginId = _emailController.text.trim();
+    final savedLoginId = await _biometricAuthService.savedLoginId();
+    final loginId = typedLoginId.isNotEmpty
+        ? typedLoginId
+        : (savedLoginId ?? '');
+    if (loginId.isEmpty) {
+      _showSnack('กรอกอีเมล/เบอร์โทรและบันทึกรหัสผ่านก่อนใช้ลายนิ้วมือ');
+      return;
+    }
+
+    final savedPassword = await _biometricAuthService.savedPasswordFor(loginId);
+    if (savedPassword == null || savedPassword.isEmpty) {
+      _showSnack('ยังไม่มีรหัสผ่านที่บันทึกไว้สำหรับบัญชีนี้');
+      return;
+    }
+
+    setState(() => _isBiometricLoading = true);
+    final authenticated = await _biometricAuthService.authenticate(
+      reason: 'สแกนลายนิ้วมือเพื่อเข้าสู่ระบบ Van Merchant',
+    );
+    if (!mounted) return;
+    setState(() => _isBiometricLoading = false);
+
+    if (!authenticated) {
+      _showSnack('ยืนยันลายนิ้วมือไม่สำเร็จ');
+      return;
+    }
+
+    _emailController.text = loginId;
+    _passwordController.text = savedPassword;
+    await _signInWithEmailOrPhone();
+  }
+
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -256,7 +333,9 @@ class _LoginScreenState extends State<LoginScreen> {
     return SizedBox(
       width: double.infinity,
       child: ElevatedButton.icon(
-        onPressed: (_isLoading || _isSocialLoading) ? null : onPressed,
+        onPressed: (_isLoading || _isSocialLoading || _isBiometricLoading)
+            ? null
+            : onPressed,
         style: ElevatedButton.styleFrom(
           backgroundColor: backgroundColor,
           foregroundColor: foregroundColor,
@@ -384,14 +463,12 @@ class _LoginScreenState extends State<LoginScreen> {
                       child: Checkbox(
                         value: _isPasswordSaved,
                         onChanged: (bool? value) async {
-                          if (value == true) {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'saved_password_${_emailController.text}',
-                              _passwordController.text,
-                            );
+                          final shouldSave = value ?? false;
+                          if (!shouldSave) {
+                            await _biometricAuthService
+                                .clearSavedLoginCredentials();
                           }
-                          setState(() => _isPasswordSaved = value ?? false);
+                          setState(() => _isPasswordSaved = shouldSave);
                         },
                         activeColor: AppColors.accent,
                         shape: RoundedRectangleBorder(
@@ -408,6 +485,34 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ],
             ),
+            if (_isBiometricAvailable) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed:
+                    (_isLoading || _isSocialLoading || _isBiometricLoading)
+                    ? null
+                    : _signInWithBiometrics,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: const BorderSide(color: AppColors.accent),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: _isBiometricLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.fingerprint),
+                label: const Text(
+                  'เข้าสู่ระบบด้วยลายนิ้วมือ',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
             ElevatedButton(
               onPressed: _isLoading ? null : _signInWithEmailOrPhone,
