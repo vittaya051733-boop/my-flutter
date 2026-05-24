@@ -2,6 +2,17 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
+			"label": "Deploy Help — Safe Deploy Governance",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-ExecutionPolicy", "Bypass",
+				"-File", "..\\..\\van2\\scripts\\deploy-safe.ps1",
+				"-Action", "help"
+			],
+			"problemMatcher": []
+		},
+		{
 			"label": "Deploy Storage Isolated (van1)",
 			"type": "shell",
 			"command": "powershell",
@@ -9,7 +20,14 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"scripts/deploy-storage-isolated.ps1"
+				"scripts/deploy-storage-isolated.ps1",
+				"-ConfirmDeploy",
+				"APPROVE:van1:van-merchant",
+				"-ConfirmFile",
+				"storage.rules",
+				"-ConfirmImpact",
+				"SELF:van1",
+				"-InteractiveConfirm"
 			],
 			"problemMatcher": []
 		},
@@ -21,7 +39,14 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"scripts/deploy-firestore-isolated.ps1"
+				"scripts/deploy-firestore-isolated.ps1",
+				"-ConfirmDeploy",
+				"APPROVE:van1:van-merchant",
+				"-ConfirmFile",
+				"van2/firestore.rules",
+				"-ConfirmImpact",
+        "SHARED:van1,van2,van3,van4",
+				"-InteractiveConfirm"
 			],
 			"problemMatcher": []
 		},
@@ -33,7 +58,14 @@
 				"-ExecutionPolicy",
 				"Bypass",
 				"-File",
-				"scripts/deploy-isolated.ps1"
+				"scripts/deploy-isolated.ps1",
+				"-ConfirmDeploy",
+				"APPROVE:van1:van-merchant",
+				"-ConfirmFile",
+				"firestore.rules,storage.rules,firebase.json",
+				"-ConfirmImpact",
+				"MIXED:shared-firestore+self-van1",
+				"-InteractiveConfirm"
 			],
 			"problemMatcher": []
 		},
@@ -59,7 +91,14 @@
 				"-File",
 				"scripts/deploy-functions-isolated.ps1",
 				"-FunctionName",
-				"verifyTopUpSlip"
+				"verifyTopUpSlip",
+				"-ConfirmDeploy",
+				"APPROVE:van1:van-merchant",
+				"-ConfirmFile",
+				"functions",
+				"-ConfirmImpact",
+				"SELF:van1",
+				"-InteractiveConfirm"
 			],
 			"problemMatcher": []
 		},

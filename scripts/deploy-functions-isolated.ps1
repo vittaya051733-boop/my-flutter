@@ -1,19 +1,27 @@
 param(
-  [string[]]$FunctionName
+  [string[]]$FunctionName,
+  [string]$ConfirmDeploy,
+  [string]$ConfirmFile,
+  [string]$ConfirmImpact,
+  [switch]$InteractiveConfirm,
+  [string]$FinalAcknowledge,
+  [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$deployScript = Join-Path $scriptRoot 'deploy-isolated.ps1'
+$importScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\van2\scripts\deploy-governance-import.ps1'))
+. $importScript -CallingScriptRoot $PSScriptRoot
+$deployScript = Join-Path $PSScriptRoot 'deploy-isolated.ps1'
 
 if (-not $FunctionName -or $FunctionName.Count -eq 0) {
-  Write-Error 'Functions deploy is locked to explicit function names. Example: scripts/deploy-functions-isolated.ps1 -FunctionName verifyTopUpSlip'
-  exit 1
+  throw 'Functions deploy is locked to explicit function names.'
 }
-
 if (-not (Test-Path $deployScript)) {
-  Write-Error "Missing deploy script: $deployScript"
-  exit 1
+  throw "Missing deploy script: $deployScript"
 }
 
-& powershell -ExecutionPolicy Bypass -File $deployScript -FunctionsOnly -FunctionName $FunctionName
+Assert-VanFunctionOwnership -App 'van1' -FunctionName $FunctionName
+Invoke-VanDeployGuardSession -App 'van1' -ConfirmDeploy $ConfirmDeploy -ConfirmFile $ConfirmFile -ExpectedFile 'functions' -ConfirmImpact $ConfirmImpact -ExpectedImpact 'SELF:van1' -FinalAcknowledge $FinalAcknowledge -InteractiveConfirm:$InteractiveConfirm
+Invoke-VanDeployPreflight -App 'van1' -Target 'functions'
+
+& $deployScript -FunctionsOnly -FunctionName $FunctionName -ConfirmDeploy $ConfirmDeploy -ConfirmFile $ConfirmFile -ConfirmImpact $ConfirmImpact -FinalAcknowledge $FinalAcknowledge -DryRun:$DryRun
