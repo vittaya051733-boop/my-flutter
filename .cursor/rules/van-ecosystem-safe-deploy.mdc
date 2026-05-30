@@ -1,0 +1,21 @@
+---
+description: Safe deploy rules for van1 Merchant — shared Firebase van-merchant
+globs: "**/firestore.rules,**/firebase.json,**/scripts/deploy*.ps1,**/functions/index.js"
+alwaysApply: false
+---
+
+# van1 Merchant — Deploy แยกทีละ target
+
+Canonical docs: `Desktop\van2\scripts\DEPLOY_GOVERNANCE.md` + `DEPLOY_RISK_MATRIX.md`
+
+## สิทธิ์ van1
+
+- **SELF:** storage, hosting, functions (ทีละชื่อ codebase van1)
+- **Delegate:** Firestore default → van2 เท่านั้น
+- **ห้าม:** deploy รวม, `firebase deploy` raw
+
+```powershell
+..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage -ConfirmDeploy "APPROVE:van1:van-merchant" -FinalAcknowledge "YES I UNDERSTAND"
+```
+
+Manifest: `van2\scripts\deploy-governance.ps1`

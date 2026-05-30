@@ -149,6 +149,13 @@ class DetailedOrder {
   final double totalAmount;
   final int totalItems;
   final double shippingFee;
+  final String orderType;
+  final String fulfillmentType;
+  final String shippingProvider;
+  final String shippingProviderLabel;
+  final String shippingStatus;
+  final String shippingStatusLabel;
+  final Map<String, dynamic> deliveryAddress;
 
   final String
   status; // pending, accepted, preparing, ready, delivering, delivered, cancelled
@@ -195,6 +202,13 @@ class DetailedOrder {
     required this.totalAmount,
     required this.totalItems,
     this.shippingFee = 0,
+    this.orderType = '',
+    this.fulfillmentType = '',
+    this.shippingProvider = '',
+    this.shippingProviderLabel = '',
+    this.shippingStatus = '',
+    this.shippingStatusLabel = '',
+    this.deliveryAddress = const <String, dynamic>{},
     required this.status,
     this.acceptedAt,
     this.preparingStartTime,
@@ -236,6 +250,15 @@ class DetailedOrder {
       'totalAmount': totalAmount,
       'totalItems': totalItems,
       'shippingFee': shippingFee,
+      if (orderType.isNotEmpty) 'orderType': orderType,
+      if (fulfillmentType.isNotEmpty) 'fulfillmentType': fulfillmentType,
+      if (shippingProvider.isNotEmpty) 'shippingProvider': shippingProvider,
+      if (shippingProviderLabel.isNotEmpty)
+        'shippingProviderLabel': shippingProviderLabel,
+      if (shippingStatus.isNotEmpty) 'shippingStatus': shippingStatus,
+      if (shippingStatusLabel.isNotEmpty)
+        'shippingStatusLabel': shippingStatusLabel,
+      if (deliveryAddress.isNotEmpty) 'deliveryAddress': deliveryAddress,
       'status': status,
       'acceptedAt': acceptedAt != null ? Timestamp.fromDate(acceptedAt!) : null,
       'preparingStartTime': preparingStartTime != null
@@ -304,6 +327,15 @@ class DetailedOrder {
       totalItems:
           map['totalItems'] ?? map['totalQuantity'] ?? map['itemCount'] ?? 0,
       shippingFee: shippingFee,
+      orderType: (map['orderType'] ?? '').toString(),
+      fulfillmentType: (map['fulfillmentType'] ?? '').toString(),
+      shippingProvider: (map['shippingProvider'] ?? '').toString(),
+      shippingProviderLabel: (map['shippingProviderLabel'] ?? '').toString(),
+      shippingStatus: (map['shippingStatus'] ?? '').toString(),
+      shippingStatusLabel: (map['shippingStatusLabel'] ?? '').toString(),
+      deliveryAddress: map['deliveryAddress'] is Map
+          ? Map<String, dynamic>.from(map['deliveryAddress'] as Map)
+          : const <String, dynamic>{},
       status: map['status'] ?? 'pending',
       acceptedAt: map['acceptedAt'] != null
           ? (map['acceptedAt'] as Timestamp).toDate()
@@ -413,6 +445,23 @@ class DetailedOrder {
         return label;
       }
     }
+    final deliveryAddress = map['deliveryAddress'];
+    if (deliveryAddress is Map) {
+      final label = (deliveryAddress['label'] as String?)?.trim();
+      if (label != null && label.isNotEmpty) {
+        return label;
+      }
+      final parts = <String>[
+        (deliveryAddress['addressLine'] ?? '').toString().trim(),
+        (deliveryAddress['subDistrict'] ?? '').toString().trim(),
+        (deliveryAddress['district'] ?? '').toString().trim(),
+        (deliveryAddress['province'] ?? '').toString().trim(),
+        (deliveryAddress['postalCode'] ?? '').toString().trim(),
+      ].where((part) => part.isNotEmpty).toList(growable: false);
+      if (parts.isNotEmpty) {
+        return parts.join(' ');
+      }
+    }
     final customerLocation = map['customerLocation'];
     if (customerLocation is Map) {
       final label = (customerLocation['label'] as String?)?.trim();
@@ -456,6 +505,13 @@ class DetailedOrder {
       totalAmount: totalAmount,
       totalItems: totalItems,
       shippingFee: shippingFee,
+      orderType: orderType,
+      fulfillmentType: fulfillmentType,
+      shippingProvider: shippingProvider,
+      shippingProviderLabel: shippingProviderLabel,
+      shippingStatus: shippingStatus,
+      shippingStatusLabel: shippingStatusLabel,
+      deliveryAddress: deliveryAddress,
       status: status ?? this.status,
       acceptedAt: acceptedAt ?? this.acceptedAt,
       preparingStartTime: preparingStartTime ?? this.preparingStartTime,

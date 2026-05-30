@@ -25,6 +25,81 @@ products/
     - ownerUid: string
     - createdAt: timestamp
     - updatedAt: timestamp
+    - isActive: boolean
+    - adminReviewStatus: string? (pending — รอ admin ตรวจ)
+    - aiIsLegalInThailand: boolean?
+    - productType: string?
+    - serviceType: string?
+
+    // AI catalog headings (เขียนโดย Cloud Function onProductCatalogClassify เท่านั้น — client ห้ามแก้)
+    - catalogType: string?           // ชั้น 2: สะท้อน aiProductType (ไม่ใช้ AI แยก)
+    - aiProductType: string?         // จาก analyzeProductWithAi เช่น "ผลไม้สด" — ใช้เป็นชื่อประเภท
+    - catalogTypeSlug: string?
+    - catalogTypeSort: number?
+    - catalogHeading: string?          // ชั้น 3: หัวข้อย่อย เช่น "ปลาสด", "เนื้อสด"
+    - catalogHeadingSlug: string?
+    - catalogHeadingSort: number?
+    - aiCatalogClassifiedAt: timestamp?
+    - aiCatalogClassifierVersion: string?  // เช่น "v1"
+    - aiCatalogInputHash: string?      // SHA-256 ของ input — กันเรียก AI ซ้ำ
+```
+
+## Collection: catalog_ai_cache/{inputHash}
+
+แคชผลจัดหัวข้อ catalog จาก AI (เขียนโดย `onProductCatalogClassify` เท่านั้น — เรียก Gemini ครั้งเดียวต่อ fingerprint):
+
+```
+catalog_ai_cache/{inputHash}/
+  - catalogType, catalogTypeSlug
+  - catalogHeading, catalogHeadingSlug
+  - aiCatalogClassifierVersion: string
+  - sourceProductId: string?
+  - model: string?
+  - usageCount: number
+  - createdAt: timestamp
+  - updatedAt: timestamp
+```
+
+## Collection: product_ai_cache/{inputHash}
+
+แคชผลวิเคราะห์สินค้าเต็มจาก `analyzeProductWithAi` (ชื่อ, ภาษี, กฎหมาย ฯลฯ):
+
+```
+product_ai_cache/{inputHash}/
+  - inputHash: string
+  - productName, description, productType, productCategory, taxStatus, ...
+  - usageCount: number
+  - createdAt / updatedAt: timestamp
+```
+
+## Collection: public_shops/{shopId}/catalog_types
+
+Registry ประเภท (ชั้น 2) ต่อร้าน — ใช้เป็นปุ่มกรองใน van2:
+
+```
+public_shops/{shopId}/catalog_types/
+  {typeSlug}/
+    - label: string              // เช่น "ของสด"
+    - sortOrder: number
+    - source: string             // "ai"
+    - usageCount: number
+    - createdAt / updatedAt: timestamp
+```
+
+## Collection: public_shops/{shopId}/catalog_headings
+
+Registry หัวข้อ catalog ต่อร้าน (upsert โดย `onProductCatalogClassify`):
+
+```
+public_shops/{shopId}/catalog_headings/
+  {headingSlug}/
+    - label: string              // ชื่อหัวข้อภาษาไทย เช่น "ปลาสด"
+    - catalogTypeSlug: string?   // ประเภทแม่ เช่น "ของสด"
+    - sortOrder: number
+    - source: string             // "ai"
+    - usageCount: number
+    - createdAt: timestamp?
+    - updatedAt: timestamp
 ```
 
 ## Collection: specifications (subcollection ของ products)

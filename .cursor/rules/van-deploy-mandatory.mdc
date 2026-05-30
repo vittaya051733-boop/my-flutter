@@ -1,0 +1,27 @@
+---
+description: MANDATORY — อ่านก่อน deploy Firebase ทุกครั้ง (van1 Merchant)
+alwaysApply: true
+---
+
+# ห้าม Deploy โดยไม่อ่านกฎ (van1)
+
+**ก่อนรัน deploy ใดๆ** ให้อ่าน:
+1. `Desktop\van2\scripts\DEPLOY_GOVERNANCE.md`
+2. `Desktop\van2\scripts\DEPLOY_RISK_MATRIX.md`
+
+## van1 ทำได้ / ห้ามทำ
+
+| ทำได้ (SELF) | ห้าม |
+|-------------|------|
+| storage, hosting, functions ทีละชื่อ | `firebase deploy` แบบ raw |
+| | Firestore default (ใช้ van2) |
+| | deploy รวม firestore+storage+hosting |
+
+## คำสั่งเดียวที่ถูก
+
+```powershell
+..\..\..\van2\scripts\deploy-readiness.ps1 -App van1 -Target storage
+..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage -ConfirmDeploy "APPROVE:van1:van-merchant" -FinalAcknowledge "YES I UNDERSTAND"
+```
+
+Deploy Firestore rules → `deploy-self.ps1 -App van2 -Target firestore` (SHARED — กระทบไรเดอร์)

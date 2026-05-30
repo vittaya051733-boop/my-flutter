@@ -18,6 +18,9 @@ class Product {
   final List<String> sizes;
   final String unit;
   final double? weight;
+  final double? parcelLengthCm;
+  final double? parcelWidthCm;
+  final double? parcelHeightCm;
   final String? videoUrl;
   final String? videoThumbnailUrl;
   final bool aiDescriptionRequested;
@@ -48,6 +51,9 @@ class Product {
     required this.sizes,
     required this.unit,
     this.weight,
+    this.parcelLengthCm,
+    this.parcelWidthCm,
+    this.parcelHeightCm,
     this.videoUrl,
     this.videoThumbnailUrl,
     this.aiDescriptionRequested = false,
@@ -81,6 +87,9 @@ class Product {
       'sizes': sizes,
       'unit': unit,
       'weight': weight,
+      'parcelLengthCm': parcelLengthCm,
+      'parcelWidthCm': parcelWidthCm,
+      'parcelHeightCm': parcelHeightCm,
       'videoUrl': videoUrl,
       'videoThumbnailUrl': videoThumbnailUrl,
       'aiDescriptionRequested': aiDescriptionRequested,
@@ -92,7 +101,8 @@ class Product {
       'taxAiReason': taxAiReason,
       'canShipNationwide': canShipNationwide,
       'nationwideShippingReason': nationwideShippingReason,
-      'createdAt': FieldValue.serverTimestamp(), // Automatically add a timestamp
+      'createdAt':
+          FieldValue.serverTimestamp(), // Automatically add a timestamp
     };
   }
 
@@ -117,8 +127,10 @@ class Product {
       taxStatus: map['taxStatus'] as String?,
       price: (map['price'] as num?)?.toDouble() ?? 0.0,
       stock: (map['stock'] as num?)?.toInt() ?? 0,
-        preparationTimeMinutes: (map['preparationTimeMinutes'] as num?)?.toInt() ??
-          (((map['preparingDuration'] as num?)?.toInt() ?? 600000) / 60000).round(),
+      preparationTimeMinutes:
+          (map['preparationTimeMinutes'] as num?)?.toInt() ??
+          (((map['preparingDuration'] as num?)?.toInt() ?? 600000) / 60000)
+              .round(),
       imageUrls: List<String>.from(map['imageUrls'] ?? []),
       thumbnailUrls: List<String>.from(
         (map['thumbnailUrls'] ?? map['imageUrls']) ?? [],
@@ -127,11 +139,16 @@ class Product {
       sizes: List<String>.from(map['sizes'] ?? []),
       unit: map['unit'] ?? '',
       weight: parsedWeight,
+      parcelLengthCm: (map['parcelLengthCm'] as num?)?.toDouble(),
+      parcelWidthCm: (map['parcelWidthCm'] as num?)?.toDouble(),
+      parcelHeightCm: (map['parcelHeightCm'] as num?)?.toDouble(),
       videoUrl: map['videoUrl'] as String?,
       videoThumbnailUrl: map['videoThumbnailUrl'] as String?,
       aiDescriptionRequested: (map['aiDescriptionRequested'] as bool?) ?? false,
-      aiWhiteBackgroundRequested: (map['aiWhiteBackgroundRequested'] as bool?) ?? false,
-      aiProductAnalysisRequested: (map['aiProductAnalysisRequested'] as bool?) ?? false,
+      aiWhiteBackgroundRequested:
+          (map['aiWhiteBackgroundRequested'] as bool?) ?? false,
+      aiProductAnalysisRequested:
+          (map['aiProductAnalysisRequested'] as bool?) ?? false,
       aiIsLegalInThailand: map['aiIsLegalInThailand'] as bool?,
       aiLegalAnalysisReason: map['aiLegalAnalysisReason'] as String?,
       aiProductType: map['aiProductType'] as String?,

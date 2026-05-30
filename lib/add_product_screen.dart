@@ -125,6 +125,9 @@ class AddProductScreenState extends State<AddProductScreen> {
   final _colorsController = TextEditingController();
   final _sizesController = TextEditingController();
   final _weightController = TextEditingController();
+  final _parcelLengthController = TextEditingController();
+  final _parcelWidthController = TextEditingController();
+  final _parcelHeightController = TextEditingController();
   final FocusNode _priceFocusNode = FocusNode();
   final FocusNode _toppingsFocusNode = FocusNode();
   String _weightUnit = 'g';
@@ -261,6 +264,9 @@ class AddProductScreenState extends State<AddProductScreen> {
         _weightController.text = p.weight!.toString();
         _weightUnit = 'kg';
       }
+      _parcelLengthController.text = p.parcelLengthCm?.toString() ?? '';
+      _parcelWidthController.text = p.parcelWidthCm?.toString() ?? '';
+      _parcelHeightController.text = p.parcelHeightCm?.toString() ?? '';
       _selectedUnit = _units.contains(p.unit) ? p.unit : 'อื่นๆ';
       if (_selectedUnit == 'อื่นๆ') _otherUnitController.text = p.unit;
       _selectedProductCategory = _productCategories.contains(p.productCategory)
@@ -303,6 +309,9 @@ class AddProductScreenState extends State<AddProductScreen> {
     _colorsController.dispose();
     _sizesController.dispose();
     _weightController.dispose();
+    _parcelLengthController.dispose();
+    _parcelWidthController.dispose();
+    _parcelHeightController.dispose();
     _otherUnitController.dispose();
     _aiQueueSubscription?.cancel();
     super.dispose();
@@ -1800,6 +1809,13 @@ class AddProductScreenState extends State<AddProductScreen> {
       return;
     }
     final String weightValue = '${_weightController.text.trim()} $_weightUnit';
+    final weightAmount = double.tryParse(_weightController.text.trim()) ?? 0;
+    final parcelWeightGrams = _weightUnit == 'kg'
+        ? (weightAmount * 1000).round()
+        : weightAmount.round();
+    final parcelLengthCm = double.tryParse(_parcelLengthController.text.trim());
+    final parcelWidthCm = double.tryParse(_parcelWidthController.text.trim());
+    final parcelHeightCm = double.tryParse(_parcelHeightController.text.trim());
 
     if (_priceController.text.trim().isEmpty) {
       ScaffoldMessenger.of(
@@ -2021,6 +2037,10 @@ class AddProductScreenState extends State<AddProductScreen> {
         'colors': colors,
         'sizes': sizes,
         'weight': weightValue,
+        if (parcelWeightGrams > 0) 'parcelWeightGrams': parcelWeightGrams,
+        if (parcelLengthCm != null) 'parcelLengthCm': parcelLengthCm,
+        if (parcelWidthCm != null) 'parcelWidthCm': parcelWidthCm,
+        if (parcelHeightCm != null) 'parcelHeightCm': parcelHeightCm,
         'unit': resolvedUnit,
         'shopName': shopName,
         if (shopImageUrl != null && shopImageUrl.trim().isNotEmpty)
@@ -2092,6 +2112,10 @@ class AddProductScreenState extends State<AddProductScreen> {
         'sizes': sizes,
         'unit': resolvedUnit,
         'weight': weightValue,
+        if (parcelWeightGrams > 0) 'parcelWeightGrams': parcelWeightGrams,
+        if (parcelLengthCm != null) 'parcelLengthCm': parcelLengthCm,
+        if (parcelWidthCm != null) 'parcelWidthCm': parcelWidthCm,
+        if (parcelHeightCm != null) 'parcelHeightCm': parcelHeightCm,
         'headings': <String, String>{
           'description': 'คำอธิบายสินค้า',
           'toppings': 'ท็อปปิ้ง',
@@ -2110,6 +2134,10 @@ class AddProductScreenState extends State<AddProductScreen> {
           'sizes': 'ขนาด',
           'unit': 'หน่วย',
           'weight': 'น้ำหนัก',
+          'parcelWeightGrams': 'น้ำหนักพัสดุ (กรัม)',
+          'parcelLengthCm': 'ความยาวพัสดุ (ซม.)',
+          'parcelWidthCm': 'ความกว้างพัสดุ (ซม.)',
+          'parcelHeightCm': 'ความสูงพัสดุ (ซม.)',
         },
         'updatedAt': FieldValue.serverTimestamp(),
       };
@@ -2328,7 +2356,10 @@ class AddProductScreenState extends State<AddProductScreen> {
             if (_isAdminDelegatedUpload) ...<Widget>[
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0xFFFFF3E0),
                   borderRadius: BorderRadius.circular(12),
@@ -2463,6 +2494,10 @@ class AddProductScreenState extends State<AddProductScreen> {
             _buildProductAnalysisSection(),
             const SizedBox(height: 24),
             _buildNationwideShippingSection(),
+            if (_resolvedCanShipNationwide) ...[
+              const SizedBox(height: 12),
+              _buildParcelDimensionFields(),
+            ],
             const SizedBox(height: 24),
             _buildTaxSection(),
             const SizedBox(height: 32),
@@ -2934,6 +2969,66 @@ class AddProductScreenState extends State<AddProductScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildParcelDimensionFields() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'ข้อมูลพัสดุสำหรับส่งทั่วประเทศ',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'เตรียมไว้สำหรับเชื่อมต่อ ShipPop ภายหลัง ระบุขนาดโดยประมาณของพัสดุหลังแพ็ก',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildTextField(
+                  label: 'ยาว (ซม.)',
+                  controller: _parcelLengthController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildTextField(
+                  label: 'กว้าง (ซม.)',
+                  controller: _parcelWidthController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildTextField(
+                  label: 'สูง (ซม.)',
+                  controller: _parcelHeightController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 

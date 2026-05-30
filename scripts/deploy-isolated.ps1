@@ -1,6 +1,7 @@
 param(
   [switch]$FunctionsOnly,
   [switch]$HostingOnly,
+  [switch]$StorageOnly,
   [switch]$BuildWeb,
   [string[]]$FunctionName,
   [string]$ConfirmDeploy,
@@ -46,12 +47,29 @@ if ($ConfirmDeploy -ne $expectedConfirmation) {
 }
 Write-Host "[guard] Confirmation accepted: $expectedConfirmation" -ForegroundColor Green
 
+$modeCount = @($FunctionsOnly, $HostingOnly, $StorageOnly).Where({ $_ }).Count
+if ($modeCount -eq 0) {
+  Write-Error @"
+Deployment blocked: combined deploy disabled (protects van3 rider connections).
+Specify exactly one mode:
+  -StorageOnly   deploy van1 storage rules only (SELF)
+  -HostingOnly   deploy van1 hosting only (SELF)
+  -FunctionsOnly -FunctionName <name>   deploy one function (SELF)
+For shared Firestore: van2\scripts\deploy-self.ps1 -App van2 -Target firestore
+"@
+  exit 1
+}
+if ($modeCount -gt 1) {
+  Write-Error 'Deployment blocked: specify only ONE of -StorageOnly, -HostingOnly, -FunctionsOnly.'
+  exit 1
+}
+
 $expectedFile = 'firebase.json'
 $expectedImpact = 'SELF:van1'
-if (-not $FunctionsOnly -and -not $HostingOnly) {
-  $expectedFile = 'firestore.rules,storage.rules,firebase.json'
-  $expectedImpact = 'MIXED:shared-firestore+self-van1'
-} elseif ($FunctionsOnly -and -not $HostingOnly) {
+if ($StorageOnly) {
+  $expectedFile = 'storage.rules'
+  $expectedImpact = 'SELF:van1'
+} elseif ($FunctionsOnly) {
   $expectedFile = 'functions'
   $expectedImpact = 'SELF:van1'
 }
@@ -92,7 +110,16 @@ Write-Host "[guard] Final acknowledgement accepted." -ForegroundColor Green
 $config = Get-Content 'firebase.json' -Raw | ConvertFrom-Json
 $targets = @()
 
-if ($FunctionsOnly -and -not $HostingOnly) {
+if ($StorageOnly) {
+  if (-not (Test-Path $storageScript)) {
+    Write-Error "Missing deploy script: $storageScript"
+    exit 1
+  }
+  & $storageScript -ConfirmDeploy $ConfirmDeploy -ConfirmFile 'storage.rules' -ConfirmImpact 'SELF:van1' -FinalAcknowledge $FinalAcknowledge -DryRun:$DryRun
+  exit $LASTEXITCODE
+}
+
+if ($FunctionsOnly) {
   if (-not $FunctionName -or $FunctionName.Count -eq 0) {
     Write-Error "Functions deploy is locked to explicit function names. Use: scripts/deploy-isolated.ps1 -FunctionsOnly -FunctionName verifyTopUpSlip"
     exit 1
@@ -117,29 +144,8 @@ if ($FunctionsOnly -and -not $HostingOnly) {
   }
 
   $env:FUNCTIONS_DISCOVERY_TIMEOUT = '30000'
-} elseif ($HostingOnly -and -not $FunctionsOnly) {
+} elseif ($HostingOnly) {
   $targets += "hosting:$hostingTarget"
-} else {
-  $targets += "hosting:$hostingTarget"
-}
-
-if (-not $FunctionsOnly -and -not $HostingOnly) {
-  if (-not (Test-Path $firestoreScript)) {
-    Write-Error "Missing deploy script: $firestoreScript"
-    exit 1
-  }
-  if (-not (Test-Path $storageScript)) {
-    Write-Error "Missing deploy script: $storageScript"
-    exit 1
-  }
-
-  Write-Host 'Deploying isolated Firestore rules first...' -ForegroundColor DarkCyan
-  & $firestoreScript -ConfirmDeploy $ConfirmDeploy -ConfirmFile 'van2/firestore.rules' -ConfirmImpact 'SHARED:van1,van2,van3,van4' -FinalAcknowledge $FinalAcknowledge -DryRun:$DryRun
-
-  Write-Host 'Deploying isolated Storage rules next...' -ForegroundColor DarkCyan
-  & $storageScript -ConfirmDeploy $ConfirmDeploy -ConfirmFile 'storage.rules' -ConfirmImpact 'SELF:van1' -FinalAcknowledge $FinalAcknowledge -DryRun:$DryRun
-
-  Write-Host 'Routine isolated deploy excludes functions. Use -FunctionsOnly when you need to deploy the van1 codebase explicitly.' -ForegroundColor DarkYellow
 }
 
 if ($targets -contains "hosting:$hostingTarget") {

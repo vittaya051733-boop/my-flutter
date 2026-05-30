@@ -1,9 +1,14 @@
-# Deploy governance (van1 merchant)
+# Deploy (van1 Merchant)
 
-Manifest: `Desktop\van2\scripts\deploy-governance.ps1`
+**อ่านก่อน deploy ทุกครั้ง:**
+- `Desktop\van2\scripts\DEPLOY_GOVERNANCE.md`
+- `Desktop\van2\scripts\DEPLOY_RISK_MATRIX.md`
 
 ```powershell
-..\..\..\van2\scripts\deploy-safe.ps1 -Action help
+# Readiness + deploy แยกทีละ target
+..\..\..\van2\scripts\deploy-readiness.ps1 -App van1 -Target storage
+..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage `
+  -ConfirmDeploy "APPROVE:van1:van-merchant" -FinalAcknowledge "YES I UNDERSTAND"
 ```
 
-See: `Desktop\van2\scripts\DEPLOY_GOVERNANCE.md`
+Manifest: `Desktop\van2\scripts\deploy-governance.ps1`

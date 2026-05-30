@@ -318,6 +318,12 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
     final title = widget.title?.trim().isNotEmpty == true
         ? widget.title!.trim()
         : 'มีออเดอร์รอร้านยืนยัน';
+    final isNationwideParcel =
+        order.orderType == 'nationwide_parcel' &&
+        order.fulfillmentType == 'external_courier';
+    final deliveryAddressLabel = order.customerAddress.trim().isNotEmpty
+        ? order.customerAddress.trim()
+        : '-';
     final shortOrderId = order.orderId.substring(
       0,
       order.orderId.length >= 8 ? 8 : order.orderId.length,
@@ -455,6 +461,16 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
                                             ? 'รอร้านยืนยัน'
                                             : order.status,
                                       ),
+                                      if (isNationwideParcel)
+                                        const _InfoChip(
+                                          label: 'รูปแบบ',
+                                          value: 'ส่งทั่วประเทศ',
+                                        ),
+                                      if (isNationwideParcel)
+                                        const _InfoChip(
+                                          label: 'ขนส่ง',
+                                          value: 'ภายนอก',
+                                        ),
                                     ],
                                   ),
                                 ],
@@ -476,6 +492,46 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
                                           .toList(growable: false),
                                     ),
                             ),
+                            if (isNationwideParcel) ...<Widget>[
+                              const SizedBox(height: 14),
+                              _SectionCard(
+                                title: 'ข้อมูลจัดส่งทั่วประเทศ',
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    const _ExternalCourierBanner(),
+                                    const SizedBox(height: 10),
+                                    _DetailLine(
+                                      label: 'ผู้รับ',
+                                      value:
+                                          (order.deliveryAddress['recipientName'] ??
+                                                  '-')
+                                              .toString(),
+                                    ),
+                                    _DetailLine(
+                                      label: 'เบอร์โทร',
+                                      value:
+                                          (order.deliveryAddress['phoneNumber'] ??
+                                                  '-')
+                                              .toString(),
+                                    ),
+                                    _DetailLine(
+                                      label: 'ที่อยู่',
+                                      value: deliveryAddressLabel,
+                                    ),
+                                    _DetailLine(
+                                      label: 'สถานะขนส่ง',
+                                      value:
+                                          order.shippingStatusLabel
+                                              .trim()
+                                              .isNotEmpty
+                                          ? order.shippingStatusLabel
+                                          : 'รอจองขนส่งภายนอก',
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                             if (order.driverName?.trim().isNotEmpty == true ||
                                 order.driverId?.trim().isNotEmpty ==
                                     true) ...<Widget>[
@@ -673,6 +729,77 @@ class _SectionCard extends StatelessWidget {
             const SizedBox(height: 12),
           ],
           child,
+        ],
+      ),
+    );
+  }
+}
+
+class _ExternalCourierBanner extends StatelessWidget {
+  const _ExternalCourierBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7ED),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFFED7AA)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.local_shipping_outlined, color: AppColors.accent),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'ออเดอร์นี้เป็นสินค้าส่งทั่วประเทศ ใช้ขนส่งภายนอก ไม่ใช่งานไรเดอร์ในพื้นที่',
+              style: TextStyle(
+                color: Color(0xFF9A3412),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailLine extends StatelessWidget {
+  const _DetailLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 86,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value.trim().isEmpty ? '-' : value.trim(),
+              style: const TextStyle(
+                color: Color(0xFF0F172A),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
         ],
       ),
     );

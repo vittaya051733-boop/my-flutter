@@ -44,7 +44,9 @@ String _buildVan1InboxNotificationId({
             ? 'incoming_call'
             : 'general'),
   );
-  final notificationId = _normalizeInboxKeyPart(data['notificationId'] as String?);
+  final notificationId = _normalizeInboxKeyPart(
+    data['notificationId'] as String?,
+  );
   final chatId = _normalizeInboxKeyPart(data['chatId'] as String?);
   final channelId = _normalizeInboxKeyPart(data['channelId'] as String?);
   final orderId = _normalizeInboxKeyPart(data['orderId'] as String?);
@@ -78,14 +80,17 @@ Future<void> _persistVan1RemoteMessageToInbox(
   String? title,
   String? body,
 }) async {
-  final existingNotificationId = (data['notificationId'] as String?)?.trim() ?? '';
+  final existingNotificationId =
+      (data['notificationId'] as String?)?.trim() ?? '';
   if (existingNotificationId.isNotEmpty) {
     return;
   }
 
   final currentUid = FirebaseAuth.instance.currentUser?.uid.trim();
   final recipientUid = (data['recipientUid'] as String?)?.trim();
-  final targetUid = recipientUid?.isNotEmpty == true ? recipientUid! : currentUid;
+  final targetUid = recipientUid?.isNotEmpty == true
+      ? recipientUid!
+      : currentUid;
   if (targetUid == null || targetUid.isEmpty) {
     return;
   }
@@ -99,7 +104,9 @@ Future<void> _persistVan1RemoteMessageToInbox(
       ? 'incoming_call'
       : 'general';
   final senderName = (data['senderName'] as String?)?.trim();
-  final callerName = ((data['callerName'] as String?) ?? (data['caller_name'] as String?))?.trim();
+  final callerName =
+      ((data['callerName'] as String?) ?? (data['caller_name'] as String?))
+          ?.trim();
   final resolvedTitle = (() {
     if (title?.trim().isNotEmpty == true) {
       return title!.trim();
@@ -121,9 +128,13 @@ Future<void> _persistVan1RemoteMessageToInbox(
       return ((data['message'] as String?) ?? '').trim();
     }
     if (type == 'call') {
-      final displayName = callerName?.isNotEmpty == true ? callerName! : 'ผู้โทร';
+      final displayName = callerName?.isNotEmpty == true
+          ? callerName!
+          : 'ผู้โทร';
       final isVideo = data['isVideo'] == true || data['isVideo'] == 'true';
-      return isVideo ? '$displayName กำลังวิดีโอคอลเข้ามา' : '$displayName กำลังโทรเข้ามา';
+      return isVideo
+          ? '$displayName กำลังวิดีโอคอลเข้ามา'
+          : '$displayName กำลังโทรเข้ามา';
     }
     return ((data['body'] as String?) ?? '').trim();
   })();
@@ -145,8 +156,14 @@ Future<void> _persistVan1RemoteMessageToInbox(
         if ((data['senderId'] as String?)?.trim().isNotEmpty == true)
           'senderId': (data['senderId'] as String).trim(),
         if (senderName?.isNotEmpty == true) 'senderName': senderName,
-        if (((data['callerId'] as String?) ?? (data['caller_id'] as String?))?.trim().isNotEmpty == true)
-          'callerId': (((data['callerId'] as String?) ?? (data['caller_id'] as String?))!).trim(),
+        if (((data['callerId'] as String?) ?? (data['caller_id'] as String?))
+                ?.trim()
+                .isNotEmpty ==
+            true)
+          'callerId':
+              (((data['callerId'] as String?) ??
+                      (data['caller_id'] as String?))!)
+                  .trim(),
         if (callerName?.isNotEmpty == true) 'callerName': callerName,
         if ((data['callerPhotoUrl'] as String?)?.trim().isNotEmpty == true)
           'callerPhotoUrl': (data['callerPhotoUrl'] as String).trim(),
@@ -160,10 +177,12 @@ Future<void> _persistVan1RemoteMessageToInbox(
         'sourceApp': 'van1',
         'action': action,
         'type': type,
-        if (messageId?.trim().isNotEmpty == true) 'messageId': messageId!.trim(),
+        if (messageId?.trim().isNotEmpty == true)
+          'messageId': messageId!.trim(),
         if ((data['callType'] as String?)?.trim().isNotEmpty == true)
           'callType': (data['callType'] as String).trim(),
-        if (data['isVideo'] != null) 'isVideo': data['isVideo'] == true || data['isVideo'] == 'true',
+        if (data['isVideo'] != null)
+          'isVideo': data['isVideo'] == true || data['isVideo'] == 'true',
         if ((data['message'] as String?)?.trim().isNotEmpty == true)
           'message': (data['message'] as String).trim(),
       }, SetOptions(merge: true));
@@ -873,23 +892,27 @@ class NotificationService {
       return;
     }
 
-    final collection = FirebaseFirestore.instance.collection('app_notifications');
+    final collection = FirebaseFirestore.instance.collection(
+      'app_notifications',
+    );
     final payload = <String, dynamic>{
-          'targetApp': 'van1',
-          'recipientUid': toUid,
-          if (orderId?.trim().isNotEmpty == true) 'orderId': orderId!.trim(),
-          'title': title.trim().isNotEmpty ? title.trim() : 'แจ้งเตือน',
-          'body': body.trim(),
-          'read': false,
-          'createdAt': FieldValue.serverTimestamp(),
-          'source': 'van1_shop',
-          'sourceApp': 'van1',
-          'action': action.trim().isNotEmpty ? action.trim() : 'general',
-          if (extraData != null) ...extraData,
-        };
+      'targetApp': 'van1',
+      'recipientUid': toUid,
+      if (orderId?.trim().isNotEmpty == true) 'orderId': orderId!.trim(),
+      'title': title.trim().isNotEmpty ? title.trim() : 'แจ้งเตือน',
+      'body': body.trim(),
+      'read': false,
+      'createdAt': FieldValue.serverTimestamp(),
+      'source': 'van1_shop',
+      'sourceApp': 'van1',
+      'action': action.trim().isNotEmpty ? action.trim() : 'general',
+      if (extraData != null) ...extraData,
+    };
 
     if (documentId?.trim().isNotEmpty == true) {
-      await collection.doc(documentId!.trim()).set(payload, SetOptions(merge: true));
+      await collection
+          .doc(documentId!.trim())
+          .set(payload, SetOptions(merge: true));
       return;
     }
 
@@ -1025,13 +1048,29 @@ class NotificationService {
 
       final order = DetailedOrder.fromSnapshot(snapshot);
       final driverId = (data['driverId'] as String?)?.trim() ?? '';
+      final orderType = (data['orderType'] as String?)?.trim() ?? '';
+      final fulfillmentType =
+          (data['fulfillmentType'] as String?)?.trim() ?? '';
+      final bool awaitingNationwideShopDecision =
+          orderType == 'nationwide_parcel' &&
+          fulfillmentType == 'external_courier' &&
+          order.preparingStartTime == null &&
+          data['shopDecisionStatus'] != 'rejected' &&
+          data['shopRejectedAt'] == null &&
+          <String>{
+            'accepted',
+            'awaiting_shipping_booking',
+            'awaiting_shop_confirmation',
+          }.contains(order.status);
       final bool awaitingShopDecision =
           (order.status == 'accepted' &&
           driverId.isNotEmpty &&
           order.preparingStartTime == null &&
           data['shopDecisionStatus'] != 'rejected' &&
           data['shopRejectedAt'] == null);
-      return awaitingShopDecision ? order : null;
+      return (awaitingShopDecision || awaitingNationwideShopDecision)
+          ? order
+          : null;
     } catch (error) {
       debugPrint('Failed to load actionable order $orderId: $error');
       return null;
@@ -1071,6 +1110,10 @@ class NotificationService {
           ...updatedOrder.toMap(),
           'shopDecisionStatus': 'accepted',
           'shopAcceptedAt': Timestamp.fromDate(now),
+          if (order.orderType == 'nationwide_parcel') ...<String, dynamic>{
+            'shippingStatus': 'merchant_preparing',
+            'shippingStatusLabel': 'ร้านกำลังเตรียมพัสดุ',
+          },
           'shopRejectedAt': FieldValue.delete(),
           'shopRejectedBy': FieldValue.delete(),
           'customerShopChoice': FieldValue.delete(),

@@ -4,6 +4,7 @@ const { defineSecret } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
+const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
@@ -1292,6 +1293,900 @@ exports.askGeminiFlash = onCall(
   },
 );
 
+const GEMINI_API_VERSIONS = ['v1beta', 'v1'];
+const GEMINI_PREFERRED_MODELS = [
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+];
+const AI_CATALOG_CLASSIFIER_VERSION = 'v4';
+const CATALOG_AI_CACHE_COLLECTION = 'catalog_ai_cache';
+const PRODUCT_AI_CACHE_COLLECTION = 'product_ai_cache';
+const AI_CATALOG_IGNORED_DIFF_KEYS = new Set([
+  'catalogType',
+  'catalogTypeSlug',
+  'catalogTypeSort',
+  'catalogHeading',
+  'catalogHeadingSlug',
+  'catalogHeadingSort',
+  'aiCatalogClassifiedAt',
+  'aiCatalogClassifierVersion',
+  'aiCatalogInputHash',
+  'updatedAt',
+]);
+
+function parseJsonFromGeminiParts(parts) {
+  const textOutput = Array.isArray(parts)
+    ? parts.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
+    : '';
+  if (!textOutput) return {};
+  try {
+    const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+  } catch (parseError) {
+    logger.warn('parseJsonFromGeminiParts failed', {
+      message: parseError instanceof Error ? parseError.message : String(parseError),
+      text: textOutput.slice(0, 800),
+    });
+  }
+  return {};
+}
+
+async function discoverGeminiModelNames(apiKey) {
+  const discovered = new Set();
+  for (const apiVersion of GEMINI_API_VERSIONS) {
+    try {
+      const listResp = await fetch(
+        `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+      );
+      if (!listResp.ok) continue;
+      const listPayload = await listResp.json();
+      const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+      for (const model of models) {
+        const name = String(model?.name || '').trim();
+        const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+        const methods = Array.isArray(model?.supportedGenerationMethods)
+          ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+          : [];
+        if (shortName && methods.includes('generateContent') && !/image|imagen/i.test(shortName)) {
+          discovered.add(shortName);
+        }
+      }
+    } catch (listError) {
+      logger.warn('discoverGeminiModelNames failed', {
+        apiVersion,
+        message: listError instanceof Error ? listError.message : String(listError),
+      });
+    }
+  }
+  return discovered;
+}
+
+async function runGeminiJsonPrompt({
+  apiKey,
+  prompt,
+  imageInlineData,
+  logContext = {},
+  temperature = 0.1,
+}) {
+  const discoveredModelNames = await discoverGeminiModelNames(apiKey);
+  const modelCandidates = [...new Set([...GEMINI_PREFERRED_MODELS, ...discoveredModelNames])];
+  let lastErrorStatus = null;
+  let lastErrorBody = '';
+
+  for (const modelName of modelCandidates) {
+    for (const apiVersion of GEMINI_API_VERSIONS) {
+      const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+      const parts = [{ text: prompt }];
+      if (imageInlineData?.data) {
+        parts.push({
+          inlineData: {
+            mimeType: imageInlineData.mimeType || 'image/jpeg',
+            data: imageInlineData.data,
+          },
+        });
+      }
+
+      let response;
+      try {
+        response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts }],
+            generationConfig: {
+              temperature,
+              responseMimeType: 'application/json',
+            },
+          }),
+        });
+      } catch (error) {
+        logger.error('runGeminiJsonPrompt network error', {
+          ...logContext,
+          model: modelName,
+          apiVersion,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        lastErrorStatus = response.status;
+        lastErrorBody = errorBody;
+        const lowered = errorBody.toLowerCase();
+        const canTryNext =
+          lowered.includes('not found') ||
+          lowered.includes('unsupported') ||
+          lowered.includes('method not found') ||
+          lowered.includes('model') ||
+          lowered.includes('invalid json payload') ||
+          lowered.includes('unknown name') ||
+          lowered.includes('cannot find field') ||
+          lowered.includes('responsemimetype');
+        if (canTryNext) continue;
+        throw new Error(`Gemini upstream error ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const resultParts = payload?.candidates?.[0]?.content?.parts;
+      const analysis = parseJsonFromGeminiParts(resultParts);
+      if (Object.keys(analysis).length > 0) {
+        return {
+          analysis,
+          model: `${modelName}@${apiVersion}`,
+        };
+      }
+
+      lastErrorStatus = 200;
+      lastErrorBody = JSON.stringify(payload).slice(0, 1000);
+    }
+  }
+
+  logger.error('runGeminiJsonPrompt no available model', {
+    ...logContext,
+    lastErrorStatus,
+    lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
+  });
+  throw new Error('No Gemini model available for JSON prompt');
+}
+
+function readFirstProductImageUrl(product) {
+  const thumbnailUrls = Array.isArray(product?.thumbnailUrls) ? product.thumbnailUrls : [];
+  for (const url of thumbnailUrls) {
+    const trimmed = String(url || '').trim();
+    if (trimmed) return trimmed;
+  }
+  const imageUrls = Array.isArray(product?.imageUrls) ? product.imageUrls : [];
+  for (const url of imageUrls) {
+    const trimmed = String(url || '').trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+async function fetchImageAsInlineData(imageUrl) {
+  const url = String(imageUrl || '').trim();
+  if (!url) return null;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      logger.warn('fetchImageAsInlineData upstream error', {
+        status: response.status,
+        url: url.slice(0, 160),
+      });
+      return null;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > 5 * 1024 * 1024) {
+      logger.warn('fetchImageAsInlineData image too large', { bytes: buffer.length });
+      return null;
+    }
+
+    const contentType = String(response.headers.get('content-type') || 'image/jpeg')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const allowedMimeTypes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+    const normalizedMimeType = contentType === 'image/jpg' ? 'image/jpeg' : contentType;
+    const mimeType = allowedMimeTypes.has(normalizedMimeType) ? normalizedMimeType : 'image/jpeg';
+    return { mimeType, data: buffer.toString('base64') };
+  } catch (error) {
+    logger.warn('fetchImageAsInlineData failed', {
+      url: url.slice(0, 160),
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function resolveCatalogTypeFromProduct(product) {
+  const category = String(product?.productCategory || '').trim();
+  const type = String(product?.aiProductType || product?.productType || '').trim();
+  const source = `${category} ${type} ${String(product?.name || '').trim()}`.toLowerCase();
+
+  if (/ผลไม้|fruit/.test(source)) return 'ผลไม้';
+  if (/ผัก|vegetable|ผักสด/.test(source)) return 'ผักสด';
+  if (/เนื้อ|หมู|ไก่|ปลา|กุ้ง|ปู|หอย|ทะเล|seafood|meat|chicken|pork|beef|fish/.test(source)) {
+    return 'ของสด';
+  }
+  if (/เครื่องดื่ม|น้ำ|ชา|กาแฟ|beverage|drink/.test(source)) return 'เครื่องดื่ม';
+  if (/อาหาร|ข้าว|แกง|ผัด|ทอด|ต้ม|ยำ|พร้อมทาน|prepared|cooked/.test(source)) return 'อาหาร';
+  if (/ยา|เวชภัณฑ์|pharmacy|medicine|drug/.test(source)) return 'ยาและเวชภัณฑ์';
+  if (/ของแห้ง|dry|แห้ง/.test(source)) return 'ของแห้ง';
+
+  return type || category || 'อื่นๆ';
+}
+
+function computeAiCatalogInputHash(product) {
+  const payload = JSON.stringify({
+    name: String(product?.name || '').trim(),
+    description: String(product?.description || '').trim(),
+    firstImageUrl: readFirstProductImageUrl(product),
+    productCategory: String(product?.productCategory || '').trim(),
+    aiProductType: String(product?.aiProductType || product?.productType || '').trim(),
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+function normalizeCatalogHeadingSlug(raw, fallbackLabel) {
+  const source = String(raw || fallbackLabel || '').trim();
+  if (!source) return 'other';
+  const slug = source
+    .normalize('NFKC')
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}\-_]/gu, '')
+    .slice(0, 80);
+  if (slug) return slug;
+  return crypto.createHash('sha256').update(source).digest('hex').slice(0, 16);
+}
+
+function catalogAiFieldsOnlyChanged(before, after) {
+  const allKeys = new Set([
+    ...Object.keys(before || {}),
+    ...Object.keys(after || {}),
+  ]);
+
+  for (const key of allKeys) {
+    if (AI_CATALOG_IGNORED_DIFF_KEYS.has(key)) continue;
+    const beforeValue = before?.[key];
+    const afterValue = after?.[key];
+    if (JSON.stringify(beforeValue) !== JSON.stringify(afterValue)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function shouldSkipProductCatalogClassify({ before, after, productId }) {
+  if (!after) {
+    return 'deleted';
+  }
+
+  if (after.isActive !== true) {
+    return 'inactive';
+  }
+
+  if (String(after.adminReviewStatus || '').trim() === 'pending') {
+    return 'pending_review';
+  }
+
+  if (after.aiIsLegalInThailand === false) {
+    return 'illegal';
+  }
+
+  const productName = String(after.name || '').trim();
+  const firstImageUrl = readFirstProductImageUrl(after);
+  if (!productName && !firstImageUrl) {
+    return 'missing_input';
+  }
+
+  const inputHash = computeAiCatalogInputHash(after);
+  const classifierVersion = String(after.aiCatalogClassifierVersion || '').trim();
+  const expectedType = resolveCatalogTypeFromProduct(after);
+  if (
+    String(after.aiCatalogInputHash || '').trim() === inputHash
+    && String(after.catalogType || '').trim() === expectedType
+    && String(after.catalogHeading || '').trim()
+    && classifierVersion === AI_CATALOG_CLASSIFIER_VERSION
+  ) {
+    return 'already_classified';
+  }
+
+  if (
+    before
+    && String(before.catalogHeading || '').trim()
+    && catalogAiFieldsOnlyChanged(before, after)
+  ) {
+    return 'catalog_fields_only';
+  }
+
+  return null;
+}
+
+async function loadCatalogAiCache(inputHash) {
+  const snap = await db.collection(CATALOG_AI_CACHE_COLLECTION).doc(inputHash).get();
+  if (!snap.exists) {
+    return null;
+  }
+  const data = snap.data() || {};
+  const cacheVersion = String(data.aiCatalogClassifierVersion || '').trim();
+  if (cacheVersion !== AI_CATALOG_CLASSIFIER_VERSION) {
+    return null;
+  }
+  const catalogHeading = String(data.catalogHeading || '').trim();
+  if (!catalogHeading) {
+    return null;
+  }
+  const catalogType = String(data.catalogType || '').trim();
+  const catalogHeadingSlug = String(data.catalogHeadingSlug || '').trim()
+    || normalizeCatalogHeadingSlug(catalogHeading, catalogHeading);
+  return {
+    catalogType,
+    catalogTypeSlug: String(data.catalogTypeSlug || '').trim()
+      || (catalogType ? normalizeCatalogHeadingSlug(null, catalogType) : ''),
+    catalogHeading,
+    catalogHeadingSlug,
+    aiCatalogClassifierVersion: cacheVersion,
+    model: String(data.model || 'cache').trim(),
+  };
+}
+
+async function saveCatalogAiCache(inputHash, classification, sourceProductId) {
+  const ref = db.collection(CATALOG_AI_CACHE_COLLECTION).doc(inputHash);
+  const existing = await ref.get();
+  await ref.set({
+    inputHash,
+    catalogType: classification.catalogType || null,
+    catalogTypeSlug: classification.catalogTypeSlug || null,
+    catalogHeading: classification.catalogHeading,
+    catalogHeadingSlug: classification.catalogHeadingSlug,
+    aiCatalogClassifierVersion:
+      classification.aiCatalogClassifierVersion || AI_CATALOG_CLASSIFIER_VERSION,
+    sourceProductId: sourceProductId || null,
+    model: classification.model || null,
+    usageCount: FieldValue.increment(1),
+    updatedAt: FieldValue.serverTimestamp(),
+    createdAt: existing.exists
+      ? existing.data()?.createdAt || FieldValue.serverTimestamp()
+      : FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+async function finalizeCatalogClassification(product, shopId, headingResult) {
+  const catalogType =
+    String(headingResult.catalogType || '').trim() ||
+    resolveCatalogTypeFromProduct(product);
+  const catalogTypeSlug =
+    String(headingResult.catalogTypeSlug || '').trim() ||
+    normalizeCatalogHeadingSlug(null, catalogType);
+  const { catalogTypeSort, catalogHeadingSort } = await applyCatalogClassificationToShop({
+    shopId,
+    catalogType,
+    catalogTypeSlug,
+    catalogHeading: headingResult.catalogHeading,
+    catalogHeadingSlug: headingResult.catalogHeadingSlug,
+  });
+  return {
+    catalogType,
+    catalogTypeSlug,
+    catalogTypeSort,
+    catalogHeading: headingResult.catalogHeading,
+    catalogHeadingSlug: headingResult.catalogHeadingSlug,
+    catalogHeadingSort,
+    aiCatalogInputHash: computeAiCatalogInputHash(product),
+    aiCatalogClassifierVersion: AI_CATALOG_CLASSIFIER_VERSION,
+    model: headingResult.model || null,
+  };
+}
+
+async function findPriorClassifiedProduct(inputHash) {
+  const snapshot = await db.collection('products')
+    .where('aiCatalogInputHash', '==', inputHash)
+    .limit(5)
+    .get();
+  for (const doc of snapshot.docs) {
+    const data = doc.data() || {};
+    const classifierVersion = String(data.aiCatalogClassifierVersion || '').trim();
+    if (classifierVersion !== AI_CATALOG_CLASSIFIER_VERSION) {
+      continue;
+    }
+    const catalogHeading = String(data.catalogHeading || '').trim();
+    if (!catalogHeading) {
+      continue;
+    }
+    const catalogType = String(data.catalogType || '').trim();
+    return {
+      productId: doc.id,
+      catalogType,
+      catalogTypeSlug: String(data.catalogTypeSlug || '').trim()
+        || (catalogType ? normalizeCatalogHeadingSlug(null, catalogType) : ''),
+      catalogHeading,
+      catalogHeadingSlug: String(data.catalogHeadingSlug || '').trim()
+        || normalizeCatalogHeadingSlug(catalogHeading, catalogHeading),
+      aiCatalogClassifierVersion: classifierVersion,
+    };
+  }
+  return null;
+}
+
+async function applyCatalogClassificationToShop({
+  shopId,
+  catalogType,
+  catalogTypeSlug,
+  catalogHeading,
+  catalogHeadingSlug,
+}) {
+  const catalogTypeSort = await upsertShopCatalogType({
+    shopId,
+    slug: catalogTypeSlug,
+    label: catalogType,
+  });
+  const catalogHeadingSort = await upsertShopCatalogHeading({
+    shopId,
+    slug: catalogHeadingSlug,
+    label: catalogHeading,
+    catalogTypeSlug,
+    reuseExisting: true,
+  });
+  return { catalogTypeSort, catalogHeadingSort };
+}
+
+async function resolveProductCatalogClassification({
+  product,
+  shopId,
+  productId,
+  apiKey,
+}) {
+  const inputHash = computeAiCatalogInputHash(product);
+
+  const cached = await loadCatalogAiCache(inputHash);
+  if (cached) {
+    await db.collection(CATALOG_AI_CACHE_COLLECTION).doc(inputHash).set({
+      usageCount: FieldValue.increment(1),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    const classification = await finalizeCatalogClassification(product, shopId, cached);
+    return {
+      ...classification,
+      fromCache: 'catalog_ai_cache',
+    };
+  }
+
+  const priorProduct = await findPriorClassifiedProduct(inputHash);
+  if (priorProduct) {
+    const classification = await finalizeCatalogClassification(product, shopId, priorProduct);
+    await saveCatalogAiCache(inputHash, classification, priorProduct.productId);
+    return {
+      ...classification,
+      fromCache: 'prior_product',
+    };
+  }
+
+  const headingResult = await classifyProductCatalogHeading({
+    product,
+    shopId,
+    productId,
+    apiKey,
+  });
+  const classification = await finalizeCatalogClassification(product, shopId, headingResult);
+  await saveCatalogAiCache(inputHash, classification, productId);
+  return {
+    ...classification,
+    fromCache: false,
+  };
+}
+
+function computeProductAiAnalysisHash({
+  productName,
+  description,
+  category,
+  unit,
+  price,
+  imageBase64,
+}) {
+  const imageHash = crypto.createHash('sha256').update(String(imageBase64 || '')).digest('hex');
+  return crypto.createHash('sha256').update(JSON.stringify({
+    productName: String(productName || '').trim(),
+    description: String(description || '').trim(),
+    category: String(category || '').trim(),
+    unit: String(unit || '').trim(),
+    price: String(price || '').trim(),
+    imageHash,
+  })).digest('hex');
+}
+
+async function loadProductAiCache(inputHash) {
+  const snap = await db.collection(PRODUCT_AI_CACHE_COLLECTION).doc(inputHash).get();
+  if (!snap.exists) {
+    return null;
+  }
+  const data = snap.data() || {};
+  if (!String(data.productCategory || data.productType || data.description || '').trim()) {
+    return null;
+  }
+  return data;
+}
+
+async function saveProductAiCache(inputHash, analysis, model) {
+  const ref = db.collection(PRODUCT_AI_CACHE_COLLECTION).doc(inputHash);
+  const existing = await ref.get();
+  await ref.set({
+    inputHash,
+    productName: String(analysis.productName || '').trim(),
+    description: String(analysis.description || '').trim(),
+    isLegalInThailand: analysis.isLegalInThailand === true,
+    legalReason: String(analysis.legalReason || '').trim(),
+    productType: String(analysis.productType || '').trim(),
+    productCategory: String(analysis.productCategory || '').trim(),
+    taxStatus: String(analysis.taxStatus || '').trim(),
+    taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
+    taxReason: String(analysis.taxReason || '').trim(),
+    isFreshProduct: analysis.isFreshProduct === true,
+    isProcessed: analysis.isProcessed === true,
+    canShipNationwide: analysis.canShipNationwide === true,
+    nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+    model: model || null,
+    usageCount: FieldValue.increment(1),
+    updatedAt: FieldValue.serverTimestamp(),
+    createdAt: existing.exists
+      ? existing.data()?.createdAt || FieldValue.serverTimestamp()
+      : FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+async function loadShopCatalogTypes(shopId) {
+  const snapshot = await db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_types')
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    slug: doc.id,
+    label: String(doc.data()?.label || doc.id).trim(),
+    sortOrder: parseNumber(doc.data()?.sortOrder),
+  }));
+}
+
+async function loadShopCatalogHeadings(shopId) {
+  const snapshot = await db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_headings')
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    slug: doc.id,
+    label: String(doc.data()?.label || doc.id).trim(),
+    sortOrder: parseNumber(doc.data()?.sortOrder),
+    catalogTypeSlug: String(doc.data()?.catalogTypeSlug || '').trim(),
+  }));
+}
+
+async function resolveCatalogTypeSortOrder(shopId, slug) {
+  const ref = db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_types')
+    .doc(slug);
+  const existing = await ref.get();
+  if (existing.exists) {
+    return parseNumber(existing.data()?.sortOrder) || 0;
+  }
+
+  const snapshot = await db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_types')
+    .get();
+  let maxSort = 0;
+  snapshot.docs.forEach((doc) => {
+    maxSort = Math.max(maxSort, parseNumber(doc.data()?.sortOrder));
+  });
+  return maxSort + 10;
+}
+
+async function upsertShopCatalogType({
+  shopId,
+  slug,
+  label,
+}) {
+  const ref = db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_types')
+    .doc(slug);
+  const existing = await ref.get();
+
+  if (existing.exists) {
+    await ref.set({
+      label,
+      usageCount: FieldValue.increment(1),
+      updatedAt: FieldValue.serverTimestamp(),
+      source: 'ai',
+    }, { merge: true });
+    return parseNumber(existing.data()?.sortOrder) || 0;
+  }
+
+  const sortOrder = await resolveCatalogTypeSortOrder(shopId, slug);
+  await ref.set({
+    label,
+    sortOrder,
+    source: 'ai',
+    usageCount: 1,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return sortOrder;
+}
+
+async function resolveCatalogHeadingSortOrder(shopId, slug) {
+  const ref = db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_headings')
+    .doc(slug);
+  const existing = await ref.get();
+  if (existing.exists) {
+    return parseNumber(existing.data()?.sortOrder) || 0;
+  }
+
+  const snapshot = await db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_headings')
+    .get();
+  let maxSort = 0;
+  snapshot.docs.forEach((doc) => {
+    maxSort = Math.max(maxSort, parseNumber(doc.data()?.sortOrder));
+  });
+  return maxSort + 10;
+}
+
+async function upsertShopCatalogHeading({
+  shopId,
+  slug,
+  label,
+  catalogTypeSlug,
+  reuseExisting,
+}) {
+  const ref = db
+    .collection('public_shops')
+    .doc(shopId)
+    .collection('catalog_headings')
+    .doc(slug);
+  const existing = await ref.get();
+  const normalizedTypeSlug = String(catalogTypeSlug || '').trim();
+
+  if (existing.exists) {
+    await ref.set({
+      label,
+      catalogTypeSlug: normalizedTypeSlug || existing.data()?.catalogTypeSlug || null,
+      usageCount: FieldValue.increment(1),
+      updatedAt: FieldValue.serverTimestamp(),
+      source: 'ai',
+    }, { merge: true });
+    return parseNumber(existing.data()?.sortOrder) || 0;
+  }
+
+  const sortOrder = await resolveCatalogHeadingSortOrder(shopId, slug);
+  await ref.set({
+    label,
+    catalogTypeSlug: normalizedTypeSlug || null,
+    sortOrder,
+    source: 'ai',
+    usageCount: 1,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  return sortOrder;
+}
+
+async function classifyProductCatalogHeading({
+  product,
+  shopId,
+  productId,
+  apiKey,
+}) {
+  const existingHeadings = await loadShopCatalogHeadings(shopId);
+  const existingTypes = await loadShopCatalogTypes(shopId);
+  const existingTypeSummary = existingTypes.length > 0
+    ? existingTypes.map((entry) => `${entry.slug}:${entry.label}`).join(', ')
+    : '(none yet)';
+  const existingHeadingSummary = existingHeadings.length > 0
+    ? existingHeadings
+      .map((entry) => `${entry.catalogTypeSlug || 'unknown-type'}:${entry.slug}:${entry.label}`)
+      .join(', ')
+    : '(none yet)';
+
+  const firstImageUrl = readFirstProductImageUrl(product);
+  const imageInlineData = firstImageUrl ? await fetchImageAsInlineData(firstImageUrl) : null;
+
+  const prompt = [
+    'You classify one active Thai merchant product into a customer-facing catalog type (ประเภท) and heading (หัวข้อ) for a Thai shopping app.',
+    'Return JSON only.',
+    'Do NOT use the raw product name as catalogType. catalogType is a broad shelf button. catalogHeading is the narrower group inside that type.',
+    'Important Thai market taxonomy rules:',
+    '- ของสด is for raw meat, chicken, fish, seafood, eggs, and similar fresh animal/protein items. Do NOT put fruit under ของสด.',
+    '- ผลไม้ is for fruit such as mango, orange, banana, durian, apple.',
+    '- ผักสด is for fresh vegetables and herbs.',
+    '- อาหาร is for cooked/ready-to-eat food.',
+    '- เครื่องดื่ม is for beverages.',
+    '- ของแห้ง is for dry/shelf-stable grocery items.',
+    '- ยาและเวชภัณฑ์ is for pharmacy/medical items.',
+    'Examples: product mango => catalogType ผลไม้, catalogHeading มะม่วง. product chicken breast => catalogType ของสด, catalogHeading ไก่สด. product fish => catalogType ของสด, catalogHeading ปลาสด.',
+    'Prefer reusing an existing heading label/slug when the product clearly fits.',
+    'Prefer reusing an existing type label/slug when the broad type clearly fits.',
+    'Create a new concise Thai type or heading only when nothing existing fits.',
+    'JSON schema only:',
+    '{"catalogType":"Thai broad type label","catalogTypeSlug":"stable type slug","catalogHeading":"Thai heading label","catalogHeadingSlug":"stable heading slug","reuseExistingType":true/false,"reuseExistingHeading":true/false}',
+    `Existing types: ${existingTypeSummary}.`,
+    `Existing headings by type: ${existingHeadingSummary}.`,
+    `Product name: ${String(product.name || '-').trim()}.`,
+    `Description: ${String(product.description || '-').trim()}.`,
+    `Product category: ${String(product.productCategory || '-').trim()}.`,
+    `Raw AI product type (reference only, may be too narrow): ${String(product.aiProductType || product.productType || '-').trim()}.`,
+  ].join(' ');
+
+  const { analysis, model } = await runGeminiJsonPrompt({
+    apiKey,
+    prompt,
+    imageInlineData,
+    logContext: { productId, shopId, trigger: 'onProductCatalogClassify' },
+  });
+
+  const catalogType =
+    String(analysis.catalogType || '').trim() ||
+    resolveCatalogTypeFromProduct(product);
+  if (!catalogType) {
+    throw new Error('Gemini returned empty catalogType');
+  }
+  const catalogHeading = String(analysis.catalogHeading || '').trim();
+  if (!catalogHeading) {
+    throw new Error('Gemini returned empty catalogHeading');
+  }
+
+  let catalogTypeSlug = normalizeCatalogHeadingSlug(
+    analysis.catalogTypeSlug,
+    catalogType,
+  );
+  if (analysis.reuseExistingType === true) {
+    const matchedType = existingTypes.find(
+      (entry) => entry.slug === catalogTypeSlug || entry.label === catalogType,
+    );
+    if (matchedType) {
+      catalogTypeSlug = matchedType.slug;
+    }
+  }
+
+  let catalogHeadingSlug = normalizeCatalogHeadingSlug(
+    analysis.catalogHeadingSlug,
+    catalogHeading,
+  );
+
+  if (analysis.reuseExistingHeading === true) {
+    const matchedHeading = existingHeadings.find(
+      (entry) => entry.slug === catalogHeadingSlug || entry.label === catalogHeading,
+    );
+    if (matchedHeading) {
+      catalogHeadingSlug = matchedHeading.slug;
+    }
+  }
+
+  return {
+    catalogType,
+    catalogTypeSlug,
+    catalogHeading,
+    catalogHeadingSlug,
+    model,
+  };
+}
+
+exports.onProductCatalogClassify = onDocumentWritten(
+  {
+    document: 'products/{productId}',
+    region: DEFAULT_REGION,
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 90,
+    memory: '512MiB',
+  },
+  async (event) => {
+    const productId = event.params.productId;
+    const before = event.data?.before?.exists ? event.data.before.data() : null;
+    const after = event.data?.after?.exists ? event.data.after.data() : null;
+    const skipReason = shouldSkipProductCatalogClassify({ before, after, productId });
+
+    if (skipReason) {
+      logger.info('onProductCatalogClassify skipped', { productId, skipReason });
+      return null;
+    }
+
+    const shopId = String(after.ownerUid || after.ownerId || '').trim();
+    if (!shopId) {
+      logger.warn('onProductCatalogClassify missing ownerUid', { productId });
+      return null;
+    }
+
+    const apiKey = String(GEMINI_API_KEY.value() || '').trim();
+    if (!apiKey) {
+      logger.error('onProductCatalogClassify missing GEMINI_API_KEY', { productId });
+      return null;
+    }
+
+    let queueLease = null;
+    let queueFinalStatus = 'completed';
+
+    try {
+      const inputHash = computeAiCatalogInputHash(after);
+      const cachedBeforeAi = await loadCatalogAiCache(inputHash);
+      const priorBeforeAi = cachedBeforeAi ? null : await findPriorClassifiedProduct(inputHash);
+      const needsAi = !cachedBeforeAi && !priorBeforeAi;
+
+      if (needsAi) {
+        try {
+          queueLease = await acquireAiProcessingSlot({
+            uid: shopId,
+            requestId: `catalog-${productId}`,
+          });
+        } catch (queueError) {
+          logger.warn('onProductCatalogClassify queue rejected', {
+            productId,
+            message: queueError instanceof Error ? queueError.message : String(queueError),
+          });
+          return null;
+        }
+      }
+
+      const classification = await resolveProductCatalogClassification({
+        product: after,
+        shopId,
+        productId,
+        apiKey,
+      });
+
+      await db.collection('products').doc(productId).set({
+        catalogType: classification.catalogType,
+        catalogTypeSlug: classification.catalogTypeSlug,
+        catalogTypeSort: classification.catalogTypeSort,
+        catalogHeading: classification.catalogHeading,
+        catalogHeadingSlug: classification.catalogHeadingSlug,
+        catalogHeadingSort: classification.catalogHeadingSort,
+        aiCatalogInputHash: classification.aiCatalogInputHash,
+        aiCatalogClassifierVersion: classification.aiCatalogClassifierVersion,
+        aiCatalogClassifiedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      logger.info('onProductCatalogClassify completed', {
+        productId,
+        shopId,
+        catalogType: classification.catalogType,
+        catalogTypeSlug: classification.catalogTypeSlug,
+        catalogHeading: classification.catalogHeading,
+        catalogHeadingSlug: classification.catalogHeadingSlug,
+        model: classification.model,
+        fromCache: classification.fromCache,
+      });
+      return null;
+    } catch (error) {
+      queueFinalStatus = 'failed';
+      logger.error('onProductCatalogClassify failed', {
+        productId,
+        shopId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    } finally {
+      if (queueLease) {
+        await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+      }
+    }
+  },
+);
+
 exports.analyzeProductWithAi = onCall(
   {
     region: DEFAULT_REGION,
@@ -1325,6 +2220,46 @@ exports.analyzeProductWithAi = onCall(
       throw new HttpsError('failed-precondition', 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY');
     }
 
+    const productName = String(request.data?.productName || '').trim();
+    const description = String(request.data?.description || '').trim();
+    const category = String(request.data?.category || '').trim();
+    const unit = String(request.data?.unit || '').trim();
+    const price = String(request.data?.price || '').trim();
+    const analysisInputHash = computeProductAiAnalysisHash({
+      productName,
+      description,
+      category,
+      unit,
+      price,
+      imageBase64,
+    });
+    const cachedAnalysis = await loadProductAiCache(analysisInputHash);
+    if (cachedAnalysis) {
+      await db.collection(PRODUCT_AI_CACHE_COLLECTION).doc(analysisInputHash).set({
+        usageCount: FieldValue.increment(1),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return {
+        productName: String(cachedAnalysis.productName || '').trim(),
+        description: String(cachedAnalysis.description || '').trim(),
+        isLegalInThailand: cachedAnalysis.isLegalInThailand === true,
+        legalReason: String(cachedAnalysis.legalReason || '').trim(),
+        productType: String(cachedAnalysis.productType || '').trim(),
+        productCategory: String(cachedAnalysis.productCategory || '').trim(),
+        taxStatus: String(cachedAnalysis.taxStatus || '').trim(),
+        taxStatusLabel: String(cachedAnalysis.taxStatusLabel || '').trim(),
+        taxReason: String(cachedAnalysis.taxReason || '').trim(),
+        isFreshProduct: cachedAnalysis.isFreshProduct === true,
+        isProcessed: cachedAnalysis.isProcessed === true,
+        canShipNationwide: cachedAnalysis.canShipNationwide === true,
+        nationwideShippingReason: String(cachedAnalysis.nationwideShippingReason || '').trim(),
+        model: String(cachedAnalysis.model || 'cache').trim(),
+        queuePosition: 0,
+        estimatedWaitSeconds: 0,
+        fromCache: true,
+      };
+    }
+
     const queueLease = await acquireAiProcessingSlot({
       uid: request.auth.uid,
       requestId: request.data?.requestId,
@@ -1332,11 +2267,6 @@ exports.analyzeProductWithAi = onCall(
     let queueFinalStatus = 'completed';
 
     try {
-      const productName = String(request.data?.productName || '').trim();
-      const description = String(request.data?.description || '').trim();
-      const category = String(request.data?.category || '').trim();
-      const unit = String(request.data?.unit || '').trim();
-      const price = String(request.data?.price || '').trim();
       const apiVersions = ['v1beta', 'v1'];
       const preferredModels = [
         'gemini-2.5-flash',
@@ -1512,7 +2442,7 @@ exports.analyzeProductWithAi = onCall(
         throw new HttpsError('unimplemented', 'โมเดล AI สำหรับวิเคราะห์สินค้ายังไม่พร้อมใช้งานในโปรเจกต์นี้');
       }
 
-      return {
+      const result = {
         productName: String(analysis.productName || '').trim(),
         description: String(analysis.description || '').trim(),
         isLegalInThailand: analysis.isLegalInThailand === true,
@@ -1530,6 +2460,12 @@ exports.analyzeProductWithAi = onCall(
         queuePosition: queueLease.position,
         estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
       };
+      await saveProductAiCache(
+        analysisInputHash,
+        result,
+        result.model,
+      );
+      return result;
     } catch (error) {
       queueFinalStatus = 'failed';
       throw error;

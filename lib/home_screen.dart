@@ -102,21 +102,24 @@ class _HomeScreenState extends State<HomeScreen>
 
     _shopOperationsSubscription?.cancel();
     _shopOperationsSubscription = ShopOperationsService.streamSettings(user.uid)
-        .listen((settings) {
-          final changed = _notifyNewOrdersEnabled != settings.notifyNewOrders;
-          if (!mounted) {
-            _notifyNewOrdersEnabled = settings.notifyNewOrders;
-            return;
-          }
-          setState(() {
-            _notifyNewOrdersEnabled = settings.notifyNewOrders;
-          });
-          if (changed) {
-            _listenUnreadAppNotifications();
-          }
-        }, onError: (error) {
-          debugPrint('Failed to listen shop operation settings: $error');
-        });
+        .listen(
+          (settings) {
+            final changed = _notifyNewOrdersEnabled != settings.notifyNewOrders;
+            if (!mounted) {
+              _notifyNewOrdersEnabled = settings.notifyNewOrders;
+              return;
+            }
+            setState(() {
+              _notifyNewOrdersEnabled = settings.notifyNewOrders;
+            });
+            if (changed) {
+              _listenUnreadAppNotifications();
+            }
+          },
+          onError: (error) {
+            debugPrint('Failed to listen shop operation settings: $error');
+          },
+        );
   }
 
   bool _isIncomingOrderNotification(Map<String, dynamic> data) {
@@ -233,25 +236,26 @@ class _HomeScreenState extends State<HomeScreen>
         .snapshots()
         .listen(
           (snapshot) {
-            final docs = snapshot.docs
-                .where((doc) {
-                  if (_notifyNewOrdersEnabled) {
-                    return true;
-                  }
-                  return !_isIncomingOrderNotification(doc.data());
-                })
-                .toList(growable: false)
-              ..sort((a, b) {
-                final aTime =
-                    (a.data()['createdAt'] as Timestamp?)
-                        ?.millisecondsSinceEpoch ??
-                    0;
-                final bTime =
-                    (b.data()['createdAt'] as Timestamp?)
-                        ?.millisecondsSinceEpoch ??
-                    0;
-                return bTime.compareTo(aTime);
-              });
+            final docs =
+                snapshot.docs
+                    .where((doc) {
+                      if (_notifyNewOrdersEnabled) {
+                        return true;
+                      }
+                      return !_isIncomingOrderNotification(doc.data());
+                    })
+                    .toList(growable: false)
+                  ..sort((a, b) {
+                    final aTime =
+                        (a.data()['createdAt'] as Timestamp?)
+                            ?.millisecondsSinceEpoch ??
+                        0;
+                    final bTime =
+                        (b.data()['createdAt'] as Timestamp?)
+                            ?.millisecondsSinceEpoch ??
+                        0;
+                    return bTime.compareTo(aTime);
+                  });
 
             final currentIds = docs.map((doc) => doc.id).toSet();
             final newDocs = _didPrimeNotifications
@@ -1137,213 +1141,488 @@ class _HomeDashboard extends StatelessWidget {
                     ),
                   );
                 }
-                return GridView.builder(
-                  padding: const EdgeInsets.all(16),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    mainAxisSpacing: 16,
-                    crossAxisSpacing: 16,
-                  ),
-                  itemCount: docs.length,
-                  itemBuilder: (context, index) {
-                    final doc = docs[index];
-                    final data = doc.data;
-                    final List<String> thumbnailImages = _extractImages(
-                      data,
-                      preferThumbnails: true,
-                    );
-                    final String? imageUrl = thumbnailImages.isNotEmpty
-                        ? thumbnailImages.first
-                        : null;
-                    final name = (data['name'] ?? '').toString();
-                    final price = (data['price'] ?? '').toString();
-                    final stock = data['stock']?.toString() ?? '0';
-                    final description = (data['description'] ?? '').toString();
+                String? selectedTypeKey;
+                final typeGroups = _groupHomeProductsByType(docs);
+                final showTypeFilters =
+                    typeGroups.length > 1 ||
+                    (typeGroups.isNotEmpty &&
+                        typeGroups.first.label != 'อื่นๆ');
 
-                    return GestureDetector(
-                      onTap: () {
-                        _prefetchProductVideos(docs, index);
-                        // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
-                        final List<String> allImages = _extractImages(
-                          data,
-                          preferThumbnails: false,
-                        );
-                        // กรอง videoUrl ออกจาก imageUrls
-                        final videoUrl = data['videoUrl'] as String?;
-                        final filteredImages = videoUrl != null
-                            ? allImages.where((url) => url != videoUrl).toList()
-                            : allImages;
-                        final selectedImageUrl = imageUrl;
-                        final List<String> galleryImages =
-                            selectedImageUrl != null
-                            ? [
-                                selectedImageUrl,
-                                ...filteredImages.where(
-                                  (url) => url != selectedImageUrl,
+                return StatefulBuilder(
+                  builder: (context, setFilterState) {
+                    final visibleDocs = selectedTypeKey == null
+                        ? docs
+                        : typeGroups
+                              .where((group) => group.key == selectedTypeKey)
+                              .expand((group) => group.products)
+                              .toList(growable: false);
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showTypeFilters) ...[
+                          SizedBox(
+                            height: 58,
+                            child: ListView(
+                              scrollDirection: Axis.horizontal,
+                              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: FilterChip(
+                                    label: const Text('ทั้งหมด'),
+                                    selected: selectedTypeKey == null,
+                                    onSelected: (_) => setFilterState(
+                                      () => selectedTypeKey = null,
+                                    ),
+                                    selectedColor: const Color(0xFFFFEDD5),
+                                    checkmarkColor: AppColors.accent,
+                                  ),
                                 ),
-                              ]
-                            : filteredImages;
-                        final modalData = Map<String, dynamic>.from(data);
-                        modalData['imageUrls'] = galleryImages;
-                        _showProductGallery(context, modalData);
-                      },
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Colors.black12,
-                              blurRadius: 6,
-                              offset: Offset(0, 3),
+                                for (final group in typeGroups)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: FilterChip(
+                                      label: Text(group.label),
+                                      selected: selectedTypeKey == group.key,
+                                      onSelected: (_) => setFilterState(
+                                        () => selectedTypeKey = group.key,
+                                      ),
+                                      selectedColor: const Color(0xFFFFEDD5),
+                                      checkmarkColor: AppColors.accent,
+                                    ),
+                                  ),
+                              ],
                             ),
-                          ],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
-                          child: Stack(
-                            children: [
-                              Positioned.fill(
-                                child: imageUrl != null
-                                    ? Stack(
-                                        children: [
-                                          Positioned.fill(
-                                            child: CachedNetworkImage(
-                                              imageUrl: imageUrl,
-                                              fit: BoxFit.cover,
-                                              memCacheWidth:
-                                                  500, // Optimize memory usage
-                                              maxWidthDiskCache:
-                                                  800, // Optimize disk storage
-                                              placeholder: (context, url) =>
-                                                  Container(
-                                                    color: Colors.grey[100],
-                                                    alignment: Alignment.center,
-                                                    child: const SizedBox(
-                                                      width: 24,
-                                                      height: 24,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                            strokeWidth: 2,
-                                                          ),
-                                                    ),
-                                                  ),
-                                              errorWidget:
-                                                  (context, url, error) =>
-                                                      Container(
-                                                        color: Colors.grey[200],
-                                                        alignment:
-                                                            Alignment.center,
-                                                        child: const Icon(
-                                                          Icons.broken_image,
-                                                          size: 36,
-                                                          color: Colors.grey,
-                                                        ),
+                          ),
+                        ],
+                        Expanded(
+                          child: GridView.builder(
+                            padding: const EdgeInsets.all(16),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 2,
+                                  mainAxisSpacing: 16,
+                                  crossAxisSpacing: 16,
+                                ),
+                            itemCount: visibleDocs.length,
+                            itemBuilder: (context, index) {
+                              final doc = visibleDocs[index];
+                              final data = doc.data;
+                              final List<String> thumbnailImages =
+                                  _extractImages(data, preferThumbnails: true);
+                              final String? imageUrl =
+                                  thumbnailImages.isNotEmpty
+                                  ? thumbnailImages.first
+                                  : null;
+                              final name = (data['name'] ?? '').toString();
+                              final price = (data['price'] ?? '').toString();
+                              final stock = data['stock']?.toString() ?? '0';
+                              final description = (data['description'] ?? '')
+                                  .toString();
+
+                              return GestureDetector(
+                                onTap: () {
+                                  _prefetchProductVideos(visibleDocs, index);
+                                  // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
+                                  final List<String> allImages = _extractImages(
+                                    data,
+                                    preferThumbnails: false,
+                                  );
+                                  // กรอง videoUrl ออกจาก imageUrls
+                                  final videoUrl = data['videoUrl'] as String?;
+                                  final filteredImages = videoUrl != null
+                                      ? allImages
+                                            .where((url) => url != videoUrl)
+                                            .toList()
+                                      : allImages;
+                                  final selectedImageUrl = imageUrl;
+                                  final List<String> galleryImages =
+                                      selectedImageUrl != null
+                                      ? [
+                                          selectedImageUrl,
+                                          ...filteredImages.where(
+                                            (url) => url != selectedImageUrl,
+                                          ),
+                                        ]
+                                      : filteredImages;
+                                  final modalData = Map<String, dynamic>.from(
+                                    data,
+                                  );
+                                  modalData['imageUrls'] = galleryImages;
+                                  _showProductGallery(context, modalData);
+                                },
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(16),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Colors.black12,
+                                        blurRadius: 6,
+                                        offset: Offset(0, 3),
+                                      ),
+                                    ],
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Stack(
+                                      children: [
+                                        Positioned.fill(
+                                          child: imageUrl != null
+                                              ? Stack(
+                                                  children: [
+                                                    Positioned.fill(
+                                                      child: CachedNetworkImage(
+                                                        imageUrl: imageUrl,
+                                                        fit: BoxFit.cover,
+                                                        memCacheWidth:
+                                                            500, // Optimize memory usage
+                                                        maxWidthDiskCache:
+                                                            800, // Optimize disk storage
+                                                        placeholder:
+                                                            (
+                                                              context,
+                                                              url,
+                                                            ) => Container(
+                                                              color: Colors
+                                                                  .grey[100],
+                                                              alignment:
+                                                                  Alignment
+                                                                      .center,
+                                                              child: const SizedBox(
+                                                                width: 24,
+                                                                height: 24,
+                                                                child:
+                                                                    CircularProgressIndicator(
+                                                                      strokeWidth:
+                                                                          2,
+                                                                    ),
+                                                              ),
+                                                            ),
+                                                        errorWidget:
+                                                            (
+                                                              context,
+                                                              url,
+                                                              error,
+                                                            ) => Container(
+                                                              color: Colors
+                                                                  .grey[200],
+                                                              alignment:
+                                                                  Alignment
+                                                                      .center,
+                                                              child: const Icon(
+                                                                Icons
+                                                                    .broken_image,
+                                                                size: 36,
+                                                                color:
+                                                                    Colors.grey,
+                                                              ),
+                                                            ),
                                                       ),
+                                                    ),
+                                                  ],
+                                                )
+                                              : Container(
+                                                  color: Colors.grey[200],
+                                                  alignment: Alignment.center,
+                                                  child: const Icon(
+                                                    Icons.image,
+                                                    size: 40,
+                                                    color: Colors.grey,
+                                                  ),
+                                                ),
+                                        ),
+                                        Positioned(
+                                          left: 0,
+                                          right: 0,
+                                          bottom: 0,
+                                          child: Container(
+                                            padding: const EdgeInsets.fromLTRB(
+                                              12,
+                                              14,
+                                              12,
+                                              12,
+                                            ),
+                                            decoration: const BoxDecoration(
+                                              gradient: LinearGradient(
+                                                begin: Alignment.bottomCenter,
+                                                end: Alignment.topCenter,
+                                                colors: [
+                                                  Color(0xCC000000),
+                                                  Color(0x66000000),
+                                                  Color(0x00000000),
+                                                ],
+                                              ),
+                                            ),
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  name,
+                                                  style: const TextStyle(
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: Colors.white,
+                                                    shadows: [
+                                                      Shadow(
+                                                        color: Colors.black54,
+                                                        offset: Offset(0, 1),
+                                                        blurRadius: 2,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  'ราคา: $price บาท',
+                                                  style: const TextStyle(
+                                                    fontSize: 13,
+                                                    color: Colors.white70,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                Text(
+                                                  'สต๊อก: $stock',
+                                                  style: const TextStyle(
+                                                    fontSize: 13,
+                                                    color: Colors.white70,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                                if (description.isNotEmpty) ...[
+                                                  const SizedBox(height: 4),
+                                                  Text(
+                                                    description,
+                                                    style: const TextStyle(
+                                                      fontSize: 12,
+                                                      color: Colors.white70,
+                                                      fontStyle:
+                                                          FontStyle.italic,
+                                                    ),
+                                                    maxLines: 2,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ],
+                                              ],
                                             ),
                                           ),
-                                        ],
-                                      )
-                                    : Container(
-                                        color: Colors.grey[200],
-                                        alignment: Alignment.center,
-                                        child: const Icon(
-                                          Icons.image,
-                                          size: 40,
-                                          color: Colors.grey,
                                         ),
-                                      ),
-                              ),
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 0,
-                                child: Container(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    12,
-                                    14,
-                                    12,
-                                    12,
-                                  ),
-                                  decoration: const BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.bottomCenter,
-                                      end: Alignment.topCenter,
-                                      colors: [
-                                        Color(0xCC000000),
-                                        Color(0x66000000),
-                                        Color(0x00000000),
                                       ],
                                     ),
                                   ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        name,
-                                        style: const TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.white,
-                                          shadows: [
-                                            Shadow(
-                                              color: Colors.black54,
-                                              offset: Offset(0, 1),
-                                              blurRadius: 2,
-                                            ),
-                                          ],
-                                        ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        'ราคา: $price บาท',
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.white70,
-                                        ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      Text(
-                                        'สต๊อก: $stock',
-                                        style: const TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.white70,
-                                        ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      if (description.isNotEmpty) ...[
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          description,
-                                          style: const TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.white70,
-                                            fontStyle: FontStyle.italic,
-                                          ),
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ],
-                                    ],
-                                  ),
                                 ),
-                              ),
-                            ],
+                              );
+                            },
                           ),
                         ),
-                      ),
+                      ],
                     );
                   },
                 );
               },
             ),
     );
+  }
+}
+
+class _HomeProductTypeGroup {
+  const _HomeProductTypeGroup({
+    required this.key,
+    required this.label,
+    required this.sortOrder,
+    required this.products,
+  });
+
+  final String key;
+  final String label;
+  final int sortOrder;
+  final List<CachedProduct> products;
+}
+
+List<_HomeProductTypeGroup> _groupHomeProductsByType(
+  List<CachedProduct> products,
+) {
+  const fallbackType = 'อื่นๆ';
+  const fallbackSort = 999999;
+  final byType = <String, List<CachedProduct>>{};
+  final labelsByKey = <String, String>{};
+  final sortByKey = <String, int>{};
+
+  for (final product in products) {
+    final label = _readHomeProductTypeLabel(product.data);
+    final key = _homeProductTypeKey(label);
+    labelsByKey[key] = label;
+    byType.putIfAbsent(key, () => <CachedProduct>[]).add(product);
+
+    final sort = _parseHomeProductTypeSort(product.data['catalogTypeSort']);
+    if (label != fallbackType && sort != null) {
+      sortByKey[key] = sort;
+    }
+  }
+
+  final groups =
+      byType.entries
+          .map((entry) {
+            final label = labelsByKey[entry.key] ?? fallbackType;
+            return _HomeProductTypeGroup(
+              key: entry.key,
+              label: label,
+              sortOrder: label == fallbackType
+                  ? fallbackSort
+                  : (sortByKey[entry.key] ??
+                        _defaultHomeProductTypeSort(label)),
+              products: entry.value,
+            );
+          })
+          .toList(growable: false)
+        ..sort((left, right) {
+          final sortCompare = left.sortOrder.compareTo(right.sortOrder);
+          if (sortCompare != 0) {
+            return sortCompare;
+          }
+          return left.label.compareTo(right.label);
+        });
+
+  return groups;
+}
+
+String _readHomeProductTypeLabel(Map<String, dynamic> data) {
+  const fallbackType = 'อื่นๆ';
+  final source = [
+    data['name'],
+    data['description'],
+    data['productName'],
+    data['productCategory'],
+    data['aiProductType'],
+    data['productType'],
+    data['catalogHeading'],
+    data['catalogType'],
+  ].map((value) => value?.toString().trim() ?? '').join(' ').toLowerCase();
+
+  if (_homeProductContainsAny(source, const <String>[
+    'แก้วมังกร',
+    'มังกร',
+    'ผลไม้',
+    'fruit',
+    'มะม่วง',
+    'กล้วย',
+    'ส้ม',
+    'ทุเรียน',
+    'แอปเปิล',
+    'แอปเปิ้ล',
+    'องุ่น',
+    'แตงโม',
+    'สับปะรด',
+    'ลำไย',
+    'ลิ้นจี่',
+    'ฝรั่ง',
+    'มังคุด',
+    'เงาะ',
+  ])) {
+    return 'ผลไม้';
+  }
+
+  if (_homeProductContainsAny(source, const <String>[
+    'เนื้อ',
+    'หมู',
+    'ไก่',
+    'ปลา',
+    'กุ้ง',
+    'ปู',
+    'หอย',
+    'ปลาหมึก',
+    'อาหารทะเล',
+    'seafood',
+    'meat',
+    'chicken',
+    'pork',
+    'beef',
+    'fish',
+  ])) {
+    return 'ของสด';
+  }
+
+  if (_homeProductContainsAny(source, const <String>[
+    'ผัก',
+    'ผักสด',
+    'vegetable',
+    'คะน้า',
+    'กะหล่ำ',
+    'ผักบุ้ง',
+    'แตงกวา',
+    'มะเขือ',
+  ])) {
+    return 'ผักสด';
+  }
+
+  if (_homeProductContainsAny(source, const <String>[
+    'เครื่องดื่ม',
+    'น้ำ',
+    'ชา',
+    'กาแฟ',
+    'beverage',
+    'drink',
+  ])) {
+    return 'เครื่องดื่ม';
+  }
+
+  final catalogType = (data['catalogType'] ?? '').toString().trim();
+  if (catalogType.isNotEmpty) {
+    return catalogType;
+  }
+  final aiType = (data['aiProductType'] ?? '').toString().trim();
+  if (aiType.isNotEmpty) {
+    return aiType;
+  }
+  final productType = (data['productType'] ?? '').toString().trim();
+  if (productType.isNotEmpty) {
+    return productType;
+  }
+  return fallbackType;
+}
+
+bool _homeProductContainsAny(String source, List<String> values) {
+  return values.any((value) => source.contains(value));
+}
+
+String _homeProductTypeKey(String label) {
+  final normalized = label.trim();
+  return normalized.isEmpty ? 'อื่นๆ' : normalized;
+}
+
+int? _parseHomeProductTypeSort(Object? value) {
+  if (value is num) {
+    return value.toInt();
+  }
+  if (value is String) {
+    return int.tryParse(value.trim());
+  }
+  return null;
+}
+
+int _defaultHomeProductTypeSort(String label) {
+  switch (label) {
+    case 'ผลไม้':
+      return 10;
+    case 'ผักสด':
+      return 20;
+    case 'ของสด':
+      return 30;
+    case 'เครื่องดื่ม':
+      return 40;
+    default:
+      return 500000;
   }
 }
 

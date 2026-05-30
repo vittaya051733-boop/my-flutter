@@ -83,12 +83,27 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   bool _isAwaitingShopDecision(DetailedOrder order) {
+    if (order.orderType == 'nationwide_parcel' &&
+        order.fulfillmentType == 'external_courier') {
+      return order.status == 'accepted' && order.preparingStartTime == null;
+    }
     return order.status == 'accepted' &&
         order.preparingStartTime == null &&
         (order.driverId?.trim().isNotEmpty ?? false);
   }
 
   bool _hasRiderAcceptedOrder(Map<String, dynamic> data) {
+    if ((data['orderType'] as String?)?.trim() == 'nationwide_parcel' &&
+        (data['fulfillmentType'] as String?)?.trim() == 'external_courier') {
+      return <String>{
+        'accepted',
+        'preparing',
+        'ready',
+        'delivering',
+        'delivered',
+        'awaiting_shipping_booking',
+      }.contains((data['status'] as String?)?.trim() ?? '');
+    }
     final status = (data['status'] as String?)?.trim() ?? '';
     final driverId = (data['driverId'] as String?)?.trim() ?? '';
     return driverId.isNotEmpty &&
@@ -1990,6 +2005,10 @@ extension on _OrderManagementScreenState {
             ...updatedOrder.toMap(),
             'shopDecisionStatus': 'accepted',
             'shopAcceptedAt': Timestamp.fromDate(now),
+            if (order.orderType == 'nationwide_parcel') ...{
+              'shippingStatus': 'merchant_preparing',
+              'shippingStatusLabel': 'ร้านกำลังเตรียมพัสดุ',
+            },
             'shopRejectedAt': FieldValue.delete(),
             'shopRejectedBy': FieldValue.delete(),
             'customerShopChoice': FieldValue.delete(),
