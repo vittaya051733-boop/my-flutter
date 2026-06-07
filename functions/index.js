@@ -1300,9 +1300,18 @@ const GEMINI_PREFERRED_MODELS = [
   'gemini-2.0-flash',
   'gemini-1.5-flash',
 ];
-const AI_CATALOG_CLASSIFIER_VERSION = 'v4';
+const AI_CATALOG_CLASSIFIER_VERSION = 'v6';
 const CATALOG_AI_CACHE_COLLECTION = 'catalog_ai_cache';
 const PRODUCT_AI_CACHE_COLLECTION = 'product_ai_cache';
+const AI_CONFIDENCE_THRESHOLD = 80;
+const AI_REVIEW_REASON_LABELS = {
+  productName: 'ชื่อสินค้า',
+  tax: 'การวิเคราะห์ภาษี',
+  productType: 'ประเภทสินค้า',
+  nationwideShipping: 'การส่งทั่วประเทศ',
+  legal: 'ความถูกกฎหมาย',
+  illegal: 'สินค้าผิดกฎหมาย',
+};
 const AI_CATALOG_IGNORED_DIFF_KEYS = new Set([
   'catalogType',
   'catalogTypeSlug',
@@ -1506,19 +1515,193 @@ async function fetchImageAsInlineData(imageUrl) {
 function resolveCatalogTypeFromProduct(product) {
   const category = String(product?.productCategory || '').trim();
   const type = String(product?.aiProductType || product?.productType || '').trim();
-  const source = `${category} ${type} ${String(product?.name || '').trim()}`.toLowerCase();
+  const source = [
+    category,
+    type,
+    String(product?.name || '').trim(),
+    String(product?.description || '').trim(),
+  ].join(' ').toLowerCase();
+
+  if (resolvePharmacyCatalogHeadingFromSource(source)) return 'ยาและเวชภัณฑ์';
+  const marketClassification = resolveMarketCatalogClassification(source);
+  if (marketClassification) return marketClassification.catalogType;
 
   if (/ผลไม้|fruit/.test(source)) return 'ผลไม้';
   if (/ผัก|vegetable|ผักสด/.test(source)) return 'ผักสด';
+  const isSeafood = /ปลา|กุ้ง|ปู|หอย|ปลาหมึก|ทะเล|seafood|fish|shrimp|crab|squid|shellfish/.test(source);
+  const isDriedOrProcessed = /อาหารทะเลแปรรูป|แปรรูป|ของแห้ง|แห้ง|อบแห้ง|ตากแห้ง|แดดเดียว|เค็ม|รมควัน|ถนอมอาหาร|processed|dried|dry|smoked|salted/.test(source);
+  if (isSeafood && isDriedOrProcessed) return 'อาหารทะเลแปรรูป';
+  if (isDriedOrProcessed) return 'ของแห้ง / วัตถุดิบ';
   if (/เนื้อ|หมู|ไก่|ปลา|กุ้ง|ปู|หอย|ทะเล|seafood|meat|chicken|pork|beef|fish/.test(source)) {
-    return 'ของสด';
+    return 'เนื้อสัตว์';
   }
   if (/เครื่องดื่ม|น้ำ|ชา|กาแฟ|beverage|drink/.test(source)) return 'เครื่องดื่ม';
-  if (/อาหาร|ข้าว|แกง|ผัด|ทอด|ต้ม|ยำ|พร้อมทาน|prepared|cooked/.test(source)) return 'อาหาร';
+  if (/อาหาร|ข้าว|แกง|ผัด|ทอด|ต้ม|ยำ|พร้อมทาน|prepared|cooked/.test(source)) return 'อาหารพร้อมทาน';
   if (/ยา|เวชภัณฑ์|pharmacy|medicine|drug/.test(source)) return 'ยาและเวชภัณฑ์';
-  if (/ของแห้ง|dry|แห้ง/.test(source)) return 'ของแห้ง';
 
   return type || category || 'อื่นๆ';
+}
+
+function marketCatalogResult(catalogType, catalogHeading) {
+  return {
+    catalogType,
+    catalogTypeSlug: normalizeCatalogHeadingSlug(null, catalogType),
+    catalogHeading,
+    catalogHeadingSlug: normalizeCatalogHeadingSlug(null, catalogHeading),
+    model: 'keyword-rule',
+  };
+}
+
+function resolveMarketCatalogClassification(source) {
+  const text = String(source || '').toLowerCase();
+  const has = (pattern) => pattern.test(text);
+  const isSeafood = has(/ปลา|กุ้ง|ปู|หอย|ปลาหมึก|อาหารทะเล|ทะเล|seafood|fish|shrimp|crab|squid|shellfish/);
+  const isDriedOrProcessed = has(/อาหารทะเลแปรรูป|แปรรูป|ของแห้ง|แห้ง|อบแห้ง|ตากแห้ง|แดดเดียว|เค็ม|รมควัน|ถนอมอาหาร|processed|dried|dry|smoked|salted/);
+
+  if (has(/ชุดนักเรียน|เครื่องแบบ|uniform/)) {
+    return marketCatalogResult('ชุดนักเรียน / เครื่องแบบ', 'ชุดนักเรียน');
+  }
+  if (has(/รองเท้านักเรียน/)) {
+    return marketCatalogResult('รองเท้า / กระเป๋า', 'รองเท้านักเรียน');
+  }
+  if (has(/รองเท้า|แตะ|sneaker|shoe/)) {
+    return marketCatalogResult('รองเท้า / กระเป๋า', 'รองเท้า');
+  }
+  if (has(/กระเป๋า|bag/)) {
+    return marketCatalogResult('รองเท้า / กระเป๋า', 'กระเป๋า');
+  }
+  if (has(/เสื้อ|shirt/)) return marketCatalogResult('เสื้อผ้า', 'เสื้อ');
+  if (has(/กางเกง|pants/)) return marketCatalogResult('เสื้อผ้า', 'กางเกง');
+  if (has(/กระโปรง|skirt/)) return marketCatalogResult('เสื้อผ้า', 'กระโปรง');
+  if (has(/เดรส|ผ้า|เสื้อผ้า|clothes|dress/)) return marketCatalogResult('เสื้อผ้า', 'เสื้อผ้า');
+  if (has(/สมุด|กระดาษ|notebook|paper/)) {
+    return marketCatalogResult('เครื่องเขียน / อุปกรณ์เรียน', 'สมุด / กระดาษ');
+  }
+  if (has(/ปากกา|ดินสอ|ยางลบ|ไม้บรรทัด|เครื่องเขียน|อุปกรณ์เรียน|stationery|pencil|pen/)) {
+    return marketCatalogResult('เครื่องเขียน / อุปกรณ์เรียน', 'ปากกา / ดินสอ');
+  }
+  if (isSeafood && isDriedOrProcessed) {
+    if (has(/ปลาหมึก/)) return marketCatalogResult('อาหารทะเลแปรรูป', 'ปลาหมึกแห้ง');
+    if (has(/ปลาแดดเดียว|ปลาแห้ง/)) return marketCatalogResult('อาหารทะเลแปรรูป', 'ปลาแห้ง / ปลาแดดเดียว');
+    return marketCatalogResult('อาหารทะเลแปรรูป', 'อาหารทะเลแปรรูป');
+  }
+  if (isSeafood) {
+    if (has(/กุ้ง/)) return marketCatalogResult('อาหารทะเลสด', 'กุ้งสด');
+    if (has(/ปู/)) return marketCatalogResult('อาหารทะเลสด', 'ปูสด');
+    if (has(/หอย/)) return marketCatalogResult('อาหารทะเลสด', 'หอยสด');
+    if (has(/ปลาหมึก/)) return marketCatalogResult('อาหารทะเลสด', 'ปลาหมึกสด');
+    if (has(/ปลา|fish/)) return marketCatalogResult('อาหารทะเลสด', 'ปลาสด');
+    return marketCatalogResult('อาหารทะเลสด', 'อาหารทะเลสด');
+  }
+  if (has(/หมู|pork/)) return marketCatalogResult('เนื้อสัตว์', 'หมูสด');
+  if (has(/ไก่|chicken/)) return marketCatalogResult('เนื้อสัตว์', 'ไก่สด');
+  if (has(/เนื้อ|วัว|beef/)) return marketCatalogResult('เนื้อสัตว์', 'เนื้อสด');
+  if (has(/เป็ด|duck|meat/)) return marketCatalogResult('เนื้อสัตว์', 'เนื้อสัตว์');
+  if (has(/ไข่|egg/)) return marketCatalogResult('ไข่ / เต้าหู้', 'ไข่');
+  if (has(/เต้าหู้|tofu/)) return marketCatalogResult('ไข่ / เต้าหู้', 'เต้าหู้');
+  if (has(/แก้วมังกร|มังกร|ผลไม้|fruit|มะม่วง|กล้วย|ส้ม|ทุเรียน|แอปเปิล|แอปเปิ้ล|องุ่น|แตงโม|สับปะรด|ลำไย|ลิ้นจี่|ฝรั่ง|มังคุด|เงาะ/)) {
+    return marketCatalogResult('ผลไม้', 'ผลไม้สด');
+  }
+  if (has(/ผัก|ผักสด|vegetable|คะน้า|กะหล่ำ|ผักบุ้ง|แตงกวา|มะเขือ|ต้นหอม|ผักชี|พริก/)) {
+    return marketCatalogResult('ผักสด', has(/ต้นหอม|ผักชี|พริก/) ? 'ผักสวนครัว' : 'ผักใบ');
+  }
+  if (has(/น้ำปลา/)) return marketCatalogResult('เครื่องปรุง / ซอส', 'น้ำปลา');
+  if (has(/ซีอิ๊ว|ซอส|น้ำมันหอย|seasoning|sauce/)) {
+    return marketCatalogResult('เครื่องปรุง / ซอส', 'ซอส / ซีอิ๊ว');
+  }
+  if (has(/เครื่องปรุง|ผงชูรส|เกลือ|น้ำตาล|กะปิ|ปลาร้า/)) {
+    return marketCatalogResult('เครื่องปรุง / ซอส', 'เครื่องปรุง');
+  }
+  if (has(/ข้าวสาร/)) return marketCatalogResult('ของแห้ง / วัตถุดิบ', 'ข้าวสาร');
+  if (has(/เส้นหมี่|วุ้นเส้น|บะหมี่|มาม่า/)) {
+    return marketCatalogResult('ของแห้ง / วัตถุดิบ', 'เส้น / บะหมี่');
+  }
+  if (isDriedOrProcessed || has(/แป้ง|ถั่ว|ธัญพืช|กะทิ|วัตถุดิบ|grocery|pantry/)) {
+    return marketCatalogResult('ของแห้ง / วัตถุดิบ', 'ของแห้ง / วัตถุดิบ');
+  }
+  if (has(/อาหารพร้อมทาน|พร้อมทาน|ข้าวกล่อง|ข้าวแกง|แกง|ผัด|ทอด|ต้ม|ยำ|กับข้าว|prepared|cooked/)) {
+    return marketCatalogResult('อาหารพร้อมทาน', 'อาหารพร้อมทาน');
+  }
+  if (has(/เบเกอรี่|เค้ก|ปัง|bakery/)) return marketCatalogResult('ขนม / เบเกอรี่', 'เบเกอรี่');
+  if (has(/ขนม|คุกกี้|ของหวาน|snack|dessert/)) return marketCatalogResult('ขนม / เบเกอรี่', 'ขนม');
+  if (has(/น้ำดื่ม|น้ำเปล่า/)) return marketCatalogResult('เครื่องดื่ม', 'น้ำดื่ม');
+  if (has(/ชา|tea/)) return marketCatalogResult('เครื่องดื่ม', 'ชา');
+  if (has(/กาแฟ|coffee/)) return marketCatalogResult('เครื่องดื่ม', 'กาแฟ');
+  if (has(/เครื่องดื่ม|น้ำอัดลม|นม|beverage|drink/)) return marketCatalogResult('เครื่องดื่ม', 'เครื่องดื่ม');
+  if (has(/ผงซักฟอก|น้ำยาปรับผ้านุ่ม/)) return marketCatalogResult('ของใช้ในบ้าน', 'ซักผ้า');
+  if (has(/น้ำยาล้างจาน/)) return marketCatalogResult('ของใช้ในบ้าน', 'ล้างจาน');
+  if (has(/ไม้กวาด|ถุงขยะ|ทิชชู่|ของใช้ในบ้าน|household|detergent/)) {
+    return marketCatalogResult('ของใช้ในบ้าน', 'ของใช้ในบ้าน');
+  }
+  if (has(/สบู่|แชมพู|ยาสีฟัน|แปรงสีฟัน|ครีม|โลชั่น|ของใช้ส่วนตัว|personal care|shampoo|soap/)) {
+    return marketCatalogResult('ของใช้ส่วนตัว', 'ของใช้ส่วนตัว');
+  }
+  return null;
+}
+
+function resolvePharmacyCatalogHeadingFromSource(source) {
+  const text = String(source || '').toLowerCase();
+  const hasPharmacySignal =
+    /ยา|เวชภัณฑ์|เภสัช|pharmacy|medicine|drug|medical/.test(text) ||
+    /พารา|paracetamol|ibuprofen|ไอบู|แก้แพ้|loratadine|cetirizine|แก้ไอ|ลดน้ำมูก|ท้องเสีย|ลดกรด|ยาระบาย|เกลือแร่|ยาหม่อง|เบตาดีน|betadine|พลาสเตอร์|ผ้าก๊อซ|สำลี|แอลกอฮอล์|หน้ากาก|ถุงมือ|ปรอทวัดไข้|เครื่องวัดความดัน|วิตามิน|อาหารเสริม|คอลลาเจน|แคลเซียม|ผ้าอ้อม|ขวดนม|นมผง|ยาสีฟัน|แปรงสีฟัน|น้ำยาบ้วนปาก|ครีมกันแดด|โลชั่น|โฟมล้างหน้า|น้ำเกลือ/.test(text);
+  if (!hasPharmacySignal) {
+    return null;
+  }
+
+  if (/พารา|paracetamol|ไอบู|ibuprofen|แก้ปวด|ลดไข้|ปวดหัว|ปวดเมื่อย|ไข้/.test(text)) {
+    return 'ยาแก้ปวด / ลดไข้';
+  }
+  if (/แก้แพ้|loratadine|cetirizine|หวัด|แก้ไอ|ไอ|ลดน้ำมูก|คัดจมูก|เจ็บคอ/.test(text)) {
+    return 'ยาแก้แพ้ / หวัด / ไอ';
+  }
+  if (/ท้องเสีย|ลดกรด|กรดไหลย้อน|ยาระบาย|เกลือแร่|ors|ท้องอืด|ย่อยอาหาร|คลื่นไส้|อาเจียน/.test(text)) {
+    return 'ยาทางเดินอาหาร';
+  }
+  if (/ยาทา|ยาหม่อง|เบตาดีน|betadine|ครีมยา|ขี้ผึ้ง|แผล|เชื้อรา|ผื่น|สเปรย์ยา|บาล์ม/.test(text)) {
+    return 'ยาภายนอก';
+  }
+  if (/ผ้าก๊อซ|ก๊อซ|สำลี|พลาสเตอร์|แอลกอฮอล์|น้ำเกลือ|povidone|cotton|gauze|bandage/.test(text)) {
+    return 'เวชภัณฑ์';
+  }
+  if (/หน้ากาก|ถุงมือ|ปรอทวัดไข้|เครื่องวัดความดัน|เทอร์โมมิเตอร์|ชุดตรวจ|เครื่องพ่นยา|อุปกรณ์การแพทย์/.test(text)) {
+    return 'อุปกรณ์การแพทย์';
+  }
+  if (/วิตามิน|อาหารเสริม|คอลลาเจน|แคลเซียม|ซิงค์|zinc|วิตามินซี|vitamin|supplement|fish oil|น้ำมันปลา/.test(text)) {
+    return 'วิตามิน / อาหารเสริม';
+  }
+  if (/แม่และเด็ก|เด็ก|ทารก|ผ้าอ้อม|ขวดนม|นมผง|จุกนม|baby|infant/.test(text)) {
+    return 'แม่และเด็ก';
+  }
+  if (/ยาสีฟัน|แปรงสีฟัน|น้ำยาบ้วนปาก|ไหมขัดฟัน|ช่องปาก|oral|tooth|mouthwash/.test(text)) {
+    return 'สุขภาพช่องปาก';
+  }
+  if (/ครีมกันแดด|โลชั่น|สบู่|แชมพู|โฟมล้างหน้า|เจลล้างมือ|สกินแคร์|ดูแลผิว|ของใช้ส่วนตัว|skincare|sunscreen|lotion|shampoo/.test(text)) {
+    return 'ดูแลผิว / ของใช้ส่วนตัว';
+  }
+
+  return 'ยาและเวชภัณฑ์';
+}
+
+function resolveRuleBasedCatalogClassification(product) {
+  const category = String(product?.productCategory || '').trim();
+  const type = String(product?.aiProductType || product?.productType || '').trim();
+  const source = [
+    category,
+    type,
+    String(product?.name || '').trim(),
+    String(product?.description || '').trim(),
+  ].join(' ').toLowerCase();
+  const pharmacyHeading = resolvePharmacyCatalogHeadingFromSource(source);
+  if (pharmacyHeading) {
+    return {
+      catalogType: 'ยาและเวชภัณฑ์',
+      catalogTypeSlug: normalizeCatalogHeadingSlug(null, 'ยาและเวชภัณฑ์'),
+      catalogHeading: pharmacyHeading,
+      catalogHeadingSlug: normalizeCatalogHeadingSlug(null, pharmacyHeading),
+      model: 'keyword-rule',
+    };
+  }
+  return resolveMarketCatalogClassification(source);
 }
 
 function computeAiCatalogInputHash(product) {
@@ -1576,6 +1759,10 @@ function shouldSkipProductCatalogClassify({ before, after, productId }) {
 
   if (after.aiIsLegalInThailand === false) {
     return 'illegal';
+  }
+
+  if (after.aiRequiresAdminReview === true) {
+    return 'low_confidence_review';
   }
 
   const productName = String(after.name || '').trim();
@@ -1743,6 +1930,16 @@ async function resolveProductCatalogClassification({
 }) {
   const inputHash = computeAiCatalogInputHash(product);
 
+  const ruleBased = resolveRuleBasedCatalogClassification(product);
+  if (ruleBased) {
+    const classification = await finalizeCatalogClassification(product, shopId, ruleBased);
+    await saveCatalogAiCache(inputHash, classification, productId);
+    return {
+      ...classification,
+      fromCache: 'keyword_rule',
+    };
+  }
+
   const cached = await loadCatalogAiCache(inputHash);
   if (cached) {
     await db.collection(CATALOG_AI_CACHE_COLLECTION).doc(inputHash).set({
@@ -1780,23 +1977,154 @@ async function resolveProductCatalogClassification({
   };
 }
 
+const PRODUCT_AI_ANALYSIS_VERSION = 3;
+
+const STANDARD_SALE_UNITS = ['ชิ้น', 'ถุง', 'แพ็ค', 'มัด', 'ลูก', 'กล่อง'];
+
+function normalizeSaleUnit(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  const compact = text.replace(/\s+/g, '');
+  const aliases = {
+    แพค: 'แพ็ค',
+    pack: 'แพ็ค',
+    Pack: 'แพ็ค',
+    ชิ้น: 'ชิ้น',
+    ถุง: 'ถุง',
+    มัด: 'มัด',
+    ลูก: 'ลูก',
+    กล่อง: 'กล่อง',
+    แพ็ค: 'แพ็ค',
+  };
+  if (STANDARD_SALE_UNITS.includes(compact)) {
+    return compact;
+  }
+  if (aliases[compact]) {
+    return aliases[compact];
+  }
+  return text.slice(0, 24);
+}
+
 function computeProductAiAnalysisHash({
   productName,
   description,
   category,
   unit,
   price,
+  weight,
+  weightUnit,
   imageBase64,
 }) {
   const imageHash = crypto.createHash('sha256').update(String(imageBase64 || '')).digest('hex');
   return crypto.createHash('sha256').update(JSON.stringify({
+    version: PRODUCT_AI_ANALYSIS_VERSION,
     productName: String(productName || '').trim(),
     description: String(description || '').trim(),
     category: String(category || '').trim(),
     unit: String(unit || '').trim(),
     price: String(price || '').trim(),
+    weight: String(weight || '').trim(),
+    weightUnit: String(weightUnit || '').trim(),
     imageHash,
   })).digest('hex');
+}
+
+function normalizeAiConfidence(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(num)));
+}
+
+function normalizeParcelDimensionCm(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return null;
+  }
+  return Math.min(200, Math.round(num * 10) / 10);
+}
+
+function buildAiConfidencePayload(analysis) {
+  return {
+    productNameConfidence: normalizeAiConfidence(analysis?.productNameConfidence),
+    taxConfidence: normalizeAiConfidence(analysis?.taxConfidence),
+    productTypeConfidence: normalizeAiConfidence(analysis?.productTypeConfidence),
+    nationwideShippingConfidence: normalizeAiConfidence(analysis?.nationwideShippingConfidence),
+    legalConfidence: normalizeAiConfidence(analysis?.legalConfidence),
+  };
+}
+
+function evaluateAiAdminReviewRequired({ confidences, isLegalInThailand }) {
+  if (isLegalInThailand !== true) {
+    return {
+      required: true,
+      reasons: ['illegal'],
+      reasonLabels: [AI_REVIEW_REASON_LABELS.illegal],
+    };
+  }
+
+  const checks = [
+    ['productName', confidences.productNameConfidence],
+    ['tax', confidences.taxConfidence],
+    ['productType', confidences.productTypeConfidence],
+    ['nationwideShipping', confidences.nationwideShippingConfidence],
+    ['legal', confidences.legalConfidence],
+  ];
+  const reasons = [];
+  for (const [key, score] of checks) {
+    if (score == null || score < AI_CONFIDENCE_THRESHOLD) {
+      reasons.push(key);
+    }
+  }
+
+  return {
+    required: reasons.length > 0,
+    reasons,
+    reasonLabels: reasons.map((key) => AI_REVIEW_REASON_LABELS[key] || key),
+  };
+}
+
+function buildProductAiCallableResult(analysis, extras = {}) {
+  const isLegalInThailand = analysis.isLegalInThailand === true;
+  const confidences = buildAiConfidencePayload(analysis);
+  const reviewEval = evaluateAiAdminReviewRequired({
+    confidences,
+    isLegalInThailand,
+  });
+
+  return {
+    productName: String(analysis.productName || '').trim(),
+    description: String(analysis.description || '').trim(),
+    isLegalInThailand,
+    legalReason: String(analysis.legalReason || '').trim(),
+    productType: String(analysis.productType || '').trim(),
+    productCategory: String(analysis.productCategory || '').trim(),
+    taxStatus: String(analysis.taxStatus || '').trim(),
+    taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
+    taxReason: String(analysis.taxReason || '').trim(),
+    isFreshProduct: analysis.isFreshProduct === true,
+    isProcessed: analysis.isProcessed === true,
+    canShipNationwide: analysis.canShipNationwide === true,
+    nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+    parcelLengthCm: normalizeParcelDimensionCm(analysis.parcelLengthCm),
+    parcelWidthCm: normalizeParcelDimensionCm(analysis.parcelWidthCm),
+    parcelHeightCm: normalizeParcelDimensionCm(analysis.parcelHeightCm),
+    parcelDimensionReason: String(analysis.parcelDimensionReason || '').trim(),
+    parcelDimensionConfidence: normalizeAiConfidence(analysis.parcelDimensionConfidence),
+    saleUnit: normalizeSaleUnit(analysis.saleUnit),
+    productNameConfidence: confidences.productNameConfidence,
+    taxConfidence: confidences.taxConfidence,
+    productTypeConfidence: confidences.productTypeConfidence,
+    nationwideShippingConfidence: confidences.nationwideShippingConfidence,
+    legalConfidence: confidences.legalConfidence,
+    requiresAdminReview: reviewEval.required,
+    reviewReasons: reviewEval.reasons,
+    reviewReasonLabels: reviewEval.reasonLabels,
+    ...extras,
+  };
 }
 
 async function loadProductAiCache(inputHash) {
@@ -1806,6 +2134,9 @@ async function loadProductAiCache(inputHash) {
   }
   const data = snap.data() || {};
   if (!String(data.productCategory || data.productType || data.description || '').trim()) {
+    return null;
+  }
+  if (data.productNameConfidence == null) {
     return null;
   }
   return data;
@@ -1829,6 +2160,17 @@ async function saveProductAiCache(inputHash, analysis, model) {
     isProcessed: analysis.isProcessed === true,
     canShipNationwide: analysis.canShipNationwide === true,
     nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+    parcelLengthCm: normalizeParcelDimensionCm(analysis.parcelLengthCm),
+    parcelWidthCm: normalizeParcelDimensionCm(analysis.parcelWidthCm),
+    parcelHeightCm: normalizeParcelDimensionCm(analysis.parcelHeightCm),
+    parcelDimensionReason: String(analysis.parcelDimensionReason || '').trim(),
+    parcelDimensionConfidence: normalizeAiConfidence(analysis.parcelDimensionConfidence),
+    saleUnit: normalizeSaleUnit(analysis.saleUnit),
+    productNameConfidence: normalizeAiConfidence(analysis.productNameConfidence),
+    taxConfidence: normalizeAiConfidence(analysis.taxConfidence),
+    productTypeConfidence: normalizeAiConfidence(analysis.productTypeConfidence),
+    nationwideShippingConfidence: normalizeAiConfidence(analysis.nationwideShippingConfidence),
+    legalConfidence: normalizeAiConfidence(analysis.legalConfidence),
     model: model || null,
     usageCount: FieldValue.increment(1),
     updatedAt: FieldValue.serverTimestamp(),
@@ -2011,14 +2353,22 @@ async function classifyProductCatalogHeading({
     'Return JSON only.',
     'Do NOT use the raw product name as catalogType. catalogType is a broad shelf button. catalogHeading is the narrower group inside that type.',
     'Important Thai market taxonomy rules:',
-    '- ของสด is for raw meat, chicken, fish, seafood, eggs, and similar fresh animal/protein items. Do NOT put fruit under ของสด.',
+    '- The ตลาด button is a broad market/marketplace catalog. Use a broad catalogType and a narrower catalogHeading.',
+    '- Use these preferred market catalogType labels when applicable: ผักสด, ผลไม้, เนื้อสัตว์, อาหารทะเลสด, อาหารทะเลแปรรูป, ไข่ / เต้าหู้, อาหารพร้อมทาน, ของแห้ง / วัตถุดิบ, เครื่องปรุง / ซอส, ขนม / เบเกอรี่, เครื่องดื่ม, เสื้อผ้า, ชุดนักเรียน / เครื่องแบบ, รองเท้า / กระเป๋า, ของใช้ในบ้าน, ของใช้ส่วนตัว, เครื่องเขียน / อุปกรณ์เรียน.',
+    '- เนื้อสัตว์ is for raw pork, chicken, beef, duck, and similar meat items.',
+    '- อาหารทะเลสด is for fresh fish, shrimp, crab, squid, shellfish, and similar fresh seafood.',
+    '- อาหารทะเลแปรรูป is for dried/processed seafood such as ปลาหมึกแห้ง, กุ้งแห้ง, ปลาแห้ง, ปลาแดดเดียว. These must not be catalogType ของสด.',
     '- ผลไม้ is for fruit such as mango, orange, banana, durian, apple.',
     '- ผักสด is for fresh vegetables and herbs.',
-    '- อาหาร is for cooked/ready-to-eat food.',
+    '- อาหารพร้อมทาน is for cooked/ready-to-eat food.',
     '- เครื่องดื่ม is for beverages.',
-    '- ของแห้ง is for dry/shelf-stable grocery items.',
-    '- ยาและเวชภัณฑ์ is for pharmacy/medical items.',
-    'Examples: product mango => catalogType ผลไม้, catalogHeading มะม่วง. product chicken breast => catalogType ของสด, catalogHeading ไก่สด. product fish => catalogType ของสด, catalogHeading ปลาสด.',
+    '- ของแห้ง / วัตถุดิบ is for dry/shelf-stable grocery ingredients such as rice, flour, noodles, beans, and pantry staples.',
+    '- เครื่องปรุง / ซอส is for fish sauce, soy sauce, seasoning, salt, sugar, shrimp paste, and cooking sauces.',
+    '- เสื้อผ้า is for clothing. ชุดนักเรียน / เครื่องแบบ is specifically for school uniforms and uniforms. รองเท้า / กระเป๋า is for shoes and bags, including school shoes.',
+    '- เครื่องเขียน / อุปกรณ์เรียน is for notebooks, paper, pens, pencils, erasers, rulers, and school supplies.',
+    '- ของใช้ในบ้าน is for household supplies. ของใช้ส่วนตัว is for personal care products.',
+    '- ยาและเวชภัณฑ์ is for pharmacy/medical items. For this catalogType, catalogHeading must be one of these user-facing pharmacy subgroups when applicable: ยาแก้ปวด / ลดไข้, ยาแก้แพ้ / หวัด / ไอ, ยาทางเดินอาหาร, ยาภายนอก, เวชภัณฑ์, อุปกรณ์การแพทย์, วิตามิน / อาหารเสริม, แม่และเด็ก, สุขภาพช่องปาก, ดูแลผิว / ของใช้ส่วนตัว.',
+    'Examples: product mango => catalogType ผลไม้, catalogHeading มะม่วง. product chicken breast => catalogType เนื้อสัตว์, catalogHeading ไก่สด. product fish => catalogType อาหารทะเลสด, catalogHeading ปลาสด. product dried squid => catalogType อาหารทะเลแปรรูป, catalogHeading ปลาหมึกแห้ง. product fish sauce => catalogType เครื่องปรุง / ซอส, catalogHeading น้ำปลา. product school uniform => catalogType ชุดนักเรียน / เครื่องแบบ, catalogHeading ชุดนักเรียน. product school shoes => catalogType รองเท้า / กระเป๋า, catalogHeading รองเท้านักเรียน. product notebook => catalogType เครื่องเขียน / อุปกรณ์เรียน, catalogHeading สมุด / กระดาษ. product paracetamol => catalogType ยาและเวชภัณฑ์, catalogHeading ยาแก้ปวด / ลดไข้. product saline solution => catalogType ยาและเวชภัณฑ์, catalogHeading เวชภัณฑ์.',
     'Prefer reusing an existing heading label/slug when the product clearly fits.',
     'Prefer reusing an existing type label/slug when the broad type clearly fits.',
     'Create a new concise Thai type or heading only when nothing existing fits.',
@@ -2225,12 +2575,16 @@ exports.analyzeProductWithAi = onCall(
     const category = String(request.data?.category || '').trim();
     const unit = String(request.data?.unit || '').trim();
     const price = String(request.data?.price || '').trim();
+    const weight = String(request.data?.weight || '').trim();
+    const weightUnit = String(request.data?.weightUnit || '').trim();
     const analysisInputHash = computeProductAiAnalysisHash({
       productName,
       description,
       category,
       unit,
       price,
+      weight,
+      weightUnit,
       imageBase64,
     });
     const cachedAnalysis = await loadProductAiCache(analysisInputHash);
@@ -2239,25 +2593,12 @@ exports.analyzeProductWithAi = onCall(
         usageCount: FieldValue.increment(1),
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
-      return {
-        productName: String(cachedAnalysis.productName || '').trim(),
-        description: String(cachedAnalysis.description || '').trim(),
-        isLegalInThailand: cachedAnalysis.isLegalInThailand === true,
-        legalReason: String(cachedAnalysis.legalReason || '').trim(),
-        productType: String(cachedAnalysis.productType || '').trim(),
-        productCategory: String(cachedAnalysis.productCategory || '').trim(),
-        taxStatus: String(cachedAnalysis.taxStatus || '').trim(),
-        taxStatusLabel: String(cachedAnalysis.taxStatusLabel || '').trim(),
-        taxReason: String(cachedAnalysis.taxReason || '').trim(),
-        isFreshProduct: cachedAnalysis.isFreshProduct === true,
-        isProcessed: cachedAnalysis.isProcessed === true,
-        canShipNationwide: cachedAnalysis.canShipNationwide === true,
-        nationwideShippingReason: String(cachedAnalysis.nationwideShippingReason || '').trim(),
+      return buildProductAiCallableResult(cachedAnalysis, {
         model: String(cachedAnalysis.model || 'cache').trim(),
         queuePosition: 0,
         estimatedWaitSeconds: 0,
         fromCache: true,
-      };
+      });
     }
 
     const queueLease = await acquireAiProcessingSlot({
@@ -2302,9 +2643,12 @@ exports.analyzeProductWithAi = onCall(
         'Also fill existing merchant fields when possible.',
         'VAT rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
         'Nationwide shipping rule: dry, sealed, shelf-stable, non-fragile, legal products are usually suitable; fresh, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
+        'Parcel dimensions task: estimate outer package size in centimeters after typical merchant packing for nationwide courier shipping. Use realistic retail parcel sizes for the visible product and known weight when available. Return parcelLengthCm, parcelWidthCm, parcelHeightCm as positive numbers only. Length is usually the longest side.',
+        'Sale unit task: choose the best Thai selling unit for this product in specifications. Prefer one of ชิ้น ถุง แพ็ค มัด ลูก กล่อง. Use ถุง for bagged produce, มัด for bundled vegetables/herbs, ลูก for whole fruit, แพ็ค for multi-pack, กล่อง for boxed goods.',
+        'For every major judgment, also return confidence as an integer 0-100 where 100 means very certain.',
         'JSON schema only:',
-        '{"productName":"likely Thai product name","description":"Thai product description about 2 mobile lines","isLegalInThailand":true/false,"legalReason":"short Thai reason","productType":"specific Thai product type","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason"}',
-        `Known merchant-entered fields: productName=${productName || '-'}, description=${description || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}.`,
+        '{"productName":"likely Thai product name","productNameConfidence":0-100,"description":"Thai product description about 2 mobile lines","isLegalInThailand":true/false,"legalReason":"short Thai reason","legalConfidence":0-100,"productType":"specific Thai product type","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","productTypeConfidence":0-100,"taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","taxConfidence":0-100,"isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason","nationwideShippingConfidence":0-100,"parcelLengthCm":number,"parcelWidthCm":number,"parcelHeightCm":number,"parcelDimensionReason":"short Thai reason for estimated parcel size","parcelDimensionConfidence":0-100,"saleUnit":"ชิ้น or ถุง or แพ็ค or มัด or ลูก or กล่อง"}',
+        `Known merchant-entered fields: productName=${productName || '-'}, description=${description || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}, weight=${weight || '-'}, weightUnit=${weightUnit || '-'}.`,
       ].join(' ');
 
       const discoveredModelNames = new Set();
@@ -2442,24 +2786,11 @@ exports.analyzeProductWithAi = onCall(
         throw new HttpsError('unimplemented', 'โมเดล AI สำหรับวิเคราะห์สินค้ายังไม่พร้อมใช้งานในโปรเจกต์นี้');
       }
 
-      const result = {
-        productName: String(analysis.productName || '').trim(),
-        description: String(analysis.description || '').trim(),
-        isLegalInThailand: analysis.isLegalInThailand === true,
-        legalReason: String(analysis.legalReason || '').trim(),
-        productType: String(analysis.productType || '').trim(),
-        productCategory: String(analysis.productCategory || '').trim(),
-        taxStatus: String(analysis.taxStatus || '').trim(),
-        taxStatusLabel: String(analysis.taxStatusLabel || '').trim(),
-        taxReason: String(analysis.taxReason || '').trim(),
-        isFreshProduct: analysis.isFreshProduct === true,
-        isProcessed: analysis.isProcessed === true,
-        canShipNationwide: analysis.canShipNationwide === true,
-        nationwideShippingReason: String(analysis.nationwideShippingReason || '').trim(),
+      const result = buildProductAiCallableResult(analysis, {
         model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
         queuePosition: queueLease.position,
         estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
-      };
+      });
       await saveProductAiCache(
         analysisInputHash,
         result,

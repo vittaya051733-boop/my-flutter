@@ -84,6 +84,19 @@ class ProductCacheService {
     await saveProducts(userId, filtered);
   }
 
+  Future<void> upsertProduct(String userId, CachedProduct product) async {
+    if (userId.isEmpty || product.id.isEmpty) return;
+    final cached = await loadProducts(userId);
+    final index = cached.indexWhere((item) => item.id == product.id);
+    final next = List<CachedProduct>.from(cached);
+    if (index >= 0) {
+      next[index] = product;
+    } else {
+      next.add(product);
+    }
+    await saveProducts(userId, next);
+  }
+
   Map<String, dynamic> _normalizeMap(Map<String, dynamic> input) {
     return input.map(
       (key, value) => MapEntry(key, _normalizeValue(value)),

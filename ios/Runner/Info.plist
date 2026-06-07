@@ -68,9 +68,9 @@
 			</dict>
 		</array>
 		<key>NSPhotoLibraryUsageDescription</key>
-		<string>แอปนี้ต้องการเข้าถึงคลังรูปภาพของคุณเพื่อเลือกรูปภาพสำหรับร้านค้าและสมุดบัญชีของคุณ</string>
+		<string>แอปนี้ต้องการเข้าถึงคลังรูปภาพและวิดีโอของคุณเพื่อเลือกสื่อสำหรับสินค้า ร้านค้า และสมุดบัญชี</string>
 		<key>NSCameraUsageDescription</key>
-		<string>แอปนี้ต้องการเข้าถึงกล้องของคุณเพื่อถ่ายภาพสำหรับร้านค้าและสมุดบัญชีของคุณ</string>
+		<string>แอปนี้ต้องการเข้าถึงกล้องของคุณเพื่อถ่ายรูปและวิดีโอสินค้าสำหรับร้านค้า</string>
 		<key>NSPhotoLibraryAddUsageDescription</key>
 		<string>แอปนี้ต้องการบันทึกไฟล์ลงในคลังรูปภาพของคุณสำหรับการดาวน์โหลดใบเสร็จและรูปสินค้า</string>
 		<key>NSMicrophoneUsageDescription</key>

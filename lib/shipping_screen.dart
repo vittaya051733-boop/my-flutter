@@ -8,6 +8,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
+
+import 'merchant_pricing_policy.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
@@ -1705,22 +1707,7 @@ double _readProductTotal(
   required double total,
   required double shipping,
 }) {
-  final direct = _readDouble(data['subtotal']);
-  if (direct != null) return direct;
-  final items = data['items'] ?? data['products'];
-  if (items is List) {
-    final itemTotal = items.whereType<Map>().fold<double>(0, (
-      runningTotal,
-      item,
-    ) {
-      final price = _readDouble(item['price'] ?? item['unitPrice']) ?? 0;
-      final quantity = (item['quantity'] as num?)?.toInt() ?? 0;
-      return runningTotal + (price * quantity);
-    });
-    if (itemTotal > 0) return itemTotal;
-  }
-  final fallback = total - shipping;
-  return fallback > 0 ? fallback : total;
+  return MerchantPricingPolicy.readMerchantProductRevenue(data);
 }
 
 bool _sameDay(DateTime a, DateTime b) =>

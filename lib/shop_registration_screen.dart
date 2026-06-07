@@ -760,6 +760,8 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       },
       'shopLatitude': latitude,
       'shopLongitude': longitude,
+      'adminMaxImageCount': 1,
+      'adminCanUploadVideo': false,
       ...branchAssignment.toFirestoreFields(),
       'updatedAt': FieldValue.serverTimestamp(),
     };

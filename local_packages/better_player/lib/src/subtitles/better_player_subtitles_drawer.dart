@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:better_player/better_player.dart';
+import 'package:better_player/src/configuration/better_player_controller_event.dart';
 import 'package:better_player/src/subtitles/better_player_subtitle.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
@@ -37,6 +38,8 @@ class _BetterPlayerSubtitlesDrawerState
 
   ///Stream used to detect if play controls are visible or not
   late StreamSubscription _visibilityStreamSubscription;
+  StreamSubscription<BetterPlayerControllerEvent>? _controllerEventSubscription;
+  bool _videoListenerAttached = false;
 
   @override
   void initState() {
@@ -53,8 +56,14 @@ class _BetterPlayerSubtitlesDrawerState
       _configuration = setupDefaultConfiguration();
     }
 
-    widget.betterPlayerController.videoPlayerController!
-        .addListener(_updateState);
+    _attachVideoListener();
+    _controllerEventSubscription =
+        widget.betterPlayerController.controllerEventStream.listen((event) {
+      if (event == BetterPlayerControllerEvent.setupDataSource ||
+          event == BetterPlayerControllerEvent.play) {
+        _attachVideoListener();
+      }
+    });
 
     _outerTextStyle = TextStyle(
         fontSize: _configuration!.fontSize,
@@ -72,26 +81,58 @@ class _BetterPlayerSubtitlesDrawerState
     super.initState();
   }
 
+  void _attachVideoListener() {
+    if (_videoListenerAttached || widget.betterPlayerController.isDisposed) {
+      return;
+    }
+    final videoController = widget.betterPlayerController.videoPlayerController;
+    if (videoController == null) {
+      return;
+    }
+    videoController.addListener(_updateState);
+    _videoListenerAttached = true;
+    _latestValue = videoController.value;
+  }
+
+  void _detachVideoListener() {
+    if (!_videoListenerAttached) {
+      return;
+    }
+    final videoController = widget.betterPlayerController.videoPlayerController;
+    if (videoController != null) {
+      videoController.removeListener(_updateState);
+    }
+    _videoListenerAttached = false;
+  }
+
   @override
   void dispose() {
-    widget.betterPlayerController.videoPlayerController!
-        .removeListener(_updateState);
+    _detachVideoListener();
+    _controllerEventSubscription?.cancel();
     _visibilityStreamSubscription.cancel();
     super.dispose();
   }
 
   ///Called when player state has changed, i.e. new player position, etc.
   void _updateState() {
-    if (mounted) {
-      setState(() {
-        _latestValue =
-            widget.betterPlayerController.videoPlayerController!.value;
-      });
+    if (!mounted || widget.betterPlayerController.isDisposed) {
+      return;
     }
+    final videoController = widget.betterPlayerController.videoPlayerController;
+    if (videoController == null) {
+      return;
+    }
+    setState(() {
+      _latestValue = videoController.value;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    if (widget.subtitles.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
     final BetterPlayerSubtitle? subtitle = _getSubtitleAtCurrentPosition();
     widget.betterPlayerController.renderedSubtitle = subtitle;
     final List<String> subtitles = subtitle?.texts ?? [];

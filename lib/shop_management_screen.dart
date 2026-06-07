@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'add_product_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -12,7 +12,13 @@ import 'package:cached_network_image/cached_network_image.dart';
 class ShopManagementScreen extends StatefulWidget {
   final Set<String>? initialHomeProductIds;
   final Function(Set<String>)? onHomeProductIdsChanged;
-  const ShopManagementScreen({super.key, this.initialHomeProductIds, this.onHomeProductIdsChanged});
+  final VoidCallback? onHomeProductsChanged;
+  const ShopManagementScreen({
+    super.key,
+    this.initialHomeProductIds,
+    this.onHomeProductIdsChanged,
+    this.onHomeProductsChanged,
+  });
 
   @override
   State<ShopManagementScreen> createState() => _ShopManagementScreenState();
@@ -23,6 +29,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   static const int _pageSize = 15;
   final ScrollController _scrollController = ScrollController();
   final Set<String> _deletingProductIds = {};
+  final Set<String> _updatingDiscountProductIds = {};
   final List<Product> _products = [];
   bool _isLoading = false;
   bool _isFirstLoad = true;
@@ -207,6 +214,183 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     }
   }
 
+  String _formatDiscountPercent(double value) {
+    if (value <= 0) {
+      return '0';
+    }
+    return value % 1 == 0 ? value.toInt().toString() : value.toString();
+  }
+
+  double? _parseDiscountInput(String raw) {
+    final normalized = raw
+        .trim()
+        .replaceAll('%', '')
+        .replaceAll(',', '')
+        .replaceAll(' ', '');
+    if (normalized.isEmpty) {
+      return 0;
+    }
+    final parsed = double.tryParse(normalized);
+    if (parsed == null) {
+      return null;
+    }
+    if (parsed <= 0) {
+      return 0;
+    }
+    if (parsed > 100) {
+      return 100;
+    }
+    return parsed;
+  }
+
+  Future<void> _editProductDiscount(Product product) async {
+    if (product.id == null || _updatingDiscountProductIds.contains(product.id!)) {
+      return;
+    }
+
+    final saved = await showDialog<double?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => _DiscountPercentDialog(
+        productName: product.name,
+        initialPercent: product.discountPercent,
+        parseInput: _parseDiscountInput,
+        formatPercent: _formatDiscountPercent,
+      ),
+    );
+
+    if (saved == null || !mounted) {
+      return;
+    }
+    await _saveProductDiscount(product, saved);
+  }
+
+  Future<void> _saveProductDiscount(Product product, double discountPercent) async {
+    if (product.id == null) {
+      return;
+    }
+
+    setState(() {
+      _updatingDiscountProductIds.add(product.id!);
+    });
+
+    try {
+      await FirebaseFirestore.instance.collection('products').doc(product.id!).update(
+        <String, dynamic>{
+          'discountPercent': discountPercent,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+      );
+
+      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+      if (currentUserId != null && currentUserId.isNotEmpty) {
+        final refreshedDoc = await FirebaseFirestore.instance
+            .collection('products')
+            .doc(product.id!)
+            .get();
+        final refreshedData = refreshedDoc.data();
+        if (refreshedData != null) {
+          await ProductCacheService.instance.upsertProduct(
+            currentUserId,
+            CachedProduct(id: product.id!, data: refreshedData),
+          );
+        }
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        final index = _products.indexWhere((item) => item.id == product.id);
+        if (index >= 0) {
+          _products[index] = product.copyWith(discountPercent: discountPercent);
+        }
+      });
+
+      widget.onHomeProductsChanged?.call();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            discountPercent > 0
+                ? 'ตั้งส่วนลด ${_formatDiscountPercent(discountPercent)}% สำหรับ "${product.name}" แล้ว'
+                : 'ยกเลิกส่วนลดสำหรับ "${product.name}" แล้ว',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('บันทึกส่วนลดไม่สำเร็จ: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _updatingDiscountProductIds.remove(product.id!);
+        });
+      }
+    }
+  }
+
+  Widget _buildDiscountPercentBadge(double discountPercent) {
+    if (discountPercent <= 0) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFD32F2F),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        'ลด ${_formatDiscountPercent(discountPercent)}%',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProductActionButton({
+    required IconData icon,
+    required Color backgroundColor,
+    required Color iconColor,
+    required String tooltip,
+    required VoidCallback? onPressed,
+  }) {
+    return Material(
+      color: backgroundColor,
+      borderRadius: BorderRadius.circular(12),
+      elevation: 3,
+      shadowColor: Colors.black45,
+      child: InkWell(
+        onTap: onPressed,
+        enableFeedback: false,
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Tooltip(
+            message: tooltip,
+            child: Icon(icon, color: iconColor, size: 26),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _deleteStorageFile(String url) async {
     try {
       final ref = StorageHelper.instance.refFromURL(url);
@@ -329,13 +513,14 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         }
         final product = _products[index];
         final isDeleting = product.id != null && _deletingProductIds.contains(product.id!);
+        final isUpdatingDiscount = product.id != null &&
+            _updatingDiscountProductIds.contains(product.id!);
+        final isBusy = isDeleting || isUpdatingDiscount;
         final isHome = product.id != null && _homeProductIds.contains(product.id!);
         final previewUrl = product.thumbnailUrls.isNotEmpty
           ? product.thumbnailUrls.first
           : (product.imageUrls.isNotEmpty ? product.imageUrls.first : null);
-        return InkWell(
-          onTap: isDeleting ? null : () => _navigateToAddProduct(context, product: product),
-          child: Container(
+        return Container(
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
@@ -350,7 +535,11 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
             ),
             child: Stack(
               children: [
-                ClipRRect(
+                GestureDetector(
+                  onTap: isBusy
+                      ? null
+                      : () => _navigateToAddProduct(context, product: product),
+                  child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: previewUrl != null
                       ? CachedNetworkImage(
@@ -380,6 +569,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                           alignment: Alignment.center,
                           child: const Icon(Icons.image, size: 40, color: Colors.grey),
                         ),
+                ),
                 ),
                 Positioned(
                   left: 0,
@@ -451,7 +641,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                   top: 8,
                   left: 8,
                   child: GestureDetector(
-                    onTap: isDeleting || product.id == null ? null : () {
+                    onTap: isBusy || product.id == null ? null : () {
                       setState(() {
                         if (isHome) {
                           _homeProductIds.remove(product.id!);
@@ -474,37 +664,154 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                     ),
                   ),
                 ),
+                if (product.discountPercent > 0)
+                  Positioned(
+                    top: 44,
+                    left: 8,
+                    child: _buildDiscountPercentBadge(product.discountPercent),
+                  ),
                 Positioned(
                   top: 8,
                   right: 8,
-                  child: isDeleting
-                      ? const SizedBox(width: 44, height: 22, child: Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))))
-                      : Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, color: Colors.white, size: 22),
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(),
-                              onPressed: () => _navigateToAddProduct(context, product: product),
-                              tooltip: 'แก้ไขสินค้า',
+                  child: isBusy
+                      ? const SizedBox(
+                          width: 148,
+                          height: 44,
+                          child: Center(
+                            child: SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
                             ),
-                            const SizedBox(width: 4),
-                            IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red, size: 22),
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(),
-                              onPressed: () => _deleteProduct(product),
-                              tooltip: 'ลบสินค้า',
-                            ),
-                          ],
+                          ),
+                        )
+                      : FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.topRight,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildProductActionButton(
+                                icon: Icons.percent_rounded,
+                                backgroundColor: const Color(0xFFE65100),
+                                iconColor: Colors.white,
+                                tooltip: product.discountPercent > 0
+                                    ? 'แก้ไขส่วนลด (${_formatDiscountPercent(product.discountPercent)}%)'
+                                    : 'ตั้งส่วนลด',
+                                onPressed: () => _editProductDiscount(product),
+                              ),
+                              const SizedBox(width: 6),
+                              _buildProductActionButton(
+                                icon: Icons.edit_rounded,
+                                backgroundColor: const Color(0xFF1565C0),
+                                iconColor: Colors.white,
+                                tooltip: 'แก้ไขสินค้า',
+                                onPressed: () =>
+                                    _navigateToAddProduct(context, product: product),
+                              ),
+                              const SizedBox(width: 6),
+                              _buildProductActionButton(
+                                icon: Icons.delete_rounded,
+                                backgroundColor: const Color(0xFFD32F2F),
+                                iconColor: Colors.white,
+                                tooltip: 'ลบสินค้า',
+                                onPressed: () => _deleteProduct(product),
+                              ),
+                            ],
+                          ),
                         ),
                 ),
               ],
             ),
-          ),
         );
       },
     );
-  }  
+  }
+}
+
+class _DiscountPercentDialog extends StatefulWidget {
+  const _DiscountPercentDialog({
+    required this.productName,
+    required this.initialPercent,
+    required this.parseInput,
+    required this.formatPercent,
+  });
+
+  final String productName;
+  final double initialPercent;
+  final double? Function(String raw) parseInput;
+  final String Function(double value) formatPercent;
+
+  @override
+  State<_DiscountPercentDialog> createState() => _DiscountPercentDialogState();
+}
+
+class _DiscountPercentDialogState extends State<_DiscountPercentDialog> {
+  late final TextEditingController _controller;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.initialPercent > 0
+          ? widget.formatPercent(widget.initialPercent)
+          : '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final parsed = widget.parseInput(_controller.text);
+    if (parsed == null) {
+      setState(() {
+        _errorText = 'กรุณาใส่ตัวเลข 0-100 เท่านั้น';
+      });
+      return;
+    }
+    Navigator.of(context).pop(parsed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('ส่วนลด — ${widget.productName}'),
+      content: SingleChildScrollView(
+        child: TextField(
+          controller: _controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          textInputAction: TextInputAction.done,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: 'ส่วนลด (%)',
+            hintText: 'เช่น 10 (เว้นว่าง = ไม่ลด)',
+            border: const OutlineInputBorder(),
+            suffixText: '%',
+            errorText: _errorText,
+          ),
+          onChanged: (_) {
+            if (_errorText != null) {
+              setState(() => _errorText = null);
+            }
+          },
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('ยกเลิก'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('บันทึก'),
+        ),
+      ],
+    );
+  }
 }

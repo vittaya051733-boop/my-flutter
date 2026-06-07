@@ -115,6 +115,8 @@ class BetterPlayerController {
   ///Has player been disposed.
   bool _disposed = false;
 
+  bool get isDisposed => _disposed;
+
   ///Was player playing before automatic pause.
   bool? _wasPlayingBeforePause;
 
@@ -611,8 +613,8 @@ class BetterPlayerController {
   ///Start video playback. Play will be triggered only if current lifecycle state
   ///is resumed.
   Future<void> play() async {
-    if (videoPlayerController == null) {
-      throw StateError("The data source has not been initialized");
+    if (_disposed || videoPlayerController == null) {
+      return;
     }
 
     if (_appLifecycleState == AppLifecycleState.resumed) {
@@ -635,8 +637,8 @@ class BetterPlayerController {
 
   ///Stop video playback.
   Future<void> pause() async {
-    if (videoPlayerController == null) {
-      throw StateError("The data source has not been initialized");
+    if (_disposed || videoPlayerController == null) {
+      return;
     }
 
     await videoPlayerController!.pause();
@@ -1291,6 +1293,7 @@ class BetterPlayerController {
         videoPlayerController!.removeListener(_onFullScreenStateChanged);
         videoPlayerController!.removeListener(_onVideoPlayerChanged);
         videoPlayerController!.dispose();
+        videoPlayerController = null;
       }
       _eventListeners.clear();
       _nextVideoTimer?.cancel();

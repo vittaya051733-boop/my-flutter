@@ -7,6 +7,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 import '../services/media_cache_service.dart';
+import '../services/video_prefetch_service.dart';
 import '../services/video_source_helper.dart';
 import 'cached_app_image.dart';
 
@@ -15,18 +16,49 @@ class ProductVideoPlayer extends StatefulWidget {
     super.key,
     required this.videoUrl,
     this.thumbnailUrl,
+    /// When set, parent (e.g. PageView) controls play/pause explicitly.
+    /// When null, playback follows [VisibilityDetector].
+    this.isActive,
   });
 
   final String videoUrl;
   final String? thumbnailUrl;
+  final bool? isActive;
 
   @override
   State<ProductVideoPlayer> createState() => _ProductVideoPlayerState();
 }
 
 class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
-  final Key _visibilityKey = UniqueKey();
-  _BetterPlayerPoolHandle? _poolHandle;
+  static const BetterPlayerConfiguration _playerConfig =
+      BetterPlayerConfiguration(
+    autoPlay: true,
+    looping: true,
+    fit: BoxFit.cover,
+    allowedScreenSleep: false,
+    autoDispose: false,
+    handleLifecycle: false,
+    controlsConfiguration: BetterPlayerControlsConfiguration(
+      showControls: false,
+      showControlsOnInitialize: false,
+      enablePlayPause: false,
+      enableFullscreen: false,
+      enableMute: false,
+      enableProgressBar: false,
+      enableProgressBarDrag: false,
+      enableProgressText: false,
+      enableSkips: false,
+      enableOverflowMenu: false,
+      enablePlaybackSpeed: false,
+      enableSubtitles: false,
+      enableQualities: false,
+      enableAudioTracks: false,
+      enableRetry: false,
+      enablePip: false,
+      loadingWidget: SizedBox.shrink(),
+    ),
+  );
+
   BetterPlayerController? _controller;
   bool _hasError = false;
   bool _isInitialized = false;
@@ -34,14 +66,33 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   bool _isBuffering = false;
   bool _isVisible = false;
   bool _isInitializingController = false;
+  bool _wantsAutoplay = false;
+  bool _released = false;
   int _thumbnailRequestId = 0;
+
+  bool get _isPlaybackAllowed => widget.isActive ?? _isVisible;
   String? _thumbnailSource;
   bool _thumbnailIsFile = false;
+
+  void _safeSetState(VoidCallback fn) {
+    if (!mounted || _released) {
+      return;
+    }
+    setState(fn);
+  }
 
   @override
   void initState() {
     super.initState();
+    VideoPrefetchService.instance.preloadVideo(widget.videoUrl);
     _loadThumbnail();
+    if (widget.isActive == true) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _onPlaybackAllowedChanged();
+        }
+      });
+    }
   }
 
   @override
@@ -49,42 +100,137 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
     super.didUpdateWidget(oldWidget);
     if (widget.videoUrl != oldWidget.videoUrl) {
       unawaited(_releaseController());
+      VideoPrefetchService.instance.preloadVideo(widget.videoUrl);
       _loadThumbnail();
     }
     if (widget.thumbnailUrl != oldWidget.thumbnailUrl) {
       _loadThumbnail();
     }
+    if (widget.isActive != oldWidget.isActive) {
+      _onPlaybackAllowedChanged();
+    }
+  }
+
+  void _onPlaybackAllowedChanged() {
+    if (_isPlaybackAllowed) {
+      _wantsAutoplay = true;
+      if (_hasError) {
+        _safeSetState(() => _hasError = false);
+      }
+      unawaited(_ensureControllerInitialized());
+      return;
+    }
+    _wantsAutoplay = false;
+    _safePause();
+  }
+
+  void _safePlay() {
+    if (!_isPlaybackAllowed) {
+      return;
+    }
+    _wantsAutoplay = true;
+    final controller = _controller;
+    if (controller == null || controller.isDisposed) {
+      return;
+    }
+    unawaited(controller.play().catchError((Object error) {
+      debugPrint('ProductVideoPlayer: play failed -> $error');
+    }));
+  }
+
+  void _safePause() {
+    final controller = _controller;
+    if (controller == null || controller.isDisposed) {
+      return;
+    }
+    unawaited(controller.pause().catchError((Object error) {
+      debugPrint('ProductVideoPlayer: pause failed -> $error');
+    }));
+  }
+
+  Future<void> _resumePlayback() async {
+    if (!_isPlaybackAllowed) {
+      return;
+    }
+    final controller = _controller;
+    if (controller == null || controller.isDisposed) {
+      await _ensureControllerInitialized();
+      return;
+    }
+    _wantsAutoplay = true;
+    try {
+      await controller.pause();
+      await controller.seekTo(Duration.zero);
+      await controller.play();
+    } catch (error) {
+      debugPrint('ProductVideoPlayer: resume failed -> $error');
+      await _recreateController();
+    }
+  }
+
+  Future<void> _recreateController() async {
+    await _releaseController();
+    if (!mounted || !_isPlaybackAllowed) {
+      return;
+    }
+    await _ensureControllerInitialized();
   }
 
   Future<void> _ensureControllerInitialized() async {
-    if (_poolHandle != null || _isInitializingController || !_isVisible) {
-      _controller?.play();
+    if (!_isPlaybackAllowed) {
       return;
     }
+
+    final existing = _controller;
+    if (existing != null) {
+      if (!existing.isDisposed) {
+        await _resumePlayback();
+      } else {
+        _controller = null;
+      }
+      if (_controller != null || _isInitializingController) {
+        return;
+      }
+    }
+
+    if (_isInitializingController) {
+      return;
+    }
+
     _isInitializingController = true;
+    BetterPlayerController? createdController;
     try {
       final resolvedUrl = await VideoSourceHelper.resolveMediaUrl(widget.videoUrl);
-      if (!mounted || !_isVisible) {
+      if (!mounted || _released || !_isPlaybackAllowed) {
         return;
       }
+
       final dataSource = VideoSourceHelper.buildDataSource(resolvedUrl);
-      final handle = await _BetterPlayerControllerPool.acquire(widget.videoUrl, dataSource);
-      if (!mounted || !_isVisible) {
-        await handle.release(_handleBetterPlayerEvent);
+      createdController = BetterPlayerController(
+        _playerConfig,
+        betterPlayerDataSource: dataSource,
+      );
+      createdController.addEventsListener(_handleBetterPlayerEvent);
+
+      if (!mounted || _released || !_isPlaybackAllowed) {
         return;
       }
-      handle.controller.addEventsListener(_handleBetterPlayerEvent);
-      setState(() {
-        _poolHandle = handle;
-        _controller = handle.controller;
+
+      _safeSetState(() {
+        _controller = createdController;
         _hasError = false;
         _isBuffering = true;
       });
-      handle.controller.play();
+      createdController = null;
+      _safePlay();
     } catch (error) {
       debugPrint('ProductVideoPlayer: init error -> $error');
-      setState(() => _hasError = true);
+      _safeSetState(() => _hasError = true);
     } finally {
+      if (createdController != null) {
+        createdController.removeEventsListener(_handleBetterPlayerEvent);
+        createdController.dispose(forceDispose: true);
+      }
       _isInitializingController = false;
     }
   }
@@ -97,7 +243,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
       if (!mounted || requestId != _thumbnailRequestId) {
         return;
       }
-      setState(() {
+      _safeSetState(() {
         _thumbnailSource = cachedPath ?? url;
         _thumbnailIsFile = cachedPath != null || !VideoSourceHelper.isNetworkUrl(url);
       });
@@ -114,7 +260,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
       return;
     }
     if (cached != null) {
-      setState(() {
+      _safeSetState(() {
         _thumbnailSource = cached;
         _thumbnailIsFile = true;
       });
@@ -158,7 +304,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
       }
 
       if (localPath != null) {
-        setState(() {
+        _safeSetState(() {
           _thumbnailSource = localPath;
           _thumbnailIsFile = true;
         });
@@ -171,30 +317,37 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   String get _fallbackCacheKey => 'generated_video_thumb::${widget.videoUrl}';
 
   void _handleBetterPlayerEvent(BetterPlayerEvent event) {
-    if (!mounted) return;
+    if (!mounted || _released) return;
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.exception:
-        setState(() => _hasError = true);
+        _safeSetState(() => _hasError = true);
         unawaited(_releaseController());
         break;
       case BetterPlayerEventType.initialized:
-        setState(() => _isInitialized = true);
+        _safeSetState(() => _isInitialized = true);
+        if (_wantsAutoplay && _isPlaybackAllowed) {
+          _safePlay();
+        }
         break;
       case BetterPlayerEventType.play:
-        setState(() {
+        _safeSetState(() {
           _isPlaying = true;
           _isBuffering = false;
         });
         break;
       case BetterPlayerEventType.bufferingStart:
-        setState(() => _isBuffering = true);
+        _safeSetState(() => _isBuffering = true);
         break;
       case BetterPlayerEventType.bufferingEnd:
-        setState(() => _isBuffering = false);
+        _safeSetState(() => _isBuffering = false);
         break;
       case BetterPlayerEventType.finished:
+        break;
       case BetterPlayerEventType.pause:
-        setState(() => _isBuffering = false);
+        _safeSetState(() {
+          _isPlaying = false;
+          _isBuffering = false;
+        });
         break;
       default:
         break;
@@ -203,45 +356,70 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
 
   @override
   void dispose() {
-    unawaited(_releaseController());
+    _released = true;
+    _wantsAutoplay = false;
+    final controller = _controller;
+    _controller = null;
+    _isInitialized = false;
+    _isPlaying = false;
+    _isBuffering = false;
+    if (controller != null) {
+      controller.removeEventsListener(_handleBetterPlayerEvent);
+      unawaited(_disposeControllerQuietly(controller));
+    }
     super.dispose();
   }
 
-  Future<void> _releaseController() async {
-    final handle = _poolHandle;
-    if (handle == null) return;
-    _poolHandle = null;
-    await handle.release(_handleBetterPlayerEvent);
-    if (mounted) {
-      setState(() {
-        _controller = null;
-        _isInitialized = false;
-        _isPlaying = false;
-        _isBuffering = false;
-      });
+  Future<void> _disposeControllerQuietly(BetterPlayerController controller) async {
+    try {
+      await controller.pause();
+    } catch (error) {
+      debugPrint('ProductVideoPlayer: pause on release failed -> $error');
+    }
+    if (!controller.isDisposed) {
+      controller.dispose(forceDispose: true);
     }
   }
 
-  void _handleVisibilityChanged(VisibilityInfo info) {
-    final mostlyVisible = info.visibleFraction >= 0.6;
-    final hidden = info.visibleFraction == 0;
-
-    if (mostlyVisible) {
-      if (!_isVisible) {
-        _isVisible = true;
-        _ensureControllerInitialized();
-      } else {
-        _controller?.play();
-      }
-    } else {
-      if (_isVisible) {
-        _isVisible = false;
-        _controller?.pause();
-      }
-      if (hidden) {
-        unawaited(_releaseController());
-      }
+  Future<void> _releaseController() async {
+    if (_released) {
+      return;
     }
+    final controller = _controller;
+    if (controller == null) {
+      return;
+    }
+
+    _wantsAutoplay = false;
+    _controller = null;
+    _safeSetState(() {
+      _isInitialized = false;
+      _isPlaying = false;
+      _isBuffering = false;
+    });
+
+    controller.removeEventsListener(_handleBetterPlayerEvent);
+    await _disposeControllerQuietly(controller);
+  }
+
+  void _handleVisibilityChanged(VisibilityInfo info) {
+    if (info.visibleFraction >= 0.12) {
+      VideoPrefetchService.instance.preloadVideo(widget.videoUrl);
+    }
+
+    if (widget.isActive != null) {
+      return;
+    }
+
+    final mostlyVisible = info.visibleFraction >= 0.45;
+    final wasVisible = _isVisible;
+    _isVisible = mostlyVisible;
+
+    if (mostlyVisible == wasVisible) {
+      return;
+    }
+
+    _onPlaybackAllowedChanged();
   }
 
   @override
@@ -264,13 +442,16 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
     final showPlaceholder = hasThumbnail && (!_isInitialized || !_isPlaying || _isBuffering);
 
     return VisibilityDetector(
-      key: _visibilityKey,
+      key: ValueKey<String>('product-video-${widget.videoUrl}'),
       onVisibilityChanged: _handleVisibilityChanged,
       child: Stack(
         fit: StackFit.expand,
         children: [
           if (controller != null)
-            BetterPlayer(controller: controller)
+            BetterPlayer(
+              key: ValueKey<Object>(controller),
+              controller: controller,
+            )
           else
             const SizedBox.shrink(),
           if (hasThumbnail)
@@ -283,7 +464,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
                 child: _buildPlaceholder(),
               ),
             ),
-          if (controller == null && _isVisible)
+          if (controller == null && _isPlaybackAllowed)
             const _InlineLoadingOverlay(),
         ],
       ),
@@ -333,95 +514,5 @@ class _InlineLoadingOverlay extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-typedef _BetterPlayerEventListener = void Function(BetterPlayerEvent event);
-
-class _BetterPlayerPoolHandle {
-  _BetterPlayerPoolHandle(this._cacheKey, this.controller);
-
-  final String _cacheKey;
-  final BetterPlayerController controller;
-
-  Future<void> release(_BetterPlayerEventListener listener) async {
-    controller.removeEventsListener(listener);
-    await _BetterPlayerControllerPool.release(_cacheKey, controller);
-  }
-}
-
-class _CachedControllerEntry {
-  _CachedControllerEntry(this.controller) : insertedAt = DateTime.now();
-
-  final BetterPlayerController controller;
-  final DateTime insertedAt;
-}
-
-class _BetterPlayerControllerPool {
-  static const Duration _maxIdleAge = Duration(minutes: 2);
-  static const int _maxEntries = 4;
-  static final Map<String, _CachedControllerEntry> _idle = <String, _CachedControllerEntry>{};
-  static const BetterPlayerConfiguration _config = BetterPlayerConfiguration(
-    autoPlay: false,
-    looping: true,
-    fit: BoxFit.cover,
-    allowedScreenSleep: false,
-    handleLifecycle: true,
-    controlsConfiguration: BetterPlayerControlsConfiguration(
-      showControls: false,
-      showControlsOnInitialize: false,
-      enablePlayPause: false,
-      enableFullscreen: false,
-      enableMute: false,
-      enableProgressBar: false,
-      enableProgressBarDrag: false,
-      enableProgressText: false,
-      enableSkips: false,
-      enableOverflowMenu: false,
-      enablePlaybackSpeed: false,
-      enableSubtitles: false,
-      enableQualities: false,
-      enableAudioTracks: false,
-      enableRetry: false,
-      enablePip: false,
-      loadingWidget: SizedBox.shrink(),
-    ),
-  );
-
-  static Future<_BetterPlayerPoolHandle> acquire(
-    String cacheKey,
-    BetterPlayerDataSource dataSource,
-  ) async {
-    _evictExpired();
-    final cached = _idle.remove(cacheKey);
-    if (cached != null) {
-      return _BetterPlayerPoolHandle(cacheKey, cached.controller);
-    }
-    final controller = BetterPlayerController(_config, betterPlayerDataSource: dataSource);
-    return _BetterPlayerPoolHandle(cacheKey, controller);
-  }
-
-  static Future<void> release(String cacheKey, BetterPlayerController controller) async {
-    controller.pause();
-    if (_idle.length >= _maxEntries) {
-      final oldestKey = _idle.entries
-          .reduce((a, b) => a.value.insertedAt.isBefore(b.value.insertedAt) ? a : b)
-          .key;
-      final removed = _idle.remove(oldestKey);
-      removed?.controller.dispose();
-    }
-    _idle[cacheKey] = _CachedControllerEntry(controller);
-  }
-
-  static void _evictExpired() {
-    final now = DateTime.now();
-    final expiredKeys = _idle.entries
-        .where((entry) => now.difference(entry.value.insertedAt) > _maxIdleAge)
-        .map((entry) => entry.key)
-        .toList(growable: false);
-    for (final key in expiredKeys) {
-      final removed = _idle.remove(key);
-      removed?.controller.dispose();
-    }
   }
 }

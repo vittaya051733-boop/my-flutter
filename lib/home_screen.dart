@@ -20,6 +20,7 @@ import 'services/product_cache_service.dart';
 import 'services/shop_operations_service.dart';
 import 'services/video_prefetch_service.dart';
 import 'models/shop_operations_settings.dart';
+import 'merchant_pricing_policy.dart';
 import 'utils/shop_profile_resolver.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -353,6 +354,38 @@ class _HomeScreenState extends State<HomeScreen>
     return products;
   }
 
+  List<CachedProduct> _orderHomeProducts(
+    Iterable<CachedProduct> products,
+    Set<String> ids,
+  ) {
+    final byId = <String, CachedProduct>{
+      for (final product in products) product.id: product,
+    };
+    return <CachedProduct>[
+      for (final id in ids)
+        if (byId.containsKey(id)) byId[id]!,
+    ];
+  }
+
+  Future<void> _refreshHomeProductsAfterCatalogChange() async {
+    if (!mounted) return;
+
+    final userId = _currentUserId;
+    if (userId != null && _homeProductIds.isNotEmpty && _isShopOpen) {
+      final cached = await ProductCacheService.instance.loadProducts(userId);
+      final ordered = _orderHomeProducts(cached, _homeProductIds);
+      if (mounted && ordered.isNotEmpty) {
+        setState(() {
+          _localCachedProducts = ordered;
+          _pages[0] = _buildPage(0);
+        });
+      }
+    }
+
+    if (!mounted) return;
+    _updateHomeProductsCache();
+  }
+
   void _updateHomeProductsCache() {
     final userId = _currentUserId;
     if (!mounted) return;
@@ -588,10 +621,14 @@ class _HomeScreenState extends State<HomeScreen>
     if (_tabController.indexIsChanging) return;
     final int newIndex = _tabController.index;
     if (newIndex != _currentIndex) {
+      final shouldRefreshHome = newIndex == 0 && _currentIndex == 1;
       setState(() {
         _currentIndex = newIndex;
         _pages[newIndex] ??= _buildPage(newIndex);
       });
+      if (shouldRefreshHome) {
+        _refreshHomeProductsAfterCatalogChange();
+      }
     }
   }
 
@@ -647,6 +684,7 @@ class _HomeScreenState extends State<HomeScreen>
             _updateHomeProductsCache();
             _saveHomeProductIds(ids);
           },
+          onHomeProductsChanged: _refreshHomeProductsAfterCatalogChange,
         );
       case 2:
         return const OrderManagementScreen();
@@ -897,6 +935,31 @@ class _HomeDashboard extends StatelessWidget {
   final Future<List<CachedProduct>>? homeProductsFuture;
   final List<CachedProduct> cachedProducts;
 
+  Widget _buildHomeDiscountBadge(double discountPercent) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFD32F2F),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        'ลด ${MerchantPricingPolicy.formatDiscountPercent(discountPercent)}%',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
   void _showProductGallery(BuildContext context, Map<String, dynamic> data) {
     final List<String> allImages = _extractImages(
       data,
@@ -915,6 +978,7 @@ class _HomeDashboard extends StatelessWidget {
     final price = (data['price'] ?? '').toString();
     final stock = data['stock']?.toString() ?? '0';
     final description = (data['description'] ?? '').toString();
+    final productId = (data['documentId'] ?? data['id'] ?? '').toString();
     final videoThumbnailUrl = (data['videoThumbnailUrl'] ?? '')
         .toString()
         .trim();
@@ -936,6 +1000,7 @@ class _HomeDashboard extends StatelessWidget {
           price: price,
           stock: stock,
           description: description,
+          productId: productId,
         ),
       ),
     );
@@ -1217,6 +1282,19 @@ class _HomeDashboard extends StatelessWidget {
                                   : null;
                               final name = (data['name'] ?? '').toString();
                               final price = (data['price'] ?? '').toString();
+                              final discountPercent =
+                                  MerchantPricingPolicy.parseDiscountPercent(
+                                data['discountPercent'],
+                              );
+                              final basePrice =
+                                  MerchantPricingPolicy.parseNumber(
+                                data['price'] ?? price,
+                              );
+                              final discountedPrice =
+                                  MerchantPricingPolicy.applyDiscount(
+                                basePrice,
+                                discountPercent,
+                              );
                               final stock = data['stock']?.toString() ?? '0';
                               final description = (data['description'] ?? '')
                                   .toString();
@@ -1250,6 +1328,7 @@ class _HomeDashboard extends StatelessWidget {
                                     data,
                                   );
                                   modalData['imageUrls'] = galleryImages;
+                                  modalData['documentId'] = doc.id;
                                   _showProductGallery(context, modalData);
                                 },
                                 child: Container(
@@ -1379,16 +1458,44 @@ class _HomeDashboard extends StatelessWidget {
                                                       TextOverflow.ellipsis,
                                                 ),
                                                 const SizedBox(height: 2),
-                                                Text(
-                                                  'ราคา: $price บาท',
-                                                  style: const TextStyle(
-                                                    fontSize: 13,
-                                                    color: Colors.white70,
+                                                if (discountPercent > 0) ...[
+                                                  Text(
+                                                    'ราคาเต็ม: ${MerchantPricingPolicy.formatPrice(basePrice)} บาท',
+                                                    style: const TextStyle(
+                                                      fontSize: 12,
+                                                      color: Colors.white60,
+                                                      decoration:
+                                                          TextDecoration
+                                                              .lineThrough,
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
                                                   ),
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                ),
+                                                  const SizedBox(height: 2),
+                                                  Text(
+                                                    'หลังลด: ${MerchantPricingPolicy.formatPrice(discountedPrice)} บาท',
+                                                    style: const TextStyle(
+                                                      fontSize: 13,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                      color: Color(0xFFFFD180),
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ] else
+                                                  Text(
+                                                    'ราคา: $price บาท',
+                                                    style: const TextStyle(
+                                                      fontSize: 13,
+                                                      color: Colors.white70,
+                                                    ),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
                                                 Text(
                                                   'สต๊อก: $stock',
                                                   style: const TextStyle(
@@ -1398,6 +1505,10 @@ class _HomeDashboard extends StatelessWidget {
                                                   maxLines: 1,
                                                   overflow:
                                                       TextOverflow.ellipsis,
+                                                ),
+                                                _MerchantProductRatingSummary(
+                                                  productId: doc.id,
+                                                  compact: true,
                                                 ),
                                                 if (description.isNotEmpty) ...[
                                                   const SizedBox(height: 4),
@@ -1418,6 +1529,14 @@ class _HomeDashboard extends StatelessWidget {
                                             ),
                                           ),
                                         ),
+                                        if (discountPercent > 0)
+                                          Positioned(
+                                            top: 8,
+                                            right: 8,
+                                            child: _buildHomeDiscountBadge(
+                                              discountPercent,
+                                            ),
+                                          ),
                                       ],
                                     ),
                                   ),
@@ -1510,6 +1629,91 @@ String _readHomeProductTypeLabel(Map<String, dynamic> data) {
     data['catalogType'],
   ].map((value) => value?.toString().trim() ?? '').join(' ').toLowerCase();
 
+  if (_isHomePharmacyProduct(source)) {
+    return 'ยาและเวชภัณฑ์';
+  }
+
+  final marketType = _readHomeMarketProductTypeLabel(source);
+  if (marketType != null) {
+    return marketType;
+  }
+
+  final catalogType = (data['catalogType'] ?? '').toString().trim();
+  if (catalogType.isNotEmpty) {
+    return catalogType;
+  }
+  final aiType = (data['aiProductType'] ?? '').toString().trim();
+  if (aiType.isNotEmpty) {
+    return aiType;
+  }
+  final productType = (data['productType'] ?? '').toString().trim();
+  if (productType.isNotEmpty) {
+    return productType;
+  }
+  return fallbackType;
+}
+
+bool _homeProductContainsAny(String source, List<String> values) {
+  return values.any((value) => source.contains(value));
+}
+
+String? _readHomeMarketProductTypeLabel(String source) {
+  final isSeafood = _homeProductContainsAny(source, const <String>[
+    'ปลา',
+    'กุ้ง',
+    'ปู',
+    'หอย',
+    'ปลาหมึก',
+    'อาหารทะเล',
+    'seafood',
+    'fish',
+    'shrimp',
+    'crab',
+    'squid',
+    'shellfish',
+  ]);
+  final isDriedOrProcessed = _homeProductContainsAny(source, const <String>[
+    'อาหารทะเลแปรรูป',
+    'แปรรูป',
+    'ของแห้ง',
+    'แห้ง',
+    'อบแห้ง',
+    'ตากแห้ง',
+    'แดดเดียว',
+    'เค็ม',
+    'รมควัน',
+    'ถนอมอาหาร',
+    'processed',
+    'dried',
+    'dry',
+    'smoked',
+    'salted',
+  ]);
+
+  if (isSeafood && isDriedOrProcessed) return 'อาหารทะเลแปรรูป';
+  if (isSeafood) return 'อาหารทะเลสด';
+  if (_homeProductContainsAny(source, const <String>[
+    'เนื้อ',
+    'หมู',
+    'ไก่',
+    'เป็ด',
+    'วัว',
+    'beef',
+    'meat',
+    'chicken',
+    'pork',
+    'duck',
+  ])) {
+    return 'เนื้อสัตว์';
+  }
+  if (_homeProductContainsAny(source, const <String>[
+    'ไข่',
+    'เต้าหู้',
+    'tofu',
+    'egg',
+  ])) {
+    return 'ไข่ / เต้าหู้';
+  }
   if (_homeProductContainsAny(source, const <String>[
     'แก้วมังกร',
     'มังกร',
@@ -1532,27 +1736,6 @@ String _readHomeProductTypeLabel(Map<String, dynamic> data) {
   ])) {
     return 'ผลไม้';
   }
-
-  if (_homeProductContainsAny(source, const <String>[
-    'เนื้อ',
-    'หมู',
-    'ไก่',
-    'ปลา',
-    'กุ้ง',
-    'ปู',
-    'หอย',
-    'ปลาหมึก',
-    'อาหารทะเล',
-    'seafood',
-    'meat',
-    'chicken',
-    'pork',
-    'beef',
-    'fish',
-  ])) {
-    return 'ของสด';
-  }
-
   if (_homeProductContainsAny(source, const <String>[
     'ผัก',
     'ผักสด',
@@ -1562,38 +1745,213 @@ String _readHomeProductTypeLabel(Map<String, dynamic> data) {
     'ผักบุ้ง',
     'แตงกวา',
     'มะเขือ',
+    'ต้นหอม',
+    'ผักชี',
+    'พริก',
   ])) {
     return 'ผักสด';
   }
-
+  if (_homeProductContainsAny(source, const <String>[
+    'เครื่องปรุง',
+    'น้ำปลา',
+    'ซีอิ๊ว',
+    'ซอส',
+    'น้ำมันหอย',
+    'ผงชูรส',
+    'เกลือ',
+    'น้ำตาล',
+    'กะปิ',
+    'ปลาร้า',
+    'seasoning',
+    'sauce',
+  ])) {
+    return 'เครื่องปรุง / ซอส';
+  }
+  if (isDriedOrProcessed ||
+      _homeProductContainsAny(source, const <String>[
+        'ข้าวสาร',
+        'แป้ง',
+        'ถั่ว',
+        'ธัญพืช',
+        'เส้นหมี่',
+        'วุ้นเส้น',
+        'บะหมี่',
+        'มาม่า',
+        'กะทิ',
+        'วัตถุดิบ',
+        'grocery',
+        'pantry',
+      ])) {
+    return 'ของแห้ง / วัตถุดิบ';
+  }
+  if (_homeProductContainsAny(source, const <String>[
+    'อาหารพร้อมทาน',
+    'พร้อมทาน',
+    'ข้าวกล่อง',
+    'ข้าวแกง',
+    'แกง',
+    'ผัด',
+    'ทอด',
+    'ต้ม',
+    'ยำ',
+    'กับข้าว',
+    'prepared',
+    'cooked',
+  ])) {
+    return 'อาหารพร้อมทาน';
+  }
+  if (_homeProductContainsAny(source, const <String>[
+    'ขนม',
+    'เบเกอรี่',
+    'เค้ก',
+    'ปัง',
+    'คุกกี้',
+    'ของหวาน',
+    'snack',
+    'bakery',
+    'dessert',
+  ])) {
+    return 'ขนม / เบเกอรี่';
+  }
   if (_homeProductContainsAny(source, const <String>[
     'เครื่องดื่ม',
-    'น้ำ',
+    'น้ำดื่ม',
+    'น้ำอัดลม',
     'ชา',
     'กาแฟ',
+    'นม',
     'beverage',
     'drink',
+    'coffee',
+    'tea',
   ])) {
     return 'เครื่องดื่ม';
   }
-
-  final catalogType = (data['catalogType'] ?? '').toString().trim();
-  if (catalogType.isNotEmpty) {
-    return catalogType;
+  if (_homeProductContainsAny(source, const <String>[
+    'ชุดนักเรียน',
+    'เครื่องแบบ',
+    'uniform',
+  ])) {
+    return 'ชุดนักเรียน / เครื่องแบบ';
   }
-  final aiType = (data['aiProductType'] ?? '').toString().trim();
-  if (aiType.isNotEmpty) {
-    return aiType;
+  if (_homeProductContainsAny(source, const <String>[
+    'รองเท้า',
+    'กระเป๋า',
+    'แตะ',
+    'sneaker',
+    'shoe',
+    'bag',
+  ])) {
+    return 'รองเท้า / กระเป๋า';
   }
-  final productType = (data['productType'] ?? '').toString().trim();
-  if (productType.isNotEmpty) {
-    return productType;
+  if (_homeProductContainsAny(source, const <String>[
+    'เสื้อ',
+    'กางเกง',
+    'กระโปรง',
+    'เดรส',
+    'ผ้า',
+    'เสื้อผ้า',
+    'clothes',
+    'shirt',
+    'pants',
+    'dress',
+  ])) {
+    return 'เสื้อผ้า';
   }
-  return fallbackType;
+  if (_homeProductContainsAny(source, const <String>[
+    'สมุด',
+    'หนังสือ',
+    'ดินสอ',
+    'ปากกา',
+    'ยางลบ',
+    'ไม้บรรทัด',
+    'เครื่องเขียน',
+    'อุปกรณ์เรียน',
+    'stationery',
+    'notebook',
+    'pencil',
+    'pen',
+  ])) {
+    return 'เครื่องเขียน / อุปกรณ์เรียน';
+  }
+  if (_homeProductContainsAny(source, const <String>[
+    'น้ำยาล้างจาน',
+    'ผงซักฟอก',
+    'น้ำยาปรับผ้านุ่ม',
+    'ไม้กวาด',
+    'ถุงขยะ',
+    'ทิชชู่',
+    'ของใช้ในบ้าน',
+    'household',
+    'detergent',
+  ])) {
+    return 'ของใช้ในบ้าน';
+  }
+  if (_homeProductContainsAny(source, const <String>[
+    'สบู่',
+    'แชมพู',
+    'ยาสีฟัน',
+    'แปรงสีฟัน',
+    'ครีม',
+    'โลชั่น',
+    'ของใช้ส่วนตัว',
+    'personal care',
+    'shampoo',
+    'soap',
+  ])) {
+    return 'ของใช้ส่วนตัว';
+  }
+  return null;
 }
 
-bool _homeProductContainsAny(String source, List<String> values) {
-  return values.any((value) => source.contains(value));
+bool _isHomePharmacyProduct(String source) {
+  return _homeProductContainsAny(source, const <String>[
+    'ยา',
+    'เวชภัณฑ์',
+    'เภสัช',
+    'pharmacy',
+    'medicine',
+    'drug',
+    'medical',
+    'พารา',
+    'paracetamol',
+    'ibuprofen',
+    'ไอบู',
+    'แก้แพ้',
+    'loratadine',
+    'cetirizine',
+    'แก้ไอ',
+    'ลดน้ำมูก',
+    'ท้องเสีย',
+    'ลดกรด',
+    'ยาระบาย',
+    'เกลือแร่',
+    'ยาหม่อง',
+    'เบตาดีน',
+    'betadine',
+    'พลาสเตอร์',
+    'ผ้าก๊อซ',
+    'สำลี',
+    'แอลกอฮอล์',
+    'หน้ากาก',
+    'ถุงมือ',
+    'ปรอทวัดไข้',
+    'เครื่องวัดความดัน',
+    'วิตามิน',
+    'อาหารเสริม',
+    'คอลลาเจน',
+    'แคลเซียม',
+    'ผ้าอ้อม',
+    'ขวดนม',
+    'นมผง',
+    'ยาสีฟัน',
+    'แปรงสีฟัน',
+    'น้ำยาบ้วนปาก',
+    'ครีมกันแดด',
+    'โลชั่น',
+    'โฟมล้างหน้า',
+    'น้ำเกลือ',
+  ]);
 }
 
 String _homeProductTypeKey(String label) {
@@ -1613,16 +1971,226 @@ int? _parseHomeProductTypeSort(Object? value) {
 
 int _defaultHomeProductTypeSort(String label) {
   switch (label) {
-    case 'ผลไม้':
-      return 10;
     case 'ผักสด':
+      return 10;
+    case 'ผลไม้':
       return 20;
-    case 'ของสด':
+    case 'เนื้อสัตว์':
       return 30;
-    case 'เครื่องดื่ม':
+    case 'อาหารทะเลสด':
       return 40;
+    case 'อาหารทะเลแปรรูป':
+      return 50;
+    case 'ไข่ / เต้าหู้':
+      return 60;
+    case 'อาหารพร้อมทาน':
+      return 70;
+    case 'ของแห้ง / วัตถุดิบ':
+    case 'ของแห้ง':
+      return 80;
+    case 'เครื่องปรุง / ซอส':
+      return 90;
+    case 'ขนม / เบเกอรี่':
+      return 100;
+    case 'เครื่องดื่ม':
+      return 110;
+    case 'เสื้อผ้า':
+      return 120;
+    case 'ชุดนักเรียน / เครื่องแบบ':
+      return 130;
+    case 'รองเท้า / กระเป๋า':
+      return 140;
+    case 'ของใช้ในบ้าน':
+      return 150;
+    case 'ของใช้ส่วนตัว':
+      return 160;
+    case 'เครื่องเขียน / อุปกรณ์เรียน':
+      return 170;
+    case 'ยาและเวชภัณฑ์':
+      return 180;
+    case 'ของสด':
+      return 190;
     default:
       return 500000;
+  }
+}
+
+class _MerchantProductRatingSummary extends StatelessWidget {
+  const _MerchantProductRatingSummary({
+    required this.productId,
+    this.compact = false,
+  });
+
+  final String productId;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    if (productId.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('product_review_stats')
+          .doc(productId)
+          .snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final count = (data?['ratingCount'] as num?)?.toInt() ?? 0;
+        final average = (data?['ratingAverage'] as num?)?.toDouble() ?? 0;
+        if (count <= 0 || average <= 0) {
+          return const SizedBox.shrink();
+        }
+
+        return Padding(
+          padding: EdgeInsets.only(top: compact ? 2 : 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(
+                Icons.star_rounded,
+                size: compact ? 14 : 16,
+                color: const Color(0xFFF59E0B),
+              ),
+              const SizedBox(width: 3),
+              Flexible(
+                child: Text(
+                  '${average.toStringAsFixed(1)} ($count รีวิว)',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: compact ? Colors.white70 : const Color(0xFF92400E),
+                    fontSize: compact ? 12 : 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MerchantProductRecentReviews extends StatelessWidget {
+  const _MerchantProductRecentReviews({required this.productId});
+
+  final String productId;
+
+  @override
+  Widget build(BuildContext context) {
+    if (productId.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('product_reviews')
+          .where('productId', isEqualTo: productId)
+          .where('status', isEqualTo: 'visible')
+          .limit(5)
+          .snapshots(),
+      builder: (context, snapshot) {
+        final docs = snapshot.data?.docs ?? const [];
+        if (docs.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        final reviews = docs.map((doc) => doc.data()).toList(growable: false)
+          ..sort((left, right) {
+            final leftTs = left['updatedAt'] ?? left['createdAt'];
+            final rightTs = right['updatedAt'] ?? right['createdAt'];
+            final leftMs = leftTs is Timestamp
+                ? leftTs.millisecondsSinceEpoch
+                : 0;
+            final rightMs = rightTs is Timestamp
+                ? rightTs.millisecondsSinceEpoch
+                : 0;
+            return rightMs.compareTo(leftMs);
+          });
+
+        return Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                'รีวิวจากลูกค้า',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 6),
+              for (final review in reviews) ...<Widget>[
+                _MerchantReviewPreview(review: review),
+                if (review != reviews.last) const Divider(height: 14),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MerchantReviewPreview extends StatelessWidget {
+  const _MerchantReviewPreview({required this.review});
+
+  final Map<String, dynamic> review;
+
+  @override
+  Widget build(BuildContext context) {
+    final rating = (review['rating'] as num?)?.toInt() ?? 0;
+    final comment = (review['comment'] as String?)?.trim() ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            for (var index = 1; index <= 5; index++)
+              Icon(
+                index <= rating
+                    ? Icons.star_rounded
+                    : Icons.star_border_rounded,
+                size: 16,
+                color: const Color(0xFFF59E0B),
+              ),
+          ],
+        ),
+        if (comment.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 4),
+          Text(
+            comment,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 13, color: Colors.black87),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _KeepAlivePage extends StatefulWidget {
+  const _KeepAlivePage({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_KeepAlivePage> createState() => _KeepAlivePageState();
+}
+
+class _KeepAlivePageState extends State<_KeepAlivePage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }
 
@@ -1633,6 +2201,7 @@ class _ProductGalleryContent extends StatefulWidget {
     required this.price,
     required this.stock,
     required this.description,
+    required this.productId,
     this.videoUrl,
     this.videoThumbnailUrl,
     Key? key,
@@ -1645,6 +2214,7 @@ class _ProductGalleryContent extends StatefulWidget {
   final String price;
   final String stock;
   final String description;
+  final String productId;
 
   @override
   State<_ProductGalleryContent> createState() => _ProductGalleryContentState();
@@ -1738,11 +2308,15 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                         );
                       } else if (hasVideo && index == totalPages - 1) {
                         // Last page: show video
+                        final isVideoPageActive = _currentIndex == index;
                         return ClipRRect(
                           borderRadius: BorderRadius.circular(12),
-                          child: ProductVideoPlayer(
-                            videoUrl: widget.videoUrl!,
-                            thumbnailUrl: widget.videoThumbnailUrl,
+                          child: _KeepAlivePage(
+                            child: ProductVideoPlayer(
+                              videoUrl: widget.videoUrl!,
+                              thumbnailUrl: widget.videoThumbnailUrl,
+                              isActive: isVideoPageActive,
+                            ),
                           ),
                         );
                       } else {
@@ -1808,6 +2382,8 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  _MerchantProductRatingSummary(productId: widget.productId),
+                  _MerchantProductRecentReviews(productId: widget.productId),
                   const SizedBox(height: 4),
                   Text(
                     'สต๊อก: ${widget.stock}',

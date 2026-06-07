@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
 import 'models/order_model.dart';
+import 'admin_support_thread_screen.dart';
 import 'services/notification_service.dart';
 
 enum _NotificationCategory {
@@ -111,6 +112,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
 
     if (type == 'chat' || action == 'chat_message') {
       return _NotificationCategory.chat;
+    }
+    if (action == 'admin_support_reply') {
+      return _NotificationCategory.system;
     }
     if (type == 'call' || action == 'incoming_call') {
       return _NotificationCategory.call;
@@ -294,6 +298,29 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     final isRead = data['read'] == true;
     if (!isRead) {
       await _markAppNotificationRead(notificationDoc.id);
+    }
+
+    final action = (data['action'] as String?)?.trim() ?? '';
+    if (action == 'admin_support_reply') {
+      final ticketId = (data['ticketId'] as String?)?.trim();
+      if (!mounted) {
+        return;
+      }
+      if (ticketId == null || ticketId.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('แจ้งเตือนนี้ไม่มีรหัสข้อความ')),
+        );
+        return;
+      }
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => AdminSupportThreadScreen(
+            ticketId: ticketId,
+            accentColor: const Color(0xFF2563EB),
+          ),
+        ),
+      );
+      return;
     }
 
     switch (category) {

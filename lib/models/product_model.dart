@@ -10,6 +10,7 @@ class Product {
   final bool isProcessed;
   final String? taxStatus;
   final double price;
+  final double discountPercent;
   final int stock;
   final int preparationTimeMinutes;
   final List<String> imageUrls;
@@ -43,6 +44,7 @@ class Product {
     this.isProcessed = false,
     this.taxStatus,
     required this.price,
+    this.discountPercent = 0,
     required this.stock,
     this.preparationTimeMinutes = 10,
     required this.imageUrls,
@@ -78,6 +80,7 @@ class Product {
       'isProcessed': isProcessed,
       'taxStatus': taxStatus,
       'price': price,
+      if (discountPercent > 0) 'discountPercent': discountPercent,
       'stock': stock,
       'preparationTimeMinutes': preparationTimeMinutes,
       'preparingDuration': preparationTimeMinutes * 60 * 1000,
@@ -126,6 +129,7 @@ class Product {
       isProcessed: (map['isProcessed'] as bool?) ?? false,
       taxStatus: map['taxStatus'] as String?,
       price: (map['price'] as num?)?.toDouble() ?? 0.0,
+      discountPercent: (map['discountPercent'] as num?)?.toDouble() ?? 0.0,
       stock: (map['stock'] as num?)?.toInt() ?? 0,
       preparationTimeMinutes:
           (map['preparationTimeMinutes'] as num?)?.toInt() ??
@@ -155,6 +159,43 @@ class Product {
       taxAiReason: map['taxAiReason'] as String?,
       canShipNationwide: map['canShipNationwide'] as bool?,
       nationwideShippingReason: map['nationwideShippingReason'] as String?,
+    );
+  }
+
+  Product copyWith({double? discountPercent}) {
+    return Product(
+      id: id,
+      name: name,
+      description: description,
+      toppings: toppings,
+      productCategory: productCategory,
+      isFreshProduct: isFreshProduct,
+      isProcessed: isProcessed,
+      taxStatus: taxStatus,
+      price: price,
+      discountPercent: discountPercent ?? this.discountPercent,
+      stock: stock,
+      preparationTimeMinutes: preparationTimeMinutes,
+      imageUrls: imageUrls,
+      thumbnailUrls: thumbnailUrls,
+      colors: colors,
+      sizes: sizes,
+      unit: unit,
+      weight: weight,
+      parcelLengthCm: parcelLengthCm,
+      parcelWidthCm: parcelWidthCm,
+      parcelHeightCm: parcelHeightCm,
+      videoUrl: videoUrl,
+      videoThumbnailUrl: videoThumbnailUrl,
+      aiDescriptionRequested: aiDescriptionRequested,
+      aiWhiteBackgroundRequested: aiWhiteBackgroundRequested,
+      aiProductAnalysisRequested: aiProductAnalysisRequested,
+      aiIsLegalInThailand: aiIsLegalInThailand,
+      aiLegalAnalysisReason: aiLegalAnalysisReason,
+      aiProductType: aiProductType,
+      taxAiReason: taxAiReason,
+      canShipNationwide: canShipNationwide,
+      nationwideShippingReason: nationwideShippingReason,
     );
   }
 }

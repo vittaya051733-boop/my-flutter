@@ -7,7 +7,14 @@ import 'welcome_screen.dart';
 import 'utils/app_colors.dart';
 import 'utils/shop_profile_resolver.dart';
 import 'models/operating_hours.dart';
+import 'admin_contact_screen.dart';
+import 'admin_support_inbox_screen.dart';
+import 'data/legal_content.dart';
+import 'help_center_screen.dart';
+import 'legal_document_screen.dart';
 import 'low_stock_products_screen.dart';
+import 'merchant_reviews_screen.dart';
+import 'services/admin_support_config.dart';
 import 'services/biometric_auth_service.dart';
 import 'services/shop_operations_service.dart';
 import 'widgets/cached_app_image.dart';
@@ -985,6 +992,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ],
                     ),
                     _buildSection(
+                      title: 'รีวิวจากลูกค้า',
+                      children: [
+                        ListTile(
+                          leading: const Icon(Icons.star_rate_rounded),
+                          title: const Text('ดูรีวิวสินค้าและร้านค้า'),
+                          subtitle: const Text(
+                            'อ่านอย่างเดียว — ลูกค้าเป็นผู้ให้คะแนนและแก้ไขรีวิวเอง',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const MerchantReviewsScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                    _buildSection(
                       title: 'ความปลอดภัย',
                       children: [
                         SwitchListTile(
@@ -1037,26 +1065,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _buildSection(
                       title: 'ศูนย์ช่วยเหลือและนโยบาย',
                       children: [
-                        const ListTile(
-                          leading: Icon(Icons.help_outline),
-                          title: Text('ศูนย์ช่วยเหลือ Van Market'),
-                          subtitle: Text(
+                        ListTile(
+                          leading: const Icon(Icons.support_agent_outlined),
+                          title: const Text('ติดต่อแอดมิน'),
+                          subtitle: const Text(
+                            'ส่งคำถามหรือแจ้งปัญหาถึงทีมแอดมิน พร้อมแนบรูปประกอบ',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const AdminContactScreen(
+                                  config: kVan1AdminSupportConfig,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.mark_chat_unread_outlined),
+                          title: const Text('ข้อความถึงแอดมิน'),
+                          subtitle: const Text('ดูคำตอบจากแอดมินและตอบกลับ'),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const AdminSupportInboxScreen(
+                                  config: kVan1AdminSupportConfig,
+                                  accentColor: Color(0xFF2563EB),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const Divider(height: 0),
+                        ListTile(
+                          leading: const Icon(Icons.help_outline),
+                          title: const Text('ศูนย์ช่วยเหลือ Van Market'),
+                          subtitle: const Text(
                             'อ่านคู่มือการใช้งานและคำถามที่พบบ่อย',
                           ),
-                          trailing: Icon(Icons.open_in_new),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const HelpCenterScreen(),
+                              ),
+                            );
+                          },
                         ),
                         const Divider(height: 0),
-                        const ListTile(
-                          leading: Icon(Icons.policy_outlined),
-                          title: Text('นโยบายความเป็นส่วนตัว'),
-                          subtitle: Text('อัปเดตครั้งล่าสุด: 12 ตุลาคม 2025'),
-                          trailing: Icon(Icons.open_in_new),
+                        ListTile(
+                          leading: const Icon(Icons.policy_outlined),
+                          title: const Text('นโยบายความเป็นส่วนตัว'),
+                          subtitle: Text(
+                            'อัปเดตครั้งล่าสุด: ${LegalContent.privacyPolicy.updatedAtLabel}',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const LegalDocumentScreen(
+                                  document: LegalContent.privacyPolicy,
+                                ),
+                              ),
+                            );
+                          },
                         ),
                         const Divider(height: 0),
-                        const ListTile(
-                          leading: Icon(Icons.description_outlined),
-                          title: Text('ข้อกำหนดการใช้บริการ'),
-                          trailing: Icon(Icons.open_in_new),
+                        ListTile(
+                          leading: const Icon(Icons.description_outlined),
+                          title: const Text('ข้อกำหนดการใช้บริการ'),
+                          subtitle: Text(
+                            'อัปเดตครั้งล่าสุด: ${LegalContent.termsOfService.updatedAtLabel}',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<void>(
+                                builder: (_) => const LegalDocumentScreen(
+                                  document: LegalContent.termsOfService,
+                                ),
+                              ),
+                            );
+                          },
                         ),
                         const Divider(height: 0),
                         Padding(

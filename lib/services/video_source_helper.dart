@@ -6,12 +6,15 @@ import 'media_cache_service.dart';
 class VideoSourceHelper {
   const VideoSourceHelper._();
 
+  /// ~30s of 720p video at typical merchant bitrates (≈3–4 Mbps).
+  static const int preCacheBytesForThirtySeconds = 15 * 1024 * 1024;
+
   static const BetterPlayerCacheConfiguration cacheConfiguration =
       BetterPlayerCacheConfiguration(
     useCache: true,
-    maxCacheSize: 50 * 1024 * 1024,
-    maxCacheFileSize: 30 * 1024 * 1024,
-    preCacheSize: 10 * 1024 * 1024,
+    maxCacheSize: 120 * 1024 * 1024,
+    maxCacheFileSize: 40 * 1024 * 1024,
+    preCacheSize: preCacheBytesForThirtySeconds,
   );
 
   static bool isNetworkUrl(String? url) {

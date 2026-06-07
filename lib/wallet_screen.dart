@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'merchant_pricing_policy.dart';
 import 'wallet_top_up_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
@@ -41,16 +42,6 @@ class _WalletScreenState extends State<WalletScreen> {
     return null;
   }
 
-  Map<String, dynamic>? _readMap(Object? value) {
-    if (value is Map<String, dynamic>) return value;
-    if (value is Map) {
-      return <String, dynamic>{
-        for (final entry in value.entries) entry.key.toString(): entry.value,
-      };
-    }
-    return null;
-  }
-
   String _formatTimestamp(Object? value) {
     final dt = _toDateTime(value);
     if (dt == null) return '';
@@ -79,37 +70,7 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   double _readProductRevenue(Map<String, dynamic> data) {
-    final direct =
-        _toDouble(data['subtotal']) ?? _toDouble(data['productTotal']);
-    if (direct != null && direct > 0) return direct;
-
-    final items = data['items'] ?? data['products'];
-    if (items is List) {
-      final itemTotal = items.whereType<Map>().fold<double>(0, (
-        runningTotal,
-        item,
-      ) {
-        final product = _readMap(item);
-        if (product == null) return runningTotal;
-        final price = _toDouble(product['price'] ?? product['unitPrice']) ?? 0;
-        final quantity = _toDouble(product['quantity']) ?? 0;
-        return runningTotal + (price * quantity);
-      });
-      if (itemTotal > 0) return itemTotal;
-    }
-
-    final total =
-        _toDouble(data['totalAmount']) ??
-        _toDouble(data['grandTotal']) ??
-        _toDouble(data['totalPrice']) ??
-        0;
-    final shipping =
-        _toDouble(data['shippingFee']) ??
-        _toDouble(data['deliveryFee']) ??
-        _toDouble(data['deliveryCharge']) ??
-        0;
-    final fallback = total - shipping;
-    return fallback > 0 ? fallback : total;
+    return MerchantPricingPolicy.readMerchantProductRevenue(data);
   }
 
   Future<void> _fetchCurrentCredit() async {
