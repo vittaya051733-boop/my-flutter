@@ -14,6 +14,7 @@ import 'utils/rider_call_launcher.dart';
 import 'test_order_helper.dart';
 import 'order_qr_screen.dart';
 import 'chat_room_screen.dart';
+import 'services/chat_warmup.dart';
 import 'services/notification_service.dart';
 import 'services/shop_operations_service.dart';
 
@@ -53,6 +54,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         ),
       );
   Timer? _voiceKeepAliveTimer;
+  Timer? _voiceRestartTimer;
   final NotificationService _notificationService = NotificationService();
 
   List<DetailedOrder> _visibleOrders = <DetailedOrder>[];
@@ -64,6 +66,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   bool _isHandlingVoiceCommand = false;
   bool _voiceRestartPending = false;
   bool _nativeVoiceAudioPrepared = false;
+  int _voiceRecoverableErrorStreak = 0;
   DateTime? _lastVoiceStartAt;
   double _voiceAmbientLevel = 0;
   double _voicePeakLevel = 0;
@@ -138,6 +141,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   void dispose() {
     _operationsSubscription?.cancel();
     _voiceKeepAliveTimer?.cancel();
+    _voiceRestartTimer?.cancel();
     _ordersScrollController.dispose();
     _speech.cancel();
     _voicePanelDisplay.dispose();
@@ -231,6 +235,38 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     _voiceKeepAliveTimer = null;
   }
 
+  void _scheduleVoiceRestart({
+    Duration delay = const Duration(milliseconds: 500),
+    String? message,
+  }) {
+    if (!mounted || !_voiceSessionEnabled) return;
+    _voiceRestartPending = true;
+    _isListening = false;
+    if (message != null) {
+      _voiceMessage = message;
+    }
+    _publishVoicePanelDisplay();
+    _voiceRestartTimer?.cancel();
+    _voiceRestartTimer = Timer(delay, () {
+      unawaited(_restartVoiceListeningIfNeeded());
+    });
+  }
+
+  Future<void> _stopSpeechEngine() async {
+    try {
+      if (_speech.isListening) {
+        await _speech.stop();
+      }
+    } catch (error) {
+      debugPrint('Voice stop failed: $error');
+    }
+    try {
+      await _speech.cancel();
+    } catch (error) {
+      debugPrint('Voice cancel failed: $error');
+    }
+  }
+
   Future<void> _ensureVoiceKeepAlive() async {
     if (!mounted || !_voiceSessionEnabled || _isHandlingVoiceCommand) return;
     final route = ModalRoute.of(context);
@@ -240,22 +276,20 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         _lastVoiceStartAt != null &&
         DateTime.now().difference(_lastVoiceStartAt!) <
             const Duration(seconds: 2);
-    if ((_isListening && !_voiceRestartPending) || recentlyStarted) return;
+    final engineListening = _speech.isListening;
+    if ((engineListening && !_voiceRestartPending) || recentlyStarted) return;
 
-    _voiceRestartPending = true;
-    await _startVoiceListening();
+    _scheduleVoiceRestart(message: 'กำลังเชื่อมไมค์ใหม่...');
   }
 
   Future<void> _toggleVoiceSession() async {
     if (_voiceSessionEnabled || _isListening) {
       _voiceSessionEnabled = false;
       _voiceRestartPending = false;
+      _voiceRecoverableErrorStreak = 0;
       _stopVoiceKeepAlive();
-      try {
-        await _speech.stop();
-      } catch (error) {
-        debugPrint('Voice stop failed: $error');
-      }
+      _voiceRestartTimer?.cancel();
+      await _stopSpeechEngine();
       await _restoreNativeVoiceAudio();
       if (!mounted) return;
       _isListening = false;
@@ -277,6 +311,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     }
 
     _voiceSessionEnabled = true;
+    _voiceRecoverableErrorStreak = 0;
     _startVoiceKeepAlive();
     await _prepareNativeVoiceAudio();
     await _startVoiceListening();
@@ -288,18 +323,57 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         onStatus: _handleSpeechStatus,
         onError: (error) {
           if (!mounted) return;
-          _voiceSessionEnabled = false;
-          _voiceRestartPending = false;
-          _stopVoiceKeepAlive();
+          final rawMessage = error.errorMsg.trim();
+          final normalized = rawMessage.toLowerCase();
+          final fatalError =
+              normalized.contains('permission') ||
+              normalized.contains('not allowed') ||
+              normalized.contains('notavailable') ||
+              normalized.contains('audiorecord') ||
+              normalized.contains('denied');
           _isListening = false;
-          _voiceMessage = 'ไมค์ยังฟังไม่ได้: ${error.errorMsg}';
-          _publishVoicePanelDisplay();
-          unawaited(_restoreNativeVoiceAudio());
+          if (!_voiceSessionEnabled) {
+            _voiceRestartPending = false;
+            _voiceMessage = 'ไมค์หยุดฟังแล้ว';
+            _publishVoicePanelDisplay();
+            unawaited(_restoreNativeVoiceAudio());
+            return;
+          }
+
+          if (fatalError) {
+            _voiceSessionEnabled = false;
+            _voiceRestartPending = false;
+            _voiceRecoverableErrorStreak = 0;
+            _stopVoiceKeepAlive();
+            _voiceRestartTimer?.cancel();
+            _voiceMessage = 'ไมค์ยังฟังไม่ได้: $rawMessage';
+            _publishVoicePanelDisplay();
+            unawaited(_restoreNativeVoiceAudio());
+            return;
+          }
+
+          _voiceRecoverableErrorStreak++;
+          if (_voiceRecoverableErrorStreak > 3) {
+            _voiceSessionEnabled = false;
+            _voiceRestartPending = false;
+            _voiceRecoverableErrorStreak = 0;
+            _stopVoiceKeepAlive();
+            _voiceRestartTimer?.cancel();
+            _voiceMessage = 'ไมค์หลุดหลายครั้ง กดปุ่มไมค์เพื่อเริ่มใหม่';
+            _publishVoicePanelDisplay();
+            unawaited(_restoreNativeVoiceAudio());
+            return;
+          }
+          _scheduleVoiceRestart(
+            message: 'ไมค์สะดุด กำลังฟังใหม่...',
+            delay: const Duration(milliseconds: 600),
+          );
         },
       );
       if (!mounted) return;
       _voiceReady = true;
       _voiceAvailable = available;
+      _voiceRecoverableErrorStreak = 0;
       _voiceMessage = available
           ? 'พร้อมฟังคำสั่งเสียงตามชื่อปุ่ม'
           : 'ไม่พบระบบรับเสียงของเครื่อง';
@@ -317,10 +391,9 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     if (!mounted) return;
     if (status == 'done' || status == 'notListening') {
       if (_voiceSessionEnabled && !_isHandlingVoiceCommand) {
-        _voiceRestartPending = true;
-        Future<void>.delayed(
-          const Duration(milliseconds: 250),
-          _restartVoiceListeningIfNeeded,
+        _scheduleVoiceRestart(
+          message: 'กำลังฟังคำสั่งถัดไป...',
+          delay: const Duration(milliseconds: 500),
         );
         return;
       }
@@ -340,10 +413,13 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     }
     final route = ModalRoute.of(context);
     if (route != null && !route.isCurrent) {
-      _voiceRestartPending = false;
+      _scheduleVoiceRestart(
+        message: 'รอกลับมาหน้าจัดการออเดอร์...',
+        delay: const Duration(milliseconds: 700),
+      );
       return;
     }
-    await _ensureVoiceKeepAlive();
+    await _startVoiceListening();
   }
 
   Future<void> _startVoiceListening() async {
@@ -356,13 +432,14 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     }
 
     _voiceRestartPending = false;
-    _lastVoiceStartAt = DateTime.now();
     await _prepareNativeVoiceAudio();
     _setVoiceListeningUi(
-      listening: true,
-      message: 'เปิดฟังตลอดเวลา รอชื่อปุ่ม',
+      listening: false,
+      message: 'กำลังเปิดไมค์...',
     );
     _resetVoiceNoiseGate();
+    await _stopSpeechEngine();
+    await Future<void>.delayed(const Duration(milliseconds: 450));
 
     try {
       await _speech.listen(
@@ -379,14 +456,30 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           _handleVoiceResult(words, isFinal: result.finalResult);
         },
       );
+      if (!mounted || !_voiceSessionEnabled) return;
+      _voiceRecoverableErrorStreak = 0;
+      _lastVoiceStartAt = DateTime.now();
+      _setVoiceListeningUi(
+        listening: true,
+        message: 'เปิดฟังตลอดเวลา รอชื่อปุ่มถัดไป',
+      );
     } catch (error) {
       debugPrint('Voice listen failed: $error');
       if (!mounted) return;
+      _isListening = false;
+      _voiceRecoverableErrorStreak++;
+      if (_voiceSessionEnabled && _voiceRecoverableErrorStreak <= 3) {
+        _scheduleVoiceRestart(
+          message: 'เริ่มฟังไม่สำเร็จ กำลังลองใหม่...',
+          delay: const Duration(milliseconds: 650),
+        );
+        return;
+      }
       _voiceRestartPending = false;
       _voiceSessionEnabled = false;
+      _voiceRecoverableErrorStreak = 0;
       await _restoreNativeVoiceAudio();
-      _isListening = false;
-      _voiceMessage = 'เริ่มฟังคำสั่งเสียงไม่สำเร็จ';
+      _voiceMessage = 'เริ่มฟังคำสั่งเสียงไม่สำเร็จ กดไมค์เพื่อเริ่มใหม่';
       _publishVoicePanelDisplay();
     }
   }
@@ -516,6 +609,10 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       _setVoiceMessage('ออเดอร์นี้ยังแชทไรเดอร์ไม่ได้');
       return;
     }
+    ChatWarmup.prefetchRoom(
+      myUid: FirebaseAuth.instance.currentUser!.uid,
+      peer: state.profile!,
+    );
     unawaited(
       Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -526,11 +623,20 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   Future<void> _handleVoiceBackNavigation() async {
-    final navigator = Navigator.of(context, rootNavigator: true);
-    final didPop = await navigator.maybePop();
-    if (!didPop && mounted) {
-      _setVoiceMessage('ไม่มีหน้าก่อนหน้าให้ย้อนกลับ');
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    final didPopRoot = await rootNavigator.maybePop();
+    if (didPopRoot) return;
+
+    final localNavigator = Navigator.of(context);
+    if (localNavigator != rootNavigator) {
+      final didPopLocal = await localNavigator.maybePop();
+      if (didPopLocal) return;
     }
+
+    if (!mounted) return;
+    await Navigator.of(
+      context,
+    ).pushNamedAndRemoveUntil('/home', (route) => false);
   }
 
   Future<void> _callVisibleOrderRider() async {
@@ -598,7 +704,14 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
       ..._dialogVoiceActions,
       _VoiceCommandAction(
         label: 'ย้อนกลับ',
-        phrases: const <String>['ย้อนกลับ', 'กลับ', 'back'],
+        phrases: const <String>[
+          'ย้อนกลับ',
+          'ถอยกลับ',
+          'กลับหน้าก่อน',
+          'กลับหน้าแรก',
+          'กลับ',
+          'back',
+        ],
         onTrigger: _handleVoiceBackNavigation,
       ),
       _VoiceCommandAction(
@@ -803,11 +916,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
 
     _isHandlingVoiceCommand = true;
     _voiceRestartPending = true;
-    try {
-      await _speech.stop();
-    } catch (error) {
-      debugPrint('Voice stop before command failed: $error');
-    }
+    await _stopSpeechEngine();
 
     try {
       await matchedAction.onTrigger();
@@ -817,13 +926,9 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
     } finally {
       _isHandlingVoiceCommand = false;
       if (mounted && _voiceSessionEnabled) {
-        _setVoiceListeningUi(
-          listening: true,
-          message: 'เปิดฟังตลอดเวลา รอชื่อปุ่มถัดไป',
-        );
-        Future<void>.delayed(
-          const Duration(milliseconds: 250),
-          _restartVoiceListeningIfNeeded,
+        _scheduleVoiceRestart(
+          message: 'ทำคำสั่งแล้ว กำลังฟังต่อ...',
+          delay: const Duration(milliseconds: 550),
         );
       }
     }
@@ -1712,10 +1817,14 @@ extension on _OrderManagementScreenState {
                       onPressed: !canChat
                           ? null
                           : () async {
+                              ChatWarmup.prefetchRoom(
+                                myUid: FirebaseAuth.instance.currentUser!.uid,
+                                peer: state!.profile!,
+                              );
                               await Navigator.of(context).push(
                                 MaterialPageRoute<void>(
                                   builder: (_) => ChatRoomScreen(
-                                    friendProfile: state!.profile!,
+                                    friendProfile: state.profile!,
                                   ),
                                 ),
                               );

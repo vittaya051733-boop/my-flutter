@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'merchant_pricing_policy.dart';
+import 'services/merchant_wallet_service.dart';
 import 'wallet_top_up_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
@@ -22,6 +23,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
   double _currentCredit = 0;
   String? _uid;
+  MerchantWalletSnapshot? _walletSnapshot;
 
   @override
   void initState() {
@@ -79,19 +81,22 @@ class _WalletScreenState extends State<WalletScreen> {
 
     if (mounted) setState(() => _uid = user.uid);
 
-    final snapshot = await FirebaseFirestore.instance
-        .collection('credits')
-        .where('uid', isEqualTo: user.uid)
-        .get();
-
-    var total = 0.0;
-    for (final doc in snapshot.docs) {
-      final amount = _toDouble(doc.data()['amount']);
-      if (amount != null) total += amount;
-    }
-
+    final snapshot =
+        await MerchantWalletService.instance.loadSnapshot(user.uid);
     if (!mounted) return;
-    setState(() => _currentCredit = total);
+    setState(() {
+      _walletSnapshot = snapshot;
+      _currentCredit = snapshot.totalCredit;
+    });
+  }
+
+  Future<void> _refreshWalletSnapshot(String uid) async {
+    final snapshot = await MerchantWalletService.instance.loadSnapshot(uid);
+    if (!mounted) return;
+    setState(() {
+      _walletSnapshot = snapshot;
+      _currentCredit = snapshot.totalCredit;
+    });
   }
 
   Future<void> _promptTopUpAmount() async {
@@ -103,7 +108,222 @@ class _WalletScreenState extends State<WalletScreen> {
     );
 
     if (!mounted) return;
-    if (result == true) await _fetchCurrentCredit();
+    if (result == true) {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        await _refreshWalletSnapshot(uid);
+      } else {
+        await _fetchCurrentCredit();
+      }
+    }
+  }
+
+  void _onWithdrawPressed(MerchantWalletSnapshot snapshot) {
+    if (!snapshot.canWithdraw) {
+      _showSnack(
+        'ยอดเครดิตยังถอนไม่ได้จนกว่าจะยกเลิกสัญญาร้าน',
+      );
+      return;
+    }
+    if (snapshot.withdrawableCredit <= 0) {
+      _showSnack('ไม่มียอดที่ถอนได้');
+      return;
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ถอนเครดิต'),
+        content: Text(
+          'ยอดที่ถอนได้ ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท\n'
+          'กรุณาติดต่อแอดมินเพื่อดำเนินการถอนเงินหลังยกเลิกสัญญาแล้ว',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('ตกลง'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWalletBalanceCard(MerchantWalletSnapshot snapshot, String uid) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        color: Colors.white.withValues(alpha: 0.14),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.22),
+        ),
+      ),
+      padding: const EdgeInsets.symmetric(
+        vertical: 24,
+        horizontal: 20,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.account_balance_wallet,
+                      color: Colors.white,
+                      size: 32,
+                    ),
+                    SizedBox(width: 12),
+                    Flexible(
+                      child: Text(
+                        'ยอดเครดิตคงเหลือ',
+                        style: TextStyle(
+                          fontSize: 18,
+                          color: Colors.white,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 36,
+                child: FilledButton(
+                  onPressed: _promptTopUpAmount,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: _dashboardOrangeMid,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                    ),
+                    minimumSize: const Size(0, 36),
+                  ),
+                  child: const FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text('เติมเครดิต'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            '${snapshot.totalCredit.toStringAsFixed(2)} บาท',
+            style: const TextStyle(
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+          if (!snapshot.canWithdraw) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'ถอนไม่ได้ ${snapshot.lockedCredit.toStringAsFixed(2)} บาท',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'เครดิตรวมทั้งค่าประกันและยอดที่เติมไว้ '
+                    'จะถอนได้เมื่อยกเลิกสัญญาร้านแล้วเท่านั้น',
+                    style: TextStyle(
+                      color: _dashboardCream,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                  if (snapshot.securityDepositAmount > 0) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'ค่าประกัน ${snapshot.securityDepositAmount.toStringAsFixed(0)} บาท',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 12),
+            Text(
+              'ถอนได้ ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท',
+              style: const TextStyle(
+                color: _dashboardCream,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: () => _onWithdrawPressed(snapshot),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.white,
+                side: BorderSide(
+                  color: snapshot.canWithdraw && snapshot.withdrawableCredit > 0
+                      ? Colors.white
+                      : Colors.white38,
+                ),
+              ),
+              child: Text(
+                snapshot.canWithdraw ? 'ถอนเงิน' : 'ถอนเงิน (รอการยกเลิกสัญญา)',
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Text(
+                'UID: ',
+                style: TextStyle(color: Colors.white70),
+              ),
+              Expanded(
+                child: SelectableText(
+                  uid.length > 10
+                      ? '${uid.substring(0, 6)}...${uid.substring(uid.length - 4)}'
+                      : uid,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(
+                  Icons.copy,
+                  color: Colors.white,
+                ),
+                tooltip: 'คัดลอก UID เต็ม',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: uid));
+                  _showSnack('คัดลอก UID เรียบร้อย');
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   void _showSnack(String message) {
@@ -375,6 +595,7 @@ class _WalletScreenState extends State<WalletScreen> {
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     final uid = user?.uid ?? _uid ?? '';
+    final snapshot = _walletSnapshot;
 
     return Scaffold(
       backgroundColor: _dashboardOrangeMid,
@@ -413,110 +634,37 @@ class _WalletScreenState extends State<WalletScreen> {
                   padding: const EdgeInsets.all(16),
                   child: Column(
                     children: [
-                      Container(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(24),
-                          color: Colors.white.withValues(alpha: 0.14),
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.22),
-                          ),
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                          vertical: 24,
-                          horizontal: 20,
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                const Expanded(
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.account_balance_wallet,
-                                        color: Colors.white,
-                                        size: 32,
-                                      ),
-                                      SizedBox(width: 12),
-                                      Flexible(
-                                        child: Text(
-                                          'ยอดเครดิตคงเหลือ',
-                                          style: TextStyle(
-                                            fontSize: 18,
-                                            color: Colors.white,
-                                          ),
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                SizedBox(
-                                  height: 36,
-                                  child: FilledButton(
-                                    onPressed: _promptTopUpAmount,
-                                    style: FilledButton.styleFrom(
-                                      backgroundColor: Colors.white,
-                                      foregroundColor: _dashboardOrangeMid,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                      ),
-                                      minimumSize: const Size(0, 36),
-                                    ),
-                                    child: const FittedBox(
-                                      fit: BoxFit.scaleDown,
-                                      child: Text('เติมเครดิต'),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              '${_currentCredit.toStringAsFixed(2)} บาท',
-                              style: const TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
+                      if (uid.isNotEmpty)
+                        StreamBuilder<MerchantWalletSnapshot>(
+                          stream: MerchantWalletService.instance
+                              .watchSnapshot(uid),
+                          builder: (context, walletSnapshot) {
+                            final wallet = walletSnapshot.data ??
+                                snapshot ??
+                                MerchantWalletSnapshot(
+                                  totalCredit: _currentCredit,
+                                  withdrawableCredit: 0,
+                                  lockedCredit: _currentCredit,
+                                  canWithdraw: false,
+                                  isContractCancelled: false,
+                                  securityDepositAmount: 0,
+                                );
+                            return _buildWalletBalanceCard(wallet, uid);
+                          },
+                        )
+                      else
+                        _buildWalletBalanceCard(
+                          snapshot ??
+                              const MerchantWalletSnapshot(
+                                totalCredit: 0,
+                                withdrawableCredit: 0,
+                                lockedCredit: 0,
+                                canWithdraw: false,
+                                isContractCancelled: false,
+                                securityDepositAmount: 0,
                               ),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                const Text(
-                                  'UID: ',
-                                  style: TextStyle(color: Colors.white70),
-                                ),
-                                Expanded(
-                                  child: SelectableText(
-                                    uid.length > 10
-                                        ? '${uid.substring(0, 6)}...${uid.substring(uid.length - 4)}'
-                                        : uid,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.copy,
-                                    color: Colors.white,
-                                  ),
-                                  tooltip: 'คัดลอก UID เต็ม',
-                                  onPressed: () {
-                                    Clipboard.setData(ClipboardData(text: uid));
-                                    _showSnack('คัดลอก UID เรียบร้อย');
-                                  },
-                                ),
-                              ],
-                            ),
-                          ],
+                          uid,
                         ),
-                      ),
                       const SizedBox(height: 12),
                       _buildTodayIncomeCard(uid),
                       const SizedBox(height: 24),

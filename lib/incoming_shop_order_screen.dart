@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
@@ -7,6 +10,7 @@ import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'chat_room_screen.dart';
 import 'models/order_model.dart';
 import 'models/user_profile.dart';
+import 'services/shop_order_voice_commands.dart';
 import 'utils/app_colors.dart';
 import 'utils/rider_call_launcher.dart';
 
@@ -35,14 +39,24 @@ class IncomingShopOrderScreen extends StatefulWidget {
 
 class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
     with WidgetsBindingObserver {
-  static const double _voiceNoiseGateDelta = 5;
-  static const double _voiceNoiseGateMinimumPeak = 7;
+  static const MethodChannel _voiceAudioChannel = MethodChannel(
+    'van.merchant/voice_audio',
+  );
+  static const double _voiceNoiseGateDelta = 3.5;
+  static const double _voiceNoiseGateMinimumPeak = 5.5;
+  static const double _voiceNoiseGateAmbientGain = 0.12;
+
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _isSubmitting = false;
   bool _voiceAvailable = false;
   bool _voiceReady = false;
+  bool _voiceSessionEnabled = false;
   bool _isListening = false;
   bool _hasAutoStartedVoice = false;
+  bool _nativeVoiceAudioPrepared = false;
+  bool _voiceRestartPending = false;
+  bool _isHandlingVoiceCommand = false;
+  Timer? _voiceRestartTimer;
   double _voiceAmbientLevel = 0;
   double _voicePeakLevel = 0;
   int _voiceLevelSamples = 0;
@@ -62,7 +76,10 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _speech.cancel();
+    _voiceRestartTimer?.cancel();
+    _voiceSessionEnabled = false;
+    unawaited(_stopSpeechEngine());
+    unawaited(_restoreNativeVoiceAudio());
     super.dispose();
   }
 
@@ -107,15 +124,78 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
     if (!mounted) return;
     if (status == 'done' || status == 'notListening') {
       setState(() => _isListening = false);
+      if (_voiceSessionEnabled &&
+          !_isSubmitting &&
+          !_isHandlingVoiceCommand &&
+          !_voiceRestartPending) {
+        _scheduleVoiceRestart(
+          message: 'กำลังฟังต่อ...',
+          delay: const Duration(milliseconds: 450),
+        );
+      }
     }
+  }
+
+  Future<void> _prepareNativeVoiceAudio() async {
+    if (_nativeVoiceAudioPrepared) return;
+    try {
+      await _voiceAudioChannel.invokeMapMethod<String, dynamic>(
+        'prepare_voice_audio',
+      );
+      _nativeVoiceAudioPrepared = true;
+    } catch (error) {
+      debugPrint('[incoming-order-voice] prepare failed: $error');
+    }
+  }
+
+  Future<void> _restoreNativeVoiceAudio() async {
+    if (!_nativeVoiceAudioPrepared) return;
+    _nativeVoiceAudioPrepared = false;
+    try {
+      await _voiceAudioChannel.invokeMethod<void>('restore_voice_audio');
+    } catch (error) {
+      debugPrint('[incoming-order-voice] restore failed: $error');
+    }
+  }
+
+  Future<void> _stopSpeechEngine() async {
+    try {
+      if (_speech.isListening) {
+        await _speech.stop();
+      }
+    } catch (_) {}
+    try {
+      await _speech.cancel();
+    } catch (_) {}
+  }
+
+  void _scheduleVoiceRestart({
+    required String message,
+    Duration delay = const Duration(milliseconds: 550),
+  }) {
+    if (!mounted || !_voiceSessionEnabled || _isSubmitting) return;
+    _voiceRestartPending = true;
+    setState(() => _voiceMessage = message);
+    _voiceRestartTimer?.cancel();
+    _voiceRestartTimer = Timer(delay, () {
+      _voiceRestartPending = false;
+      unawaited(_startVoiceListening());
+    });
   }
 
   Future<void> _toggleVoiceListening() async {
     if (_isSubmitting) return;
-    if (_isListening) {
-      await _speech.stop();
+    if (_voiceSessionEnabled || _isListening) {
+      _voiceSessionEnabled = false;
+      _voiceRestartPending = false;
+      _voiceRestartTimer?.cancel();
+      await _stopSpeechEngine();
+      await _restoreNativeVoiceAudio();
       if (!mounted) return;
-      setState(() => _isListening = false);
+      setState(() {
+        _isListening = false;
+        _voiceMessage = 'ปิดการฟังคำสั่งเสียงแล้ว';
+      });
       return;
     }
 
@@ -131,25 +211,73 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
       return;
     }
 
+    _voiceSessionEnabled = true;
+    await _startVoiceListening();
+  }
+
+  Future<void> _startVoiceListening() async {
+    if (!mounted ||
+        !_voiceSessionEnabled ||
+        _isSubmitting ||
+        _isHandlingVoiceCommand ||
+        !_voiceAvailable) {
+      _voiceRestartPending = false;
+      return;
+    }
+    if (_isListening && !_voiceRestartPending) return;
+
+    _voiceRestartPending = false;
+    await _prepareNativeVoiceAudio();
     setState(() {
-      _isListening = true;
-      _lastVoiceText = '';
-      _voiceMessage = 'กำลังฟัง...';
+      _isListening = false;
+      _voiceMessage = 'กำลังเปิดไมค์...';
     });
     _resetVoiceNoiseGate();
+    await _stopSpeechEngine();
+    await Future<void>.delayed(const Duration(milliseconds: 350));
 
-    await _speech.listen(
-      localeId: 'th_TH',
-      listenFor: const Duration(seconds: 8),
-      pauseFor: const Duration(seconds: 2),
-      partialResults: false,
-      cancelOnError: false,
-      onSoundLevelChange: _trackVoiceSoundLevel,
-      listenMode: stt.ListenMode.confirmation,
-      onResult: (result) {
-        _handleVoiceResult(result.recognizedWords, isFinal: result.finalResult);
-      },
-    );
+    final localeId = await _resolveSpeechLocaleId();
+
+    try {
+      await _speech.listen(
+        localeId: localeId,
+        listenFor: const Duration(minutes: 30),
+        pauseFor: const Duration(seconds: 4),
+        partialResults: true,
+        cancelOnError: false,
+        onSoundLevelChange: _trackVoiceSoundLevel,
+        listenMode: stt.ListenMode.confirmation,
+        onResult: (result) {
+          final words = result.recognizedWords.trim();
+          if (words.isEmpty) return;
+          _handleVoiceResult(words, isFinal: result.finalResult);
+        },
+      );
+      if (!mounted || !_voiceSessionEnabled) return;
+      setState(() {
+        _isListening = true;
+        _lastVoiceText = '';
+        _voiceMessage = 'พูดว่า รับออเดอร์ หรือ ปฏิเสธออเดอร์';
+      });
+    } catch (error) {
+      debugPrint('[incoming-order-voice] listen failed: $error');
+      if (!mounted) return;
+      setState(() {
+        _isListening = false;
+        _voiceMessage = 'เริ่มฟังไม่สำเร็จ กดไมค์เพื่อลองใหม่';
+      });
+      _voiceSessionEnabled = false;
+      await _restoreNativeVoiceAudio();
+    }
+  }
+
+  Future<String?> _resolveSpeechLocaleId() async {
+    try {
+      final locales = await _speech.locales();
+      final hasThai = locales.any((locale) => locale.localeId.startsWith('th'));
+      if (hasThai) return 'th_TH';
+    } catch (_) {}
+    return null;
   }
 
   void _resetVoiceNoiseGate() {
@@ -183,7 +311,9 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
   bool _passesVoiceNoiseGate() {
     final requiredPeak = math.max(
       _voiceNoiseGateMinimumPeak,
-      _voiceAmbientLevel + _voiceNoiseGateDelta,
+      _voiceAmbientLevel +
+          _voiceNoiseGateDelta +
+          (_voiceAmbientLevel * _voiceNoiseGateAmbientGain),
     );
     return _voicePeakLevel >= requiredPeak;
   }
@@ -235,59 +365,69 @@ class _IncomingShopOrderScreenState extends State<IncomingShopOrderScreen>
   }
 
   void _handleVoiceResult(String words, {required bool isFinal}) {
-    if (!mounted || words.trim().isEmpty || !isFinal) return;
-    final command = _matchVoiceCommand(words);
-    if (!_passesVoiceNoiseGate()) {
-      if (command != null && !_isSubmitting) {
-        _speech.stop();
+    if (!mounted || _isSubmitting || _isHandlingVoiceCommand) return;
+    final heardText = words.trim();
+    if (heardText.isEmpty) return;
+
+    final command = ShopOrderVoiceCommands.matchAcceptReject(heardText);
+    final label = ShopOrderVoiceCommands.describeMatch(heardText);
+    final passesNoiseGate = _passesVoiceNoiseGate();
+
+    if (!isFinal) {
+      if (command != null && passesNoiseGate) {
+        unawaited(_executeVoiceCommand(command, heardText, label));
+      } else {
         setState(() {
-          _lastVoiceText = words.trim();
-          _voiceMessage = null;
-          _isListening = false;
+          _lastVoiceText = heardText;
+          _voiceMessage = command == null
+              ? 'กำลังฟัง...'
+              : 'ได้ยินใกล้เคียง ${label ?? ''}';
         });
-        _submit(accept: command);
-        return;
       }
+      return;
+    }
+
+    if (command == null) {
       setState(() {
-        _lastVoiceText = words.trim();
-        _voiceMessage = 'เสียงรบกวนมากเกินไป ลองพูดใกล้ไมค์อีกครั้ง';
+        _lastVoiceText = heardText;
+        _voiceMessage = passesNoiseGate
+            ? 'ได้ยิน: $heardText (ลองพูด รับออเดอร์ หรือ ปฏิเสธออเดอร์)'
+            : 'เสียงรบกวนมากเกินไป ลองพูดใกล้ไมค์อีกครั้ง';
       });
       return;
     }
+
+    unawaited(_executeVoiceCommand(command, heardText, label));
+  }
+
+  Future<void> _executeVoiceCommand(
+    bool accept,
+    String heardText,
+    String? label,
+  ) async {
+    if (!mounted || _isSubmitting || _isHandlingVoiceCommand) return;
+    _isHandlingVoiceCommand = true;
+    _voiceSessionEnabled = false;
+    _voiceRestartPending = true;
+    _voiceRestartTimer?.cancel();
+    await _stopSpeechEngine();
+
     setState(() {
-      _lastVoiceText = words.trim();
-      _voiceMessage = command == null ? 'ได้ยิน: ${words.trim()}' : null;
+      _lastVoiceText = heardText;
+      _voiceMessage = accept
+          ? 'กำลังรับออเดอร์...'
+          : 'กำลังปฏิเสธออเดอร์...';
+      _isListening = false;
     });
 
-    if (command == null || _isSubmitting) return;
-    _speech.stop();
-    setState(() => _isListening = false);
-    _submit(accept: command);
+    try {
+      await _submit(accept: accept);
+    } finally {
+      _isHandlingVoiceCommand = false;
+      _voiceRestartPending = false;
+    }
   }
 
-  bool? _matchVoiceCommand(String words) {
-    final normalized = words.toLowerCase().replaceAll(RegExp(r'\s+'), '');
-    final hasAccept =
-        normalized.contains('รับออเดอร์เข้า') ||
-        normalized.contains('รับออเดอร์') ||
-        normalized == 'รับ' ||
-        normalized.contains('ตกลง') ||
-        normalized.contains('ยืนยันออเดอร์') ||
-        normalized.contains('ยืนยัน') ||
-        normalized.contains('รับorder') ||
-        normalized.contains('acceptorder');
-    final hasReject =
-        normalized.contains('ปฏิเสธออเดอร์ออก') ||
-        normalized.contains('ปฏิเสธออเดอร์') ||
-        normalized.contains('ปฏิเสธ') ||
-        normalized.contains('ยกเลิก') ||
-        normalized.contains('ไม่รับออเดอร์') ||
-        normalized.contains('ไม่รับ') ||
-        normalized.contains('rejectorder');
-
-    if (hasAccept == hasReject) return null;
-    return hasAccept;
-  }
 
   Future<void> _submit({required bool accept}) async {
     if (_isSubmitting) return;
@@ -679,7 +819,7 @@ class _VoiceCommandPanel extends StatelessWidget {
                 Text(
                   recognizedText?.isNotEmpty == true
                       ? recognizedText!
-                      : 'รับออเดอร์เข้า / ปฏิเสธออเดอร์ออก',
+                      : 'พูดว่า รับออเดอร์ หรือ ปฏิเสธออเดอร์',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(

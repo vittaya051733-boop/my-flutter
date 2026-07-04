@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'widgets/cached_app_image.dart';
 import 'widgets/product_video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:video_compress/video_compress.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -20,6 +24,7 @@ import 'utils/shop_profile_resolver.dart';
 import 'storage_helper.dart';
 import 'services/product_cache_service.dart';
 import 'services/media_cache_service.dart';
+import 'services/product_image_upload_web.dart';
 
 class _ProductImageUploadResult {
   final String originalUrl;
@@ -121,11 +126,13 @@ class AdminProductUploadContext {
 class AddProductScreen extends StatefulWidget {
   final Product? productToEdit;
   final AdminProductUploadContext? adminUploadContext;
+  final String? draftId;
 
   const AddProductScreen({
     super.key,
     this.productToEdit,
     this.adminUploadContext,
+    this.draftId,
   });
 
   @override
@@ -138,6 +145,10 @@ class AddProductScreenState extends State<AddProductScreen> {
   static const Duration _aiCallableTimeout = Duration(seconds: 120);
 
   bool get _isAdminDelegatedUpload => widget.adminUploadContext != null;
+
+  /// Merchant editing an already-listed product (not admin delegated upload).
+  bool get _isEditingExistingProduct =>
+      widget.productToEdit != null && !_isAdminDelegatedUpload;
 
   String? get _effectiveOwnerUid =>
       widget.adminUploadContext?.ownerUid ??
@@ -383,11 +394,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       _preparationTimeController.text = p.preparationTimeMinutes.toString();
       _colorsController.text = p.colors.join(', ');
       _sizesController.text = p.sizes.join(', ');
-      _weightController.text = p.weight?.toString() ?? '';
-      if (p.weight != null) {
-        _weightController.text = p.weight!.toString();
-        _weightUnit = 'kg';
-      }
+      _applyWeightFromStoredValue(p.weight);
       _parcelLengthController.text = p.parcelLengthCm?.toString() ?? '';
       _parcelWidthController.text = p.parcelWidthCm?.toString() ?? '';
       _parcelHeightController.text = p.parcelHeightCm?.toString() ?? '';
@@ -416,6 +423,55 @@ class AddProductScreenState extends State<AddProductScreen> {
       _existingVideoUrl = p.videoUrl;
       _existingVideoThumbnailUrl = p.videoThumbnailUrl;
       _prefetchExistingMedia();
+      unawaited(_hydrateWeightFromFirestore());
+    }
+  }
+
+  void _applyWeightFromStoredValue(dynamic weightValue) {
+    if (weightValue == null) {
+      return;
+    }
+    if (weightValue is num) {
+      _weightController.text = weightValue.toString();
+      _weightUnit = 'g';
+      return;
+    }
+
+    final raw = weightValue.toString().trim();
+    if (raw.isEmpty) {
+      return;
+    }
+
+    final match = RegExp(
+      r'^([\d.]+)\s*(g|kg|grams?|kilograms?)?$',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    if (match != null) {
+      _weightController.text = match.group(1) ?? '';
+      final unit = (match.group(2) ?? 'g').toLowerCase();
+      _weightUnit = unit.startsWith('k') ? 'kg' : 'g';
+      return;
+    }
+
+    final parsed = double.tryParse(raw);
+    if (parsed != null) {
+      _weightController.text = raw;
+      _weightUnit = 'g';
+    }
+  }
+
+  Future<void> _hydrateWeightFromFirestore() async {
+    if (widget.productToEdit?.id == null) {
+      return;
+    }
+    try {
+      final data = await _loadExistingProductData();
+      if (!mounted || data['weight'] == null) {
+        return;
+      }
+      setState(() => _applyWeightFromStoredValue(data['weight']));
+    } catch (error) {
+      debugPrint('Failed to hydrate product weight: $error');
     }
   }
 
@@ -937,6 +993,29 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
+  Future<bool> _ensureGalleryPermission() async {
+    if (kIsWeb) {
+      return true;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final status = await Permission.photos.request();
+      return status.isGranted || status.isLimited;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final photosStatus = await Permission.photos.request();
+      if (photosStatus.isGranted || photosStatus.isLimited) {
+        return true;
+      }
+
+      final storageStatus = await Permission.storage.request();
+      return storageStatus.isGranted;
+    }
+
+    return true;
+  }
+
   Future<void> _pickImagesFromGallery() async {
     if (_isResolvingServiceType) return;
 
@@ -956,28 +1035,54 @@ class AddProductScreenState extends State<AddProductScreen> {
         _maxImageCount == 1 ||
         (_usesFirstImageAiGate && _currentImageCount == 0);
 
-    final List<XFile> picks;
-    if (pickSingleOnly) {
-      final singlePick = await _picker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: _pickerImageQuality,
-      );
-      picks = singlePick == null ? <XFile>[] : <XFile>[singlePick];
-    } else {
-      picks = await _picker.pickMultiImage(imageQuality: _pickerImageQuality);
-    }
-    if (picks.isEmpty) return;
+    try {
+      final List<XFile> picks;
+      if (kIsWeb) {
+        picks = await pickProductImagesFromGalleryWeb(
+          pickSingleOnly: pickSingleOnly,
+          maxCount: remainingSlots,
+        );
+      } else {
+        if (!await _ensureGalleryPermission()) {
+          _showSnack(
+            'ไม่ได้รับอนุญาตเข้าถึงรูปภาพ — เปิดที่ ตั้งค่า > ความเป็นส่วนตัว > รูปภาพ',
+          );
+          return;
+        }
 
-    final imagesToAdd = picks.take(remainingSlots).toList();
-    final compressedToAdd = await _compressPickedImages(imagesToAdd);
-    if (compressedToAdd.isEmpty) return;
-    setState(() => _newImageFiles.addAll(compressedToAdd));
-    unawaited(_analyzeProductWithAi(automatic: true));
+        if (pickSingleOnly) {
+          final singlePick = await _picker.pickImage(
+            source: ImageSource.gallery,
+            imageQuality: _pickerImageQuality,
+          );
+          picks = singlePick == null ? <XFile>[] : <XFile>[singlePick];
+        } else {
+          picks = await _picker.pickMultiImage(
+            imageQuality: _pickerImageQuality,
+          );
+        }
+      }
+      if (picks.isEmpty) return;
 
-    if (picks.length > remainingSlots) {
+      final imagesToAdd = picks.take(remainingSlots).toList();
+      final compressedToAdd = await _compressPickedImages(imagesToAdd);
+      if (compressedToAdd.isEmpty) return;
+      setState(() => _newImageFiles.addAll(compressedToAdd));
+      unawaited(_analyzeProductWithAi(automatic: true));
+
+      if (picks.length > remainingSlots) {
+        _showSnack(
+          'ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${imagesToAdd.length} รูปแรก',
+        );
+      }
+    } on PlatformException catch (error) {
       _showSnack(
-        'ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${imagesToAdd.length} รูปแรก',
+        error.message?.trim().isNotEmpty == true
+            ? error.message!.trim()
+            : 'เลือกรูปไม่สำเร็จ (${error.code})',
       );
+    } catch (error) {
+      _showSnack('เลือกรูปไม่สำเร็จ: $error');
     }
   }
 
@@ -990,18 +1095,44 @@ class AddProductScreenState extends State<AddProductScreen> {
       return;
     }
 
-    final XFile? photo = await _picker.pickImage(
-      source: ImageSource.camera,
-      imageQuality: _pickerImageQuality,
-    );
-    if (photo == null) return;
-    final compressed = await _compressPickedImages(<XFile>[photo]);
-    if (compressed.isEmpty) return;
-    setState(() => _newImageFiles.add(compressed.first));
-    unawaited(_analyzeProductWithAi(automatic: true));
+    try {
+      if (!kIsWeb) {
+        final cameraStatus = await Permission.camera.request();
+        if (!cameraStatus.isGranted) {
+          _showSnack(
+            'ไม่ได้รับอนุญาตใช้กล้อง — เปิดที่ ตั้งค่า > ความเป็นส่วนตัว > กล้อง',
+          );
+          return;
+        }
+      }
+
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: _pickerImageQuality,
+      );
+      if (photo == null) return;
+      final compressed = await _compressPickedImages(<XFile>[photo]);
+      if (compressed.isEmpty) return;
+      setState(() => _newImageFiles.add(compressed.first));
+      unawaited(_analyzeProductWithAi(automatic: true));
+    } on PlatformException catch (error) {
+      _showSnack(
+        error.message?.trim().isNotEmpty == true
+            ? error.message!.trim()
+            : 'ถ่ายรูปไม่สำเร็จ (${error.code})',
+      );
+    } catch (error) {
+      _showSnack('ถ่ายรูปไม่สำเร็จ: $error');
+    }
   }
 
   Future<List<XFile>> _compressPickedImages(List<XFile> picks) async {
+    if (kIsWeb) {
+      return compressPickedProductImages(
+        picks,
+        uploadQuality: _uploadImageQuality,
+      );
+    }
     final compressed = <XFile>[];
     for (final pick in picks) {
       try {
@@ -1085,6 +1216,28 @@ class AddProductScreenState extends State<AddProductScreen> {
     final blocked = _videoPickBlockedReason;
     if (blocked != null) {
       _showSnack(blocked);
+      return;
+    }
+
+    if (kIsWeb) {
+      try {
+        final video = await pickProductVideoFromGalleryWeb();
+        if (video == null) return;
+        setState(() {
+          _videoFile = video;
+          _existingVideoUrl = null;
+          _existingVideoThumbnailUrl = null;
+        });
+      } catch (error) {
+        _showSnack('เลือกวิดีโอไม่สำเร็จ: $error');
+      }
+      return;
+    }
+
+    if (!await _ensureGalleryPermission()) {
+      _showSnack(
+        'ไม่ได้รับอนุญาตเข้าถึงวิดีโอ — เปิดที่ ตั้งค่า > ความเป็นส่วนตัว > รูปภาพ/วิดีโอ',
+      );
       return;
     }
 
@@ -1540,6 +1693,9 @@ class AddProductScreenState extends State<AddProductScreen> {
   }
 
   bool _requiresAdminAiReview() {
+    if (_isEditingExistingProduct) {
+      return false;
+    }
     if (_aiRequiresAdminReview == true) {
       return true;
     }
@@ -1926,6 +2082,30 @@ class AddProductScreenState extends State<AddProductScreen> {
       final ownerUid = _effectiveOwnerUid;
       if (ownerUid == null) throw Exception("User not logged in");
 
+      if (kIsWeb) {
+        final result = await uploadProductImageWeb(
+          image: image,
+          ownerUid: ownerUid,
+          uploadQuality: _uploadImageQuality,
+          thumbnailQuality: _thumbnailImageQuality,
+          onProgress: (progress) {
+            if (mounted) {
+              setState(() => _uploadProgress = progress);
+            }
+          },
+        );
+        if (mounted) {
+          setState(() => _uploadProgress = null);
+        }
+        if (result == null) {
+          return null;
+        }
+        return _ProductImageUploadResult(
+          originalUrl: result.originalUrl,
+          thumbnailUrl: result.thumbnailUrl,
+        );
+      }
+
       final sanitizedBase = image.name
           .split('.')
           .first
@@ -2034,6 +2214,28 @@ class AddProductScreenState extends State<AddProductScreen> {
     try {
       final ownerUid = _effectiveOwnerUid;
       if (ownerUid == null) throw Exception('User not logged in');
+
+      if (kIsWeb) {
+        final result = await uploadProductVideoWeb(
+          video: video,
+          ownerUid: ownerUid,
+          onProgress: (progress) {
+            if (mounted) {
+              setState(() => _uploadProgress = progress);
+            }
+          },
+        );
+        if (mounted) {
+          setState(() => _uploadProgress = null);
+        }
+        if (result == null) {
+          return null;
+        }
+        return _ProductVideoUploadResult(
+          videoUrl: result.videoUrl,
+          thumbnailUrl: result.thumbnailUrl,
+        );
+      }
 
       final sanitizedBase = video.name
           .split('.')
@@ -2206,9 +2408,28 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
   }
 
+  Future<Map<String, dynamic>> _loadExistingProductData() async {
+    final targetId = widget.productToEdit?.id?.trim();
+    if (targetId == null || targetId.isEmpty) {
+      return const <String, dynamic>{};
+    }
+    final snapshot = await FirebaseFirestore.instance
+        .collection('products')
+        .doc(targetId)
+        .get();
+    return snapshot.data() ?? const <String, dynamic>{};
+  }
+
   Future<void> _saveProduct() async {
     // Basic validation
-    if (_currentImageCount == 0) {
+    if (_isEditingExistingProduct) {
+      if (_existingImageUrls.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('สินค้านี้ไม่มีรูปภาพ — ไม่สามารถบันทึกได้')),
+        );
+        return;
+      }
+    } else if (_currentImageCount == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')),
       );
@@ -2295,11 +2516,27 @@ class AddProductScreenState extends State<AddProductScreen> {
     try {
       await _backfillProductActiveFieldsForOwner(ownerUid);
 
-      final List<String> imageUrls = List<String>.from(_existingImageUrls);
-      final List<String> thumbnailUrls = List<String>.from(
-        _existingThumbnailUrls,
-      );
-      if (_newImageFiles.isNotEmpty) {
+      final Map<String, dynamic>? lockedExistingData = _isEditingExistingProduct
+          ? await _loadExistingProductData()
+          : null;
+
+      final List<String> imageUrls;
+      final List<String> thumbnailUrls;
+      if (lockedExistingData != null) {
+        imageUrls = List<String>.from(
+          lockedExistingData['imageUrls'] ?? const <String>[],
+        );
+        thumbnailUrls = List<String>.from(
+          lockedExistingData['thumbnailUrls'] ??
+              lockedExistingData['imageUrls'] ??
+              const <String>[],
+        );
+      } else {
+        imageUrls = List<String>.from(_existingImageUrls);
+        thumbnailUrls = List<String>.from(_existingThumbnailUrls);
+      }
+
+      if (!_isEditingExistingProduct && _newImageFiles.isNotEmpty) {
         for (var index = 0; index < _newImageFiles.length; index++) {
           if (mounted) {
             setState(() {
@@ -2324,7 +2561,7 @@ class AddProductScreenState extends State<AddProductScreen> {
         setState(() => _uploadStatusText = null);
       }
 
-      if (imageUrls.length > _maxImageCount) {
+      if (!_isEditingExistingProduct && imageUrls.length > _maxImageCount) {
         imageUrls.removeRange(_maxImageCount, imageUrls.length);
         if (thumbnailUrls.length > _maxImageCount) {
           thumbnailUrls.removeRange(_maxImageCount, thumbnailUrls.length);
@@ -2341,7 +2578,10 @@ class AddProductScreenState extends State<AddProductScreen> {
 
       String? videoUrl = _existingVideoUrl;
       String? videoThumbnailUrl = _existingVideoThumbnailUrl;
-      if (_videoFile != null) {
+      if (lockedExistingData != null) {
+        videoUrl = lockedExistingData['videoUrl'] as String?;
+        videoThumbnailUrl = lockedExistingData['videoThumbnailUrl'] as String?;
+      } else if (_videoFile != null) {
         if (mounted) {
           setState(() {
             _uploadStatusText = 'กำลังอัปโหลดวิดีโอ';
@@ -2384,8 +2624,17 @@ class AddProductScreenState extends State<AddProductScreen> {
           ? _otherUnitController.text.trim()
           : (_selectedUnit ?? '');
       final taxStatus = _computedTaxStatus;
-      final canShipNationwide = _resolvedCanShipNationwide;
-      final nationwideShippingReason = _resolvedNationwideShippingReason;
+      bool canShipNationwide = _resolvedCanShipNationwide;
+      String? nationwideShippingReason = _resolvedNationwideShippingReason;
+      if (lockedExistingData != null) {
+        canShipNationwide = lockedExistingData['canShipNationwide'] == true;
+        final existingReason =
+            lockedExistingData['nationwideShippingReason']?.toString().trim();
+        nationwideShippingReason =
+            existingReason != null && existingReason.isNotEmpty
+            ? existingReason
+            : null;
+      }
       final normalizedServiceType = _normalizeServiceType(_serviceType);
       final shopProfileData = await _resolveShopProfileData(
         ownerUid,
@@ -2571,15 +2820,10 @@ class AddProductScreenState extends State<AddProductScreen> {
           ..['adminReviewStatus'] = 'pending'
           ..['submittedAt'] = FieldValue.serverTimestamp()
           ..['submittedByUid'] = user.uid
-          ..['reviewType'] = widget.productToEdit == null ? 'create' : 'update'
+          ..['reviewType'] = 'create'
           ..['specificationsPayload'] = specificationsData;
         reviewData.remove('isActive');
         reviewData.remove('activeAt');
-        if (widget.productToEdit?.id != null &&
-            widget.productToEdit!.id!.trim().isNotEmpty) {
-          reviewData['targetProductId'] = widget.productToEdit!.id!.trim();
-        }
-
         await FirebaseFirestore.instance
             .collection('product_admin_reviews')
             .add(reviewData);
@@ -2911,12 +3155,31 @@ class AddProductScreenState extends State<AddProductScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            _buildProductAnalysisSection(),
-            const SizedBox(height: 24),
-            _buildNationwideShippingSection(),
-            if (_resolvedCanShipNationwide) ...[
+            if (!_isEditingExistingProduct) _buildProductAnalysisSection(),
+            if (!_isEditingExistingProduct) ...[
+              const SizedBox(height: 24),
+              _buildNationwideShippingSection(),
+              if (_resolvedCanShipNationwide) ...[
+                const SizedBox(height: 12),
+                _buildParcelDimensionFields(),
+              ],
+            ],
+            if (_isEditingExistingProduct) ...[
               const SizedBox(height: 12),
-              _buildParcelDimensionFields(),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF6FF),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFBFDBFE)),
+                ),
+                child: const Text(
+                  'โหมดแก้ไข: เปลี่ยนได้เฉพาะชื่อ ราคา สต็อก น้ำหนัก รายละเอียด และข้อมูลจำเพาะ — '
+                  'รูปและวิดีโอใช้ค่าเดิม ไม่ต้องส่งแอดมินอนุมัติใหม่',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF1E3A8A)),
+                ),
+              ),
             ],
             const SizedBox(height: 24),
             _buildTaxSection(),
@@ -3009,49 +3272,55 @@ class AddProductScreenState extends State<AddProductScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              ElevatedButton.icon(
-                onPressed: _isResolvingServiceType || !_canPickMoreImages
-                    ? null
-                    : _captureImage,
-                icon: const Icon(Icons.photo_camera_outlined),
-                label: Text(
-                  _usesFirstImageAiGate && _currentImageCount == 0
-                      ? 'ถ่ายรูปแรก'
-                      : 'ถ่ายรูป',
-                ),
-              ),
-              ElevatedButton.icon(
-                onPressed: _isResolvingServiceType || !_canPickMoreImages
-                    ? null
-                    : _pickImagesFromGallery,
-                icon: const Icon(Icons.photo_library_outlined),
-                label: Text(
-                  _usesFirstImageAiGate && _currentImageCount == 0
-                      ? 'เลือกรูปแรก'
-                      : 'เลือกรูป (${_currentImageCount}/$_maxImageCount)',
-                ),
-              ),
-              if (_canAddVideo)
+          if (!_isEditingExistingProduct)
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
                 ElevatedButton.icon(
-                  onPressed: _canPickVideoNow ? _pickVideo : null,
-                  icon: _isCompressingVideo
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.videocam_outlined),
+                  onPressed: _isResolvingServiceType || !_canPickMoreImages
+                      ? null
+                      : _captureImage,
+                  icon: const Icon(Icons.photo_camera_outlined),
                   label: Text(
-                    _isCompressingVideo ? 'บีบอัดวิดีโอ...' : 'เพิ่มวิดีโอ',
+                    _usesFirstImageAiGate && _currentImageCount == 0
+                        ? 'ถ่ายรูปแรก'
+                        : 'ถ่ายรูป',
                   ),
                 ),
-            ],
-          ),
-          if (_mediaLimitHintText() != null) ...[
+                ElevatedButton.icon(
+                  onPressed: _isResolvingServiceType || !_canPickMoreImages
+                      ? null
+                      : _pickImagesFromGallery,
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: Text(
+                    _usesFirstImageAiGate && _currentImageCount == 0
+                        ? 'เลือกรูปแรก'
+                        : 'เลือกรูป (${_currentImageCount}/$_maxImageCount)',
+                  ),
+                ),
+                if (_canAddVideo)
+                  ElevatedButton.icon(
+                    onPressed: _canPickVideoNow ? _pickVideo : null,
+                    icon: _isCompressingVideo
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.videocam_outlined),
+                    label: Text(
+                      _isCompressingVideo ? 'บีบอัดวิดีโอ...' : 'เพิ่มวิดีโอ',
+                    ),
+                  ),
+              ],
+            )
+          else
+            const Text(
+              'รูปภาพและวิดีโอไม่สามารถเปลี่ยนในโหมดแก้ไข',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+          if (!_isEditingExistingProduct && _mediaLimitHintText() != null) ...[
             const SizedBox(height: 8),
             Text(
               _mediaLimitHintText()!,
@@ -3105,7 +3374,9 @@ class AddProductScreenState extends State<AddProductScreen> {
             borderRadius: BorderRadius.circular(12),
             child: _buildCachedImage(displayUrl),
           ),
-          onRemove: () => _removeExistingImageAt(i),
+          onRemove: _isEditingExistingProduct
+              ? null
+              : () => _removeExistingImageAt(i),
         ),
       );
     }
@@ -3116,12 +3387,7 @@ class AddProductScreenState extends State<AddProductScreen> {
         _buildImageTile(
           image: ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Image.file(
-              File(file.path),
-              width: 110,
-              height: 110,
-              fit: BoxFit.cover,
-            ),
+            child: _buildNewImagePreview(file),
           ),
           onRemove: () => _removeNewImageAt(i),
         ),
@@ -3160,6 +3426,36 @@ class AddProductScreenState extends State<AddProductScreen> {
     );
   }
 
+  Widget _buildNewImagePreview(XFile file) {
+    if (kIsWeb) {
+      return FutureBuilder<Uint8List>(
+        future: file.readAsBytes(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const SizedBox(
+              width: 110,
+              height: 110,
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            );
+          }
+          return Image.memory(
+            snapshot.data!,
+            width: 110,
+            height: 110,
+            fit: BoxFit.cover,
+          );
+        },
+      );
+    }
+
+    return Image.file(
+      File(file.path),
+      width: 110,
+      height: 110,
+      fit: BoxFit.cover,
+    );
+  }
+
   Widget _buildCachedImage(String url) {
     if (url.isEmpty) {
       return const ColoredBox(
@@ -3168,7 +3464,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       );
     }
     final localPath = _localMediaPaths[url];
-    if (localPath != null) {
+    if (localPath != null && !kIsWeb) {
       return Image.file(
         File(localPath),
         width: 110,
@@ -3208,8 +3504,12 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   Widget _buildImageTile({
     required Widget image,
-    required VoidCallback onRemove,
+    VoidCallback? onRemove,
   }) {
+    if (onRemove == null) {
+      return SizedBox(width: 110, height: 110, child: image);
+    }
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -3264,10 +3564,12 @@ class AddProductScreenState extends State<AddProductScreen> {
             subtitle: Text(
               'ความยาวไม่เกิน ${_maxVideoDuration.inMinutes} นาที',
             ),
-            trailing: IconButton(
-              icon: const Icon(Icons.close),
-              onPressed: _removeVideo,
-            ),
+            trailing: _isEditingExistingProduct
+                ? null
+                : IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: _removeVideo,
+                  ),
           ),
           if (hasVideo)
             Padding(
@@ -3275,9 +3577,29 @@ class AddProductScreenState extends State<AddProductScreen> {
               child: SizedBox(
                 height: 220,
                 child: _videoFile != null
-                    ? ProductVideoPlayer(
-                        videoUrl: _videoFile!.path,
-                      ) // ส่วนนี้ถูกต้องแล้ว
+                    ? (kIsWeb
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.videocam,
+                                    size: 48,
+                                    color: AppColors.accent,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _videoFile!.name,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
+                              ),
+                            )
+                          : ProductVideoPlayer(
+                              videoUrl: _videoFile!.path,
+                            ))
                     : (videoUrl != null
                           ? ProductVideoPlayer(
                               videoUrl: cachedVideoPath ?? videoUrl,

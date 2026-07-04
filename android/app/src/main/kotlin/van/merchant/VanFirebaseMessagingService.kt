@@ -1,7 +1,5 @@
 package van.merchant
 
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -18,18 +16,29 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
+        Log.i(TAG, "onMessageReceived type=${data["type"]} action=${data["action"]} orderId=${data["orderId"]}")
         when (data["type"]) {
-            "call" -> showIncomingCallNotification(data)
-            "call_cancel" -> dismissIncomingCall(data)
-            "chat" -> showChatNotificationIfNeeded(data)
+            "call" -> {
+                showIncomingCallNotification(data)
+                super.onMessageReceived(message)
+            }
+            "call_cancel" -> {
+                dismissIncomingCall(data)
+                super.onMessageReceived(message)
+            }
+            "chat" -> {
+                showChatNotificationIfNeeded(data)
+                super.onMessageReceived(message)
+            }
             "app_notification" -> {
                 if (data["action"] == "order_accepted") {
                     showOrderDecisionNotification(data)
+                    return
                 }
+                super.onMessageReceived(message)
             }
+            else -> super.onMessageReceived(message)
         }
-        // ส่งต่อให้ plugin จัดการ notification/chat อื่น ๆ (เช่น FCM -> Dart)
-        super.onMessageReceived(message)
     }
 
     override fun onNewToken(token: String) {
@@ -72,7 +81,7 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        ensureChannel(notificationManager)
+        MerchantNotificationChannels.ensureAll(this)
         wakeDeviceForIncomingCall()
 
         if (!VanMerchantApp.isAppInForeground()) {
@@ -97,7 +106,7 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
             )
         }
 
-        val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, MerchantNotificationChannels.CALL_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle(if (isVideo) "สายวิดีโอคอลเข้า" else "สายเข้าจาก $callerName")
             .setContentText("แตะเพื่อรับสาย")
@@ -164,10 +173,10 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        ensureChatChannel(notificationManager)
+        MerchantNotificationChannels.ensureAll(this)
         wakeDevice("incoming_chat", 2000)
 
-        val notification = NotificationCompat.Builder(this, CHAT_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, MerchantNotificationChannels.CHAT_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_action_chat)
             .setContentTitle(senderName)
             .setContentText(body)
@@ -188,7 +197,15 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         val title = data["title"] ?: "มีออเดอร์รอร้านยืนยัน"
         val body = data["body"] ?: "แตะเพื่อรับหรือปฏิเสธออเดอร์"
         val notificationId = data["notificationId"]
-        val intent = OrderDecisionIntentBuilder.build(
+
+        val openIntent = OrderDecisionIntentBuilder.build(
+            context = this,
+            orderId = orderId,
+            notificationId = notificationId,
+            title = title,
+            body = body,
+        )
+        val wakeIntent = IncomingOrderDecisionActivityIntentBuilder.build(
             context = this,
             orderId = orderId,
             notificationId = notificationId,
@@ -198,72 +215,38 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
         val pendingIntent = PendingIntent.getActivity(
             this,
             orderId.hashCode(),
-            intent,
-            pendingIntentFlags()
+            wakeIntent,
+            pendingIntentFlags(),
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        ensureChannel(notificationManager)
+        MerchantNotificationChannels.ensureAll(this)
         wakeDeviceForIncomingCall()
 
-        val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, MerchantNotificationChannels.ORDER_WAKE_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
+            .setOngoing(true)
+            .setTimeoutAfter(60000)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setFullScreenIntent(pendingIntent, true)
             .setContentIntent(pendingIntent)
+            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
             .build()
 
         notificationManager.notify(orderId.hashCode(), notification)
-        CallIntentRouter.deliverIntent(intent)
+        CallIntentRouter.deliverIntent(openIntent)
         try {
-            startActivity(intent)
+            startActivity(wakeIntent)
         } catch (error: Exception) {
             Log.w(TAG, "Unable to start order decision UI", error)
         }
-    }
-
-    private fun ensureChannel(notificationManager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CALL_CHANNEL_ID,
-            "Incoming Calls",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Full-screen notifications for incoming calls"
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            setBypassDnd(true)
-            enableVibration(true)
-            setSound(
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
-                Notification.AUDIO_ATTRIBUTES_DEFAULT
-            )
-        }
-        notificationManager.createNotificationChannel(channel)
-    }
-
-    private fun ensureChatChannel(notificationManager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val channel = NotificationChannel(
-            CHAT_CHANNEL_ID,
-            "Chat Messages",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Lock-screen notifications for new chat messages"
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            enableVibration(true)
-            setSound(
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-                Notification.AUDIO_ATTRIBUTES_DEFAULT
-            )
-        }
-        notificationManager.createNotificationChannel(channel)
     }
 
     private fun wakeDeviceForIncomingCall() {
@@ -287,8 +270,6 @@ class VanFirebaseMessagingService : FlutterFirebaseMessagingService() {
     }
 
     companion object {
-        private const val CALL_CHANNEL_ID = "call_channel"
-        private const val CHAT_CHANNEL_ID = "chat_wakeup_channel_v1"
         private const val REQUEST_CODE_INCOMING_CALL = 3182
         const val NOTIFICATION_ID_INCOMING_CALL = 2387
         private const val TAG = "VanFcmService"
@@ -367,9 +348,24 @@ private object OrderDecisionIntentBuilder {
         body: String,
     ) = Intent(context, MainActivity::class.java).apply {
         action = MainActivity.ACTION_SHOW_ORDER_DECISION
-        flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-            Intent.FLAG_ACTIVITY_CLEAR_TOP or
-            Intent.FLAG_ACTIVITY_SINGLE_TOP
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        putExtra(MainActivity.EXTRA_ORDER_ID, orderId)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_ID, notificationId)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_TITLE, title)
+        putExtra(MainActivity.EXTRA_NOTIFICATION_BODY, body)
+    }
+}
+
+private object IncomingOrderDecisionActivityIntentBuilder {
+    fun build(
+        context: Context,
+        orderId: String,
+        notificationId: String?,
+        title: String,
+        body: String,
+    ) = Intent(context, IncomingOrderDecisionActivity::class.java).apply {
+        action = MainActivity.ACTION_SHOW_ORDER_DECISION
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         putExtra(MainActivity.EXTRA_ORDER_ID, orderId)
         putExtra(MainActivity.EXTRA_NOTIFICATION_ID, notificationId)
         putExtra(MainActivity.EXTRA_NOTIFICATION_TITLE, title)

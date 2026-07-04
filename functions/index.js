@@ -4,7 +4,7 @@ const { defineSecret } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onDocumentWritten, onDocumentCreated } = require('firebase-functions/v2/firestore');
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
@@ -224,6 +224,17 @@ admin.initializeApp();
 
 const db = admin.firestore();
 const FieldValue = admin.firestore.FieldValue;
+
+const merchantWallet = require('./merchant_wallet');
+merchantWallet.init({
+  db,
+  FieldValue,
+  HttpsError,
+  onCall,
+  onDocumentWritten,
+  logger,
+  DEFAULT_REGION,
+});
 
 const AGORA_APP_ID_SECRET = defineSecret('AGORA_APP_ID');
 const AGORA_APP_CERT_SECRET = defineSecret('AGORA_APP_CERTIFICATE');
@@ -2016,8 +2027,11 @@ function computeProductAiAnalysisHash({
   weight,
   weightUnit,
   imageBase64,
+  imageUrl,
 }) {
-  const imageHash = crypto.createHash('sha256').update(String(imageBase64 || '')).digest('hex');
+  const imageHash = imageBase64
+    ? crypto.createHash('sha256').update(String(imageBase64 || '')).digest('hex')
+    : crypto.createHash('sha256').update(String(imageUrl || '')).digest('hex');
   return crypto.createHash('sha256').update(JSON.stringify({
     version: PRODUCT_AI_ANALYSIS_VERSION,
     productName: String(productName || '').trim(),
@@ -2802,6 +2816,484 @@ exports.analyzeProductWithAi = onCall(
       throw error;
     } finally {
       await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+    }
+  },
+);
+
+function buildProductAiGeminiPrompt({
+  productName,
+  description,
+  category,
+  unit,
+  price,
+  weight,
+  weightUnit,
+}) {
+  return [
+    'You are analyzing one product listing for a Thai merchant app. Return JSON only.',
+    'Analyze the image and merchant-entered fields. Do not generate or edit any image.',
+    'If the product name is missing or unclear from merchant fields, infer the most likely Thai product name from the image and return it as productName. Leave productName empty only if the product cannot be identified.',
+    'Write description in Thai at about 2 natural mobile-app lines, useful for selling online. Avoid being too short.',
+    'Main task 1: decide whether this product is legal to sell in Thailand for normal online commerce. Consider obvious prohibited or controlled goods such as illegal drugs, weapons, counterfeit goods, gambling items, protected wildlife, hazardous materials, prescription-only medicines, and other regulated goods. If uncertain, mark isLegalInThailand false and explain that manual review is required.',
+    'Main task 2: identify what product type it is in Thai, such as fresh vegetable, fruit, prepared food, beverage, medicine/pharmacy item, cosmetic, electronics, clothing, household item, agricultural product, or general goods.',
+    'Also fill existing merchant fields when possible.',
+    'VAT rule: fresh unprocessed foods such as fresh vegetables, fruit, raw meat, raw seafood are exempt; processed, cooked, packaged, ready-to-eat, drinks, medicines/pharmacy items, and general goods are taxable.',
+    'Nationwide shipping rule: dry, sealed, shelf-stable, non-fragile, legal products are usually suitable; fresh, frozen/chilled, leaking, very fragile, live, hazardous, prescription-controlled, or location-sensitive goods are usually not suitable.',
+    'Parcel dimensions task: estimate outer package size in centimeters after typical merchant packing for nationwide courier shipping. Use realistic retail parcel sizes for the visible product and known weight when available. Return parcelLengthCm, parcelWidthCm, parcelHeightCm as positive numbers only. Length is usually the longest side.',
+    'Sale unit task: choose the best Thai selling unit for this product in specifications. Prefer one of ชิ้น ถุง แพ็ค มัด ลูก กล่อง. Use ถุง for bagged produce, มัด for bundled vegetables/herbs, ลูก for whole fruit, แพ็ค for multi-pack, กล่อง for boxed goods.',
+    'For every major judgment, also return confidence as an integer 0-100 where 100 means very certain.',
+    'JSON schema only:',
+    '{"productName":"likely Thai product name","productNameConfidence":0-100,"description":"Thai product description about 2 mobile lines","isLegalInThailand":true/false,"legalReason":"short Thai reason","legalConfidence":0-100,"productType":"specific Thai product type","productCategory":"ของสด or อาหารแปรรูป or สินค้าทั่วไป or ร้านขายยาและเวชภัณฑ์ or สินค้าเกษตร","productTypeConfidence":0-100,"taxStatus":"taxable or exempt","taxStatusLabel":"สินค้านี้เสียภาษี or สินค้านี้ยกเว้นภาษี","taxReason":"short Thai reason","taxConfidence":0-100,"isFreshProduct":true/false,"isProcessed":true/false,"canShipNationwide":true/false,"nationwideShippingReason":"short Thai reason","nationwideShippingConfidence":0-100,"parcelLengthCm":number,"parcelWidthCm":number,"parcelHeightCm":number,"parcelDimensionReason":"short Thai reason for estimated parcel size","parcelDimensionConfidence":0-100,"saleUnit":"ชิ้น or ถุง or แพ็ค or มัด or ลูก or กล่อง"}',
+    `Known merchant-entered fields: productName=${productName || '-'}, description=${description || '-'}, category=${category || '-'}, unit=${unit || '-'}, price=${price || '-'}, weight=${weight || '-'}, weightUnit=${weightUnit || '-'}.`,
+  ].join(' ');
+}
+
+function parseProductAiAnalysisFromParts(partsForAnalysis) {
+  const textOutput = Array.isArray(partsForAnalysis)
+    ? partsForAnalysis.map((part) => String(part?.text || '').trim()).filter(Boolean).join('\n')
+    : '';
+  if (!textOutput) return {};
+  try {
+    const jsonMatch = textOutput.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+  } catch (parseError) {
+    logger.warn('parseProductAiAnalysisFromParts JSON parse failed', {
+      message: parseError instanceof Error ? parseError.message : String(parseError),
+      text: textOutput.slice(0, 800),
+    });
+  }
+  return {};
+}
+
+async function runGeminiProductAnalysis({
+  uid,
+  apiKey,
+  imageBase64,
+  mimeType,
+  productName,
+  description,
+  category,
+  unit,
+  price,
+  weight,
+  weightUnit,
+}) {
+  const apiVersions = ['v1beta', 'v1'];
+  const preferredModels = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+  ];
+  const prompt = buildProductAiGeminiPrompt({
+    productName,
+    description,
+    category,
+    unit,
+    price,
+    weight,
+    weightUnit,
+  });
+
+  const discoveredModelNames = new Set();
+  for (const apiVersion of apiVersions) {
+    try {
+      const listResp = await fetch(
+        `https://generativelanguage.googleapis.com/${apiVersion}/models?key=${encodeURIComponent(apiKey)}`,
+      );
+      if (!listResp.ok) continue;
+      const listPayload = await listResp.json();
+      const models = Array.isArray(listPayload?.models) ? listPayload.models : [];
+      for (const model of models) {
+        const name = String(model?.name || '').trim();
+        const shortName = name.startsWith('models/') ? name.slice('models/'.length) : name;
+        const methods = Array.isArray(model?.supportedGenerationMethods)
+          ? model.supportedGenerationMethods.map((value) => String(value || '').trim())
+          : [];
+        if (shortName && methods.includes('generateContent') && !/image|imagen/i.test(shortName)) {
+          discoveredModelNames.add(shortName);
+        }
+      }
+    } catch (listError) {
+      logger.warn('runGeminiProductAnalysis listModels network error', {
+        uid,
+        apiVersion,
+        message: listError instanceof Error ? listError.message : String(listError),
+      });
+    }
+  }
+
+  const modelCandidates = [...new Set([...preferredModels, ...discoveredModelNames])];
+  let analysis = {};
+  let selectedModel = null;
+  let selectedApiVersion = null;
+  let lastErrorStatus = null;
+  let lastErrorBody = '';
+
+  for (const modelName of modelCandidates) {
+    for (const apiVersion of apiVersions) {
+      const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+      let response;
+      try {
+        response = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType, data: imageBase64 } },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: 'application/json',
+            },
+          }),
+        });
+      } catch (error) {
+        logger.error('runGeminiProductAnalysis network error', {
+          uid,
+          model: modelName,
+          apiVersion,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        throw new HttpsError('unavailable', 'ไม่สามารถเชื่อมต่อบริการ AI ได้ในขณะนี้');
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        const loweredErrorBody = errorBody.toLowerCase();
+        logger.error('runGeminiProductAnalysis upstream error', {
+          uid,
+          model: modelName,
+          apiVersion,
+          status: response.status,
+          body: errorBody.slice(0, 1000),
+        });
+
+        if (loweredErrorBody.includes('api_key_invalid') || loweredErrorBody.includes('api key not valid')) {
+          throw new HttpsError('failed-precondition', 'GEMINI_API_KEY ไม่ถูกต้องหรือถูกจำกัดสิทธิ์ กรุณาตั้งค่า key ใหม่ใน Secret Manager');
+        }
+        if (loweredErrorBody.includes('permission_denied')) {
+          throw new HttpsError('permission-denied', 'บัญชีหรือ API key ยังไม่ได้เปิดสิทธิ์ใช้งาน Generative Language API');
+        }
+        if (
+          loweredErrorBody.includes('resource_exhausted') ||
+          loweredErrorBody.includes('prepayment credits are depleted') ||
+          loweredErrorBody.includes('credits are depleted') ||
+          loweredErrorBody.includes('quota')
+        ) {
+          throw new HttpsError('resource-exhausted', 'เครดิต Gemini API หมด กรุณาเติมเครดิตหรือเปิด Billing ใน AI Studio แล้วลองใหม่อีกครั้ง');
+        }
+
+        lastErrorStatus = response.status;
+        lastErrorBody = errorBody;
+        const canTryNextModel =
+          loweredErrorBody.includes('not found') ||
+          loweredErrorBody.includes('unsupported') ||
+          loweredErrorBody.includes('method not found') ||
+          loweredErrorBody.includes('model') ||
+          loweredErrorBody.includes('invalid json payload') ||
+          loweredErrorBody.includes('unknown name') ||
+          loweredErrorBody.includes('cannot find field') ||
+          loweredErrorBody.includes('responsemimetype');
+        if (canTryNextModel) continue;
+        throw new HttpsError('internal', 'บริการ AI ตอบกลับผิดพลาด');
+      }
+
+      const payload = await response.json();
+      const parts = payload?.candidates?.[0]?.content?.parts;
+      analysis = parseProductAiAnalysisFromParts(parts);
+      if (Object.keys(analysis).length > 0) {
+        selectedModel = modelName;
+        selectedApiVersion = apiVersion;
+        break;
+      }
+
+      lastErrorStatus = 200;
+      lastErrorBody = JSON.stringify(payload).slice(0, 1000);
+    }
+    if (selectedModel) break;
+  }
+
+  if (!selectedModel) {
+    logger.error('runGeminiProductAnalysis no available model', {
+      uid,
+      lastErrorStatus,
+      lastErrorBody: String(lastErrorBody || '').slice(0, 1000),
+      discoveredModels: [...discoveredModelNames].slice(0, 20),
+    });
+    throw new HttpsError('unimplemented', 'โมเดล AI สำหรับวิเคราะห์สินค้ายังไม่พร้อมใช้งานในโปรเจกต์นี้');
+  }
+
+  return {
+    analysis,
+    model: `${selectedModel}@${selectedApiVersion || 'unknown'}`,
+  };
+}
+
+async function notifyProductAiReady({ uid, draftId, jobId, productName }) {
+  const notificationId = `product_ai_${jobId}`;
+  const title = 'AI วิเคราะห์สินค้าเสร็จแล้ว';
+  const body = productName
+    ? `พร้อมเติมข้อมูล: ${productName}`
+    : 'แตะเพื่อดูผลและเติมข้อมูลสินค้า';
+
+  await db.collection('app_notifications').doc(notificationId).set({
+    targetApp: 'van1',
+    recipientUid: uid,
+    title,
+    body,
+    read: false,
+    createdAt: FieldValue.serverTimestamp(),
+    action: 'product_ai_ready',
+    draftId,
+    jobId,
+    source: 'van1_product_ai',
+    type: 'app_notification',
+  }, { merge: true });
+
+  const fcmToken = await resolveAnyRecipientFcmToken(uid);
+  if (!fcmToken) {
+    return;
+  }
+
+  try {
+    await admin.messaging().send({
+      notification: { title, body },
+      data: {
+        type: 'product_ai_ready',
+        action: 'product_ai_ready',
+        draftId: String(draftId || ''),
+        jobId: String(jobId || ''),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+      token: fcmToken,
+    });
+  } catch (error) {
+    logger.warn('notifyProductAiReady FCM failed', {
+      uid,
+      draftId,
+      jobId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function processProductAiJob(jobId, jobData, apiKey) {
+  const uid = String(jobData?.uid || '').trim();
+  const draftId = String(jobData?.draftId || '').trim();
+  const imageUrl = String(jobData?.imageUrl || '').trim();
+  if (!uid || !draftId || !imageUrl) {
+    throw new Error('product_ai_jobs missing uid/draftId/imageUrl');
+  }
+
+  const productName = String(jobData?.productName || '').trim();
+  const description = String(jobData?.description || '').trim();
+  const category = String(jobData?.category || '').trim();
+  const unit = String(jobData?.unit || '').trim();
+  const price = String(jobData?.price || '').trim();
+  const weight = String(jobData?.weight || '').trim();
+  const weightUnit = String(jobData?.weightUnit || '').trim();
+
+  const draftRef = db.collection('product_drafts').doc(uid).collection('items').doc(draftId);
+  await draftRef.set({
+    aiStatus: 'processing',
+    aiRequestId: jobId,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const inlineImage = await fetchImageAsInlineData(imageUrl);
+  if (!inlineImage?.data) {
+    throw new HttpsError('invalid-argument', 'ไม่สามารถโหลดรูปจาก Storage สำหรับ AI ได้');
+  }
+
+  const analysisInputHash = computeProductAiAnalysisHash({
+    productName,
+    description,
+    category,
+    unit,
+    price,
+    weight,
+    weightUnit,
+    imageUrl,
+  });
+
+  const cachedAnalysis = await loadProductAiCache(analysisInputHash);
+  let result;
+  if (cachedAnalysis) {
+    await db.collection(PRODUCT_AI_CACHE_COLLECTION).doc(analysisInputHash).set({
+      usageCount: FieldValue.increment(1),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    result = buildProductAiCallableResult(cachedAnalysis, {
+      model: String(cachedAnalysis.model || 'cache').trim(),
+      queuePosition: 0,
+      estimatedWaitSeconds: 0,
+      fromCache: true,
+    });
+  } else {
+    const queueLease = await acquireAiProcessingSlot({ uid, requestId: jobId });
+    let queueFinalStatus = 'completed';
+    try {
+      const gemini = await runGeminiProductAnalysis({
+        uid,
+        apiKey,
+        imageBase64: inlineImage.data,
+        mimeType: inlineImage.mimeType,
+        productName,
+        description,
+        category,
+        unit,
+        price,
+        weight,
+        weightUnit,
+      });
+      result = buildProductAiCallableResult(gemini.analysis, {
+        model: gemini.model,
+        queuePosition: queueLease.position,
+        estimatedWaitSeconds: queueLease.estimatedWaitSeconds,
+      });
+      await saveProductAiCache(analysisInputHash, result, result.model);
+    } catch (error) {
+      queueFinalStatus = 'failed';
+      throw error;
+    } finally {
+      await releaseAiProcessingSlot(queueLease, queueFinalStatus);
+    }
+  }
+
+  await draftRef.set({
+    aiStatus: 'completed',
+    aiRequestId: jobId,
+    aiResult: result,
+    imageUrl,
+    thumbnailUrl: String(jobData?.thumbnailUrl || '').trim() || null,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  await db.collection('product_ai_jobs').doc(jobId).set({
+    status: 'completed',
+    completedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  await notifyProductAiReady({
+    uid,
+    draftId,
+    jobId,
+    productName: result.productName || productName,
+  });
+
+  return result;
+}
+
+exports.enqueueProductAiAnalysis = onCall(
+  {
+    region: DEFAULT_REGION,
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError('unauthenticated', 'กรุณาเข้าสู่ระบบก่อนใช้งาน AI');
+    }
+
+    const imageUrl = String(request.data?.imageUrl || '').trim();
+    const draftId = String(request.data?.draftId || '').trim();
+    if (!imageUrl) {
+      throw new HttpsError('invalid-argument', 'ไม่พบ URL รูปสินค้าที่อัปโหลดแล้ว');
+    }
+    if (!draftId) {
+      throw new HttpsError('invalid-argument', 'ไม่พบ draftId');
+    }
+
+    const jobId = normalizeAiRequestId(request.data?.requestId);
+    const uid = request.auth.uid;
+    const jobRef = db.collection('product_ai_jobs').doc(jobId);
+
+    await jobRef.set({
+      uid,
+      draftId,
+      imageUrl,
+      thumbnailUrl: String(request.data?.thumbnailUrl || '').trim() || null,
+      productName: String(request.data?.productName || '').trim(),
+      description: String(request.data?.description || '').trim(),
+      category: String(request.data?.category || '').trim(),
+      unit: String(request.data?.unit || '').trim(),
+      price: String(request.data?.price || '').trim(),
+      weight: String(request.data?.weight || '').trim(),
+      weightUnit: String(request.data?.weightUnit || '').trim(),
+      status: 'queued',
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    await db.collection('product_drafts').doc(uid).collection('items').doc(draftId).set({
+      aiStatus: 'queued',
+      aiRequestId: jobId,
+      imageUrl,
+      thumbnailUrl: String(request.data?.thumbnailUrl || '').trim() || null,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return { jobId, status: 'queued' };
+  },
+);
+
+exports.onProductAiJobQueued = onDocumentCreated(
+  {
+    document: 'product_ai_jobs/{jobId}',
+    region: DEFAULT_REGION,
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  },
+  async (event) => {
+    const jobId = event.params.jobId;
+    const jobData = event.data?.data() || {};
+    if (String(jobData.status || '') !== 'queued') {
+      return null;
+    }
+
+    const apiKey = String(GEMINI_API_KEY.value() || '').trim();
+    if (!apiKey) {
+      await db.collection('product_ai_jobs').doc(jobId).set({
+        status: 'failed',
+        error: 'missing_gemini_api_key',
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return null;
+    }
+
+    await db.collection('product_ai_jobs').doc(jobId).set({
+      status: 'processing',
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    try {
+      await processProductAiJob(jobId, jobData, apiKey);
+      return null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error('onProductAiJobQueued failed', { jobId, message });
+      await db.collection('product_ai_jobs').doc(jobId).set({
+        status: 'failed',
+        error: message.slice(0, 500),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      const uid = String(jobData.uid || '').trim();
+      const draftId = String(jobData.draftId || '').trim();
+      if (uid && draftId) {
+        await db.collection('product_drafts').doc(uid).collection('items').doc(draftId).set({
+          aiStatus: 'failed',
+          aiError: message.slice(0, 500),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+      return null;
     }
   },
 );
@@ -4686,6 +5178,15 @@ exports.verifyTopUpSlip = onCall(
       }, { merge: true });
     });
 
+    try {
+      await merchantWallet.syncMerchantWallet(uid);
+    } catch (walletError) {
+      logger.error('syncMerchantWallet after verifyTopUpSlip failed', {
+        uid,
+        message: walletError instanceof Error ? walletError.message : String(walletError),
+      });
+    }
+
     return {
       success: true,
       status: verificationStatus,
@@ -4700,3 +5201,5 @@ exports.verifyTopUpSlip = onCall(
     };
   },
 );
+
+Object.assign(exports, merchantWallet.registerHandlers());

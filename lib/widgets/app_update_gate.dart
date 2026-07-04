@@ -245,11 +245,21 @@ class _AppUpdateGateState extends State<AppUpdateGate> {
                 _errorMessage = null;
               });
               break;
+            case OtaStatus.INSTALLATION_DONE:
+              debugPrint('OTA: Installation finished');
+              setState(() {
+                _isInstalling = false;
+                _progress = null;
+                _errorMessage = null;
+              });
+              _dialogSetState?.call(() {});
+              break;
             case OtaStatus.PERMISSION_NOT_GRANTED_ERROR:
             case OtaStatus.ALREADY_RUNNING_ERROR:
             case OtaStatus.INTERNAL_ERROR:
             case OtaStatus.DOWNLOAD_ERROR:
             case OtaStatus.CHECKSUM_ERROR:
+            case OtaStatus.INSTALLATION_ERROR:
             case OtaStatus.CANCELED:
               _handleOtaError(event.status, event.value);
               break;

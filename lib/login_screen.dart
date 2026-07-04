@@ -1,5 +1,6 @@
-import 'dart:io';
+import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -9,6 +10,7 @@ import 'navigation_helper.dart';
 import 'services/biometric_auth_service.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
+import 'web_google_auth.dart';
 
 class LoginScreen extends StatefulWidget {
   final String? serviceType;
@@ -45,7 +47,27 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
+    if (kIsWeb) {
+      unawaited(_handleWebGoogleRedirectResult());
+    }
     _loadBiometricLoginState();
+  }
+
+  Future<void> _handleWebGoogleRedirectResult() async {
+    try {
+      final result = await handleWebGoogleRedirectResult();
+      if (result?.user == null || !mounted) {
+        return;
+      }
+      await _handlePostLogin();
+    } on FirebaseAuthException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      if (error.code != 'auth/redirect-initiated') {
+        _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${error.code})');
+      }
+    } catch (_) {}
   }
 
   @override
@@ -165,19 +187,29 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      if (Platform.isAndroid && _androidServerClientId.isEmpty) {
+      if (kIsWeb) {
+        await signInWithGoogleForWeb();
+        if (!mounted) return;
+        await _handlePostLogin();
+        return;
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.android &&
+          _androidServerClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_ANDROID_SERVER_CLIENT_ID');
       }
-      if (Platform.isIOS && _iosClientId.isEmpty) {
+      if (defaultTargetPlatform == TargetPlatform.iOS && _iosClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
       }
       debugPrint(
-        'GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId',
+        'GoogleSignIn initialize (Android=${defaultTargetPlatform == TargetPlatform.android}) with serverClientId=$_androidServerClientId',
       );
       final googleSignIn = GoogleSignIn.instance;
       await googleSignIn.initialize(
-        serverClientId: Platform.isAndroid ? _androidServerClientId : null,
-        clientId: Platform.isIOS ? _iosClientId : null,
+        serverClientId: defaultTargetPlatform == TargetPlatform.android
+            ? _androidServerClientId
+            : null,
+        clientId: defaultTargetPlatform == TargetPlatform.iOS ? _iosClientId : null,
       );
       if (!googleSignIn.supportsAuthenticate()) {
         throw Exception('แพลตฟอร์มนี้ไม่รองรับ Google Sign-In');
@@ -485,7 +517,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ],
             ),
-            if (_isBiometricAvailable) ...[
+            if (_isBiometricAvailable && !kIsWeb) ...[
               const SizedBox(height: 12),
               OutlinedButton.icon(
                 onPressed:
@@ -594,7 +626,7 @@ class _LoginHeader extends StatelessWidget {
               borderRadius: BorderRadius.circular(20.0),
               child: const Image(
                 image: AssetImage(
-                  'assets/file_00000000be5472069245fc3bdb122dbb.png',
+                  'assets/app_logo.png',
                 ),
                 fit: BoxFit.cover,
               ),

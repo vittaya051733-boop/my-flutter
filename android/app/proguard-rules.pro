@@ -30,6 +30,11 @@
 -keep class com.google.firebase.** { *; }
 -dontwarn com.google.firebase.**
 
+# Firebase Phone Auth / reCAPTCHA Enterprise (release R8)
+-keep class com.google.android.recaptcha.** { *; }
+-dontwarn com.google.android.recaptcha.**
+-keep class com.google.firebase.auth.** { *; }
+
 # Printing plugin (uses reflection)
 -keep class net.nfet.flutter.printing.** { *; }
 -dontwarn net.nfet.flutter.printing.**

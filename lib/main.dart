@@ -25,6 +25,7 @@ import 'utils/app_colors.dart';
 import 'services/notification_service.dart';
 import 'widgets/app_update_gate.dart';
 import 'utils/feature_flags.dart';
+import 'utils/phone_auth_config.dart';
 
 void main() {
   runZonedGuarded(
@@ -48,13 +49,19 @@ void main() {
       };
 
       try {
-        // ป้องกันการ initialize ซ้ำ (เช่นตอน hot restart)
         if (Firebase.apps.isEmpty) {
           await Firebase.initializeApp(
             options: DefaultFirebaseOptions.currentPlatform,
           );
         }
         await initializeDateFormatting('th_TH');
+
+        // Emulator/sideload: ใช้เบอร์ทดสอบใน Firebase Console → Auth → Phone
+        if (shouldDisablePhoneAppVerification) {
+          await FirebaseAuth.instance.setSettings(
+            appVerificationDisabledForTesting: true,
+          );
+        }
       } catch (e) {
         final msg = e.toString();
         // ถ้าเป็น duplicate-app ให้ข้ามและใช้อินสแตนซ์เดิม
@@ -101,15 +108,19 @@ void main() {
         }
       }
 
-      FirebaseMessaging.onBackgroundMessage(
-        firebaseMessagingBackgroundHandlerVan1,
-      );
+      if (!kIsWeb) {
+        FirebaseMessaging.onBackgroundMessage(
+          firebaseMessagingBackgroundHandlerVan1,
+        );
+      }
 
       runApp(const MyApp());
 
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        unawaited(_initializeNotificationsAfterAppStart());
-      });
+      if (!kIsWeb) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          unawaited(_initializeNotificationsAfterAppStart());
+        });
+      }
     },
     (error, stack) {
       // เก็บ/แสดง log ได้ตามต้องการ
@@ -298,9 +309,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
   Future<void> _navigate() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user != null && mounted) {
-      // อัปเดต FCM token อัตโนมัติหลัง login
-      await NotificationService().saveUserFcmToken(user.uid);
-      if (!mounted) return;
+      if (!kIsWeb) {
+        await NotificationService().saveUserFcmToken(user.uid);
+        if (!mounted) return;
+      }
       // ใช้ NavigationHelper เพื่อตรวจสอบและนำทาง
       await NavigationHelper.navigateBasedOnUserStatus(
         context,
@@ -324,7 +336,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
           children: [
             // โลโก้ (เปลี่ยนชื่อไฟล์ตาม asset ที่มี)
             Image.asset(
-              'assets/file_00000000be5472069245fc3bdb122dbb.png',
+              'assets/app_logo.png',
               width: logoSize,
               height: logoSize,
             ),

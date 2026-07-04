@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart'; // เพิ่ม import ที่ขาดไป
@@ -13,6 +13,7 @@ import 'services/email_otp_service.dart';
 import 'services/notification_service.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
+import 'web_google_auth.dart';
 
 class Debouncer {
   final int milliseconds;
@@ -480,19 +481,29 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _socialLoadingKey = 'google';
     });
     try {
-      if (Platform.isAndroid && _androidServerClientId.isEmpty) {
+      if (kIsWeb) {
+        await signInWithGoogleForWeb();
+        if (!mounted) return;
+        await _handleSocialSignIn();
+        return;
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.android &&
+          _androidServerClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_ANDROID_SERVER_CLIENT_ID');
       }
-      if (Platform.isIOS && _iosClientId.isEmpty) {
+      if (defaultTargetPlatform == TargetPlatform.iOS && _iosClientId.isEmpty) {
         throw StateError('ยังไม่ได้ตั้งค่า GOOGLE_IOS_CLIENT_ID');
       }
       debugPrint(
-        'GoogleSignIn initialize (Android=${Platform.isAndroid}) with serverClientId=$_androidServerClientId',
+        'GoogleSignIn initialize (Android=${defaultTargetPlatform == TargetPlatform.android}) with serverClientId=$_androidServerClientId',
       );
       final googleSignIn = GoogleSignIn.instance;
       await googleSignIn.initialize(
-        serverClientId: Platform.isAndroid ? _androidServerClientId : null,
-        clientId: Platform.isIOS ? _iosClientId : null,
+        serverClientId: defaultTargetPlatform == TargetPlatform.android
+            ? _androidServerClientId
+            : null,
+        clientId: defaultTargetPlatform == TargetPlatform.iOS ? _iosClientId : null,
       );
       if (!googleSignIn.supportsAuthenticate()) {
         throw Exception('แพลตฟอร์มนี้ไม่รองรับ Google Sign-In');

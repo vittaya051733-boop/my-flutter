@@ -9,6 +9,8 @@ alwaysApply: true
 1. `Desktop\van2\scripts\DEPLOY_GOVERNANCE.md`
 2. `Desktop\van2\scripts\DEPLOY_RISK_MATRIX.md`
 
+**ก่อนลบโค้ดที่กระทบ production** → `DEPLOY_GOVERNANCE.md` § Checkpoint ก่อนลบโค้ด
+
 ## van1 ทำได้ / ห้ามทำ
 
 | ทำได้ (SELF) | ห้าม |

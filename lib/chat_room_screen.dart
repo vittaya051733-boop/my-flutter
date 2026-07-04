@@ -12,6 +12,8 @@ import 'models/user_profile.dart';
 import 'services/chat_service.dart';
 import 'services/friend_service.dart';
 import 'services/notification_service.dart';
+import 'services/chat_warmup.dart';
+import 'services/chat_warmup_cache.dart';
 import 'call_screen.dart';
 import 'widgets/cached_app_image.dart';
 
@@ -37,18 +39,30 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   bool _uploading = false;
   bool _startingCall = false;
   bool _markingAsRead = false;
+  bool _chatReady = false;
   String? _error;
 
   String get _chatId => _chatService.chatIdFor(
-        _currentProfile?.uid ?? '',
+        _currentProfile?.uid ?? FirebaseAuth.instance.currentUser?.uid ?? '',
         _friendProfile.uid,
       );
 
   @override
   void initState() {
     super.initState();
-    _friendProfile = widget.friendProfile;
-    _loadProfile();
+    _friendProfile = ChatWarmupCache.instance.peekProfile(widget.friendProfile.uid) ??
+        widget.friendProfile;
+    ChatWarmupCache.instance.cacheProfile(_friendProfile);
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      ChatWarmup.prefetchRoom(
+        myUid: user.uid,
+        peer: _friendProfile,
+        chatService: _chatService,
+        friendService: _friendService,
+      );
+    }
+    _loadProfileFast();
   }
 
   @override
@@ -57,43 +71,82 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     super.dispose();
   }
 
-  Future<void> _loadProfile() async {
+  UserProfile _profileFromAuth(User user) {
+    final displayName = user.displayName?.trim();
+    return UserProfile(
+      uid: user.uid,
+      displayName: displayName != null && displayName.isNotEmpty
+          ? displayName
+          : 'ร้านค้า',
+      phoneNumber: user.phoneNumber,
+      photoUrl: user.photoURL,
+    );
+  }
+
+  Future<void> _loadProfileFast() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       setState(() => _error = 'โปรดเข้าสู่ระบบอีกครั้ง');
       return;
     }
-    final profile = await _friendService.getProfile(user.uid) ??
-        await _friendService.ensureCurrentUserProfile(user);
-    if (profile == null) {
-      if (!mounted) return;
-      setState(() => _error = 'ไม่พบข้อมูลผู้ใช้ปัจจุบัน');
-      return;
-    }
 
-    final refreshedFriend =
-        await _friendService.getProfile(widget.friendProfile.uid) ??
-        widget.friendProfile;
+    setState(() => _currentProfile = _profileFromAuth(user));
+    unawaited(_warmChatInBackground(user));
+  }
 
+  Future<void> _warmChatInBackground(User user) async {
     try {
+      final profile = await _friendService.getProfile(user.uid) ??
+          await _friendService.ensureCurrentUserProfile(user);
+      if (profile == null) {
+        if (!mounted) return;
+        setState(() => _error = 'ไม่พบข้อมูลผู้ใช้ปัจจุบัน');
+        return;
+      }
+
+      final fetchedFriend =
+          await _friendService.getProfile(widget.friendProfile.uid) ??
+              widget.friendProfile;
+
+      // เก็บรูป/ชื่อเดิมไว้ ถ้าโปรไฟล์ที่ดึงมาใหม่ไม่มีข้อมูล (อ่านร้านอื่นได้จำกัด)
+      final previousPhoto =
+          _friendProfile.photoUrl ?? widget.friendProfile.photoUrl;
+      final refreshedFriend = fetchedFriend.copyWith(
+        photoUrl: (fetchedFriend.photoUrl?.isNotEmpty ?? false)
+            ? fetchedFriend.photoUrl
+            : previousPhoto,
+      );
+      ChatWarmupCache.instance.cacheProfile(refreshedFriend);
+
+      final chatId = _chatService.chatIdFor(profile.uid, refreshedFriend.uid);
+
+      // สร้างเอกสารห้องแชทให้เสร็จก่อน เพื่อเลี่ยง permission-denied ตอนฟัง messages
       await _chatService.ensureChatAvailable(
         sender: profile,
         target: refreshedFriend,
       );
-      final chatId = _chatService.chatIdFor(profile.uid, refreshedFriend.uid);
-      await _chatService.purgeExpiredMessages(chatId);
-      await _chatService.markChatAsRead(owner: profile, friend: refreshedFriend);
+
+      if (!mounted) return;
+      setState(() {
+        _currentProfile = profile;
+        _friendProfile = refreshedFriend;
+        _chatReady = true;
+      });
+
+      unawaited(_chatService.purgeExpiredMessages(chatId));
+      unawaited(
+        _chatService.markChatAsRead(owner: profile, friend: refreshedFriend),
+      );
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'ไม่สามารถเริ่มห้องแชทได้: $e');
-      return;
+      // ห้องแชทยังใช้ได้แม้ refresh โปรไฟล์ล้มเหลว — ปล่อยให้ listener เริ่มทำงาน
+      setState(() {
+        _chatReady = true;
+        if (_currentProfile == null) {
+          _error = 'ไม่สามารถเริ่มห้องแชทได้: $e';
+        }
+      });
     }
-
-    if (!mounted) return;
-    setState(() {
-      _currentProfile = profile;
-      _friendProfile = refreshedFriend;
-    });
   }
 
   @override
@@ -162,13 +215,17 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   Widget _buildMessageList(UserProfile profile) {
+    if (!_chatReady) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return StreamBuilder<List<ChatMessage>>(
       stream: _chatService.watchMessages(_chatId),
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        final messages = snapshot.data ?? const [];
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            messages.isEmpty) {
           return const Center(child: CircularProgressIndicator());
         }
-        final messages = snapshot.data ?? const [];
         _scheduleMarkAsRead(profile);
         if (messages.isEmpty) {
           return const Center(child: Text('เริ่มต้นสนทนาก่อนเลย'));

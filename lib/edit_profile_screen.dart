@@ -1,8 +1,12 @@
-import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
 import 'storage_helper.dart';
+import 'utils/io_platform.dart';
+import 'utils/web_profile_upload.dart';
 
 class EditProfileScreen extends StatefulWidget {
   const EditProfileScreen({super.key});
@@ -44,9 +48,13 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   Future<String?> _uploadImage(XFile image) async {
     if (_user == null) return null;
     try {
-      final ref = _storage.ref('profile_pictures/${_user!.uid}/${DateTime.now().millisecondsSinceEpoch}');
-      final uploadTask = await ref.putFile(File(image.path));
-      return await uploadTask.ref.getDownloadURL();
+      final ref = _storage.ref(
+        'profile_pictures/${_user!.uid}/${DateTime.now().millisecondsSinceEpoch}',
+      );
+      if (kIsWeb) {
+        return uploadProfileImage(ref: ref, image: image);
+      }
+      return uploadXFilePathToStorage(ref, image.path);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('อัปโหลดรูปภาพล้มเหลว: $e')));
@@ -94,6 +102,31 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     }
   }
 
+  Widget _buildAvatarChild() {
+    if (_imageFile != null && kIsWeb) {
+      return FutureBuilder<Uint8List>(
+        future: _imageFile!.readAsBytes(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Icon(Icons.person, size: 60, color: Colors.white);
+          }
+          return ClipOval(
+            child: Image.memory(
+              snapshot.data!,
+              width: 120,
+              height: 120,
+              fit: BoxFit.cover,
+            ),
+          );
+        },
+      );
+    }
+    if (_imageFile == null && _networkImageUrl == null) {
+      return const Icon(Icons.person, size: 60, color: Colors.white);
+    }
+    return const SizedBox.shrink();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -111,12 +144,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   CircleAvatar(
                     radius: 60,
                     backgroundColor: Colors.grey.shade300,
-                    backgroundImage: _imageFile != null
-                        ? FileImage(File(_imageFile!.path))
-                        : (_networkImageUrl != null ? NetworkImage(_networkImageUrl!) : null) as ImageProvider?,
-                    child: _imageFile == null && _networkImageUrl == null
-                        ? const Icon(Icons.person, size: 60, color: Colors.white)
-                        : null,
+                    backgroundImage: _imageFile != null && !kIsWeb
+                        ? buildFileImageProvider(_imageFile!.path)
+                        : (_networkImageUrl != null && _imageFile == null
+                              ? NetworkImage(_networkImageUrl!)
+                              : null),
+                    child: _buildAvatarChild(),
                   ),
                   Positioned(
                     bottom: 0,

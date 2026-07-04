@@ -41,6 +41,43 @@ class ShopProfileResolver {
     return _resolveValueByKeys(data, _nameKeys);
   }
 
+  static int? resolveAdminMaxImageCount(Map<String, dynamic>? data) {
+    if (data == null) {
+      return null;
+    }
+    final raw = data['adminMaxImageCount'];
+    if (raw is num) {
+      final value = raw.toInt();
+      return value > 0 ? value.clamp(1, 30) : null;
+    }
+    final parsed = int.tryParse(raw?.toString() ?? '');
+    if (parsed == null || parsed <= 0) {
+      return null;
+    }
+    return parsed.clamp(1, 30);
+  }
+
+  static bool? resolveAdminCanUploadVideo(Map<String, dynamic>? data) {
+    if (data == null) {
+      return null;
+    }
+    final raw = data['adminCanUploadVideo'];
+    if (raw is bool) {
+      return raw;
+    }
+    if (raw is num) {
+      return raw != 0;
+    }
+    final normalized = raw?.toString().trim().toLowerCase();
+    if (normalized == 'true' || normalized == '1') {
+      return true;
+    }
+    if (normalized == 'false' || normalized == '0') {
+      return false;
+    }
+    return null;
+  }
+
   static String? _resolveValueByKeys(
     Map<String, dynamic>? data,
     List<String> candidateKeys,

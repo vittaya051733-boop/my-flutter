@@ -33,6 +33,8 @@ class Product {
   final String? taxAiReason;
   final bool? canShipNationwide;
   final String? nationwideShippingReason;
+  final bool isPendingAdminReview;
+  final String? adminReviewId;
 
   Product({
     this.id, // Add to constructor
@@ -67,6 +69,8 @@ class Product {
     this.taxAiReason,
     this.canShipNationwide,
     this.nationwideShippingReason,
+    this.isPendingAdminReview = false,
+    this.adminReviewId,
   });
 
   // Method to convert a Product instance to a map.
@@ -111,7 +115,27 @@ class Product {
 
   // Factory constructor to create a Product from a Firestore document.
   factory Product.fromSnapshot(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final map = doc.data()!;
+    return Product._fromMap(doc.id, doc.data() ?? <String, dynamic>{});
+  }
+
+  /// สินค้าที่รอแอดมินอนุมัติ (ยังไม่อยู่ใน collection products)
+  factory Product.fromAdminReviewSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    return Product._fromMap(
+      doc.id,
+      doc.data() ?? <String, dynamic>{},
+      isPendingAdminReview: true,
+      adminReviewId: doc.id,
+    );
+  }
+
+  factory Product._fromMap(
+    String id,
+    Map<String, dynamic> map, {
+    bool isPendingAdminReview = false,
+    String? adminReviewId,
+  }) {
     double? parsedWeight;
     final weightValue = map['weight'];
     if (weightValue is num) {
@@ -120,7 +144,7 @@ class Product {
       parsedWeight = double.tryParse(weightValue);
     }
     return Product(
-      id: doc.id, // Assign document ID
+      id: id,
       name: map['name'] ?? '',
       description: map['description'] ?? '',
       toppings: map['toppings'] as String?,
@@ -159,6 +183,8 @@ class Product {
       taxAiReason: map['taxAiReason'] as String?,
       canShipNationwide: map['canShipNationwide'] as bool?,
       nationwideShippingReason: map['nationwideShippingReason'] as String?,
+      isPendingAdminReview: isPendingAdminReview,
+      adminReviewId: adminReviewId,
     );
   }
 
@@ -196,6 +222,8 @@ class Product {
       taxAiReason: taxAiReason,
       canShipNationwide: canShipNationwide,
       nationwideShippingReason: nationwideShippingReason,
+      isPendingAdminReview: isPendingAdminReview,
+      adminReviewId: adminReviewId,
     );
   }
 }

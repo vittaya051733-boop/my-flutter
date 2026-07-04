@@ -702,6 +702,17 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
           .doc(user.uid)
           .set(branchAssignment.toFirestoreFields(), SetOptions(merge: true));
 
+      final contactEmail = _emailController.text.trim();
+      if (contactEmail.isNotEmpty) {
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).set(
+          {
+            'email': contactEmail,
+            'contactEmail': contactEmail,
+          },
+          SetOptions(merge: true),
+        );
+      }
+
       _showSnackBar('✅ ลงทะเบียนร้านค้าสำเร็จ!', Colors.green);
 
       await Future.delayed(const Duration(seconds: 1));

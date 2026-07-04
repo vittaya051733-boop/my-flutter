@@ -7,6 +7,10 @@
 3. Run readiness: `..\..\..\van2\scripts\deploy-readiness.ps1 -App van1 -Target <target>`
 4. Deploy ONE target: `..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target <target> ...`
 
+## Before removing production code
+
+See `DEPLOY_GOVERNANCE.md` § **Checkpoint ก่อนลบโค้ด**: report impact and wait for user confirmation before delete + deploy.
+
 ## Never
 
 - `firebase deploy` without isolated scripts

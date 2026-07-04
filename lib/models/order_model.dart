@@ -49,11 +49,46 @@ class OrderItem {
       productName: map['productName'] ?? map['name'] ?? '',
       quantity: map['quantity'] ?? 0,
       price: _readDouble(map['price'] ?? map['unitPrice']) ?? 0,
-      imageUrl: (map['imageUrl'] ?? map['productImage']) as String?,
+      imageUrl: _readOrderItemImageUrl(map),
       toppings: selectedToppings.isNotEmpty
           ? selectedToppings.join(', ')
           : _readToppingsText(map['toppings']),
     );
+  }
+
+  static String? _readOrderItemImageUrl(Map<String, dynamic> map) {
+    for (final key in <String>['imageUrl', 'productImage']) {
+      final direct = map[key]?.toString().trim();
+      if (direct != null && direct.isNotEmpty) {
+        return direct;
+      }
+    }
+    final fromArray =
+        _firstNonEmptyUrl(map['imageUrls']) ??
+        _firstNonEmptyUrl(map['thumbnailUrls']);
+    if (fromArray != null) {
+      return fromArray;
+    }
+    for (final key in <String>['photoUrl', 'thumbnailUrl']) {
+      final fallback = map[key]?.toString().trim();
+      if (fallback != null && fallback.isNotEmpty) {
+        return fallback;
+      }
+    }
+    return null;
+  }
+
+  static String? _firstNonEmptyUrl(dynamic raw) {
+    if (raw is! List) {
+      return null;
+    }
+    for (final entry in raw) {
+      final url = entry?.toString().trim();
+      if (url != null && url.isNotEmpty) {
+        return url;
+      }
+    }
+    return null;
   }
 
   static List<String> _readStringList(dynamic value) {

@@ -2,7 +2,7 @@ name: van1
 description: "Van 1 Flutter project."
 publish_to: 'none'
 
-version: 1.0.6+2
+version: 1.0.13+9
 
 environment:
   sdk: ^3.9.0
@@ -51,7 +51,7 @@ dependencies:
     path: local_packages/blue_thermal_printer
   mobile_scanner: ^7.1.3
   package_info_plus: ^9.0.0
-  ota_update: ^7.0.2
+  ota_update: 7.1.0
   url_launcher: ^6.3.0
   path: ^1.9.0
   agora_rtc_engine: ^6.5.3
@@ -80,28 +80,33 @@ flutter:
   assets:
     - assets/
     - assets/topping-pop-sound-245150.mp3
+    - assets/ringback-incoming.m4a
+    - assets/ringback-outgoing.m4a
     - shorebird.yaml
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
+  image_path: "assets/app_launcher_icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/app_launcher_icon.png"
+  adaptive_icon_foreground_inset: 0
   remove_alpha_ios: true
   web:
     generate: true
-    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
+    image_path: "assets/app_launcher_icon.png"
     background_color: "#ffffff"
     theme_color: "#ffffff"
   windows:
     generate: true
-    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
+    image_path: "assets/app_launcher_icon.png"
   macos:
     generate: true
-    image_path: "assets/file_00000000be5472069245fc3bdb122dbb.png"
+    image_path: "assets/app_launcher_icon.png"
 
 dependency_overrides:
   sqflite_android: 2.4.1
 flutter_native_splash:
   color: "#ffffff"
-  image: assets/file_00000000be5472069245fc3bdb122dbb.png
+  image: assets/app_logo.png
   android: true
   ios: true

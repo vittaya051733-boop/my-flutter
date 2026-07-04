@@ -14,6 +14,7 @@ class VanMerchantApp : FlutterApplication(), Application.ActivityLifecycleCallba
 
     override fun onCreate() {
         super.onCreate()
+        MerchantNotificationChannels.ensureAll(this)
         registerActivityLifecycleCallbacks(this)
         val appId = getString(R.string.facebook_app_id).trim()
         if (appId.isEmpty()) {

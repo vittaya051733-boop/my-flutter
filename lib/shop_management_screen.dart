@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'add_product_screen.dart';
+import 'merchant_security_deposit_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/product_model.dart';
 import 'services/media_cache_service.dart';
+import 'services/merchant_security_deposit_service.dart';
 import 'services/product_cache_service.dart';
 import 'storage_helper.dart';
 import 'utils/app_colors.dart';
+import 'wallet_top_up_dialog.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 class ShopManagementScreen extends StatefulWidget {
@@ -31,16 +34,28 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   final Set<String> _deletingProductIds = {};
   final Set<String> _updatingDiscountProductIds = {};
   final List<Product> _products = [];
+  final List<Product> _pendingReviewProducts = [];
   bool _isLoading = false;
   bool _isFirstLoad = true;
   bool _hasMore = true;
   DocumentSnapshot? _lastDocument;
 
   bool get _areAllProductsSelected {
-    final productIds = _products.where((p) => p.id != null).map((p) => p.id!).toSet();
+    final productIds = _publishedProducts
+        .where((p) => p.id != null)
+        .map((p) => p.id!)
+        .toSet();
     if (productIds.isEmpty) return false;
     return productIds.every(_homeProductIds.contains);
   }
+
+  List<Product> get _publishedProducts =>
+      _products.where((product) => !product.isPendingAdminReview).toList();
+
+  List<Product> get _displayProducts => [
+        ..._pendingReviewProducts,
+        ..._products,
+      ];
 
   @override
   void initState() {
@@ -67,6 +82,48 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     }
   }
 
+  Future<void> _fetchPendingReviews() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        return;
+      }
+
+      QuerySnapshot<Map<String, dynamic>> snapshot;
+      try {
+        snapshot = await FirebaseFirestore.instance
+            .collection('product_admin_reviews')
+            .where('ownerUid', isEqualTo: user.uid)
+            .where('adminReviewStatus', isEqualTo: 'pending')
+            .orderBy('submittedAt', descending: true)
+            .get();
+      } catch (_) {
+        snapshot = await FirebaseFirestore.instance
+            .collection('product_admin_reviews')
+            .where('ownerUid', isEqualTo: user.uid)
+            .where('adminReviewStatus', isEqualTo: 'pending')
+            .get();
+      }
+
+      final docs = snapshot.docs.toList();
+      docs.sort((a, b) {
+        final aSubmitted = a.data()['submittedAt'];
+        final bSubmitted = b.data()['submittedAt'];
+        if (aSubmitted is Timestamp && bSubmitted is Timestamp) {
+          return bSubmitted.compareTo(aSubmitted);
+        }
+        return 0;
+      });
+
+      _pendingReviewProducts
+        ..clear()
+        ..addAll(docs.map(Product.fromAdminReviewSnapshot));
+    } catch (e, stack) {
+      debugPrint('ShopManagementScreen pending reviews error: $e');
+      debugPrint('Stack: $stack');
+    }
+  }
+
   Future<void> _fetchProducts() async {
     if (_isLoading || (!_hasMore && !_isFirstLoad)) return;
 
@@ -83,6 +140,10 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
           _isFirstLoad = false;
         });
         return;
+      }
+
+      if (_isFirstLoad) {
+        await _fetchPendingReviews();
       }
 
       Query query = FirebaseFirestore.instance
@@ -126,13 +187,67 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
 
   Future<void> _refresh() async {
     _products.clear();
+    _pendingReviewProducts.clear();
     _lastDocument = null;
     _isFirstLoad = true;
     _hasMore = true;
     await _fetchProducts();
   }
 
+  Future<bool> _ensureCanAddFirstProduct() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return false;
+    }
+
+    final depositService = MerchantSecurityDepositService.instance;
+    if (!await depositService.needsDepositGate(user.uid)) {
+      return true;
+    }
+
+    final agreed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        fullscreenDialog: true,
+        builder: (_) => const MerchantSecurityDepositScreen(),
+      ),
+    );
+    if (agreed != true || !mounted) {
+      return false;
+    }
+
+    final topUpOk = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        fullscreenDialog: true,
+        builder: (_) => const WalletTopUpDialog(
+          initialAmount: MerchantSecurityDepositService.requiredAmountBaht,
+          minimumAmount: MerchantSecurityDepositService.requiredAmountBaht,
+          isSecurityDeposit: true,
+        ),
+      ),
+    );
+    if (topUpOk != true || !mounted) {
+      return false;
+    }
+
+    final paid = await depositService.isDepositPaid(user.uid);
+    if (!paid && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('ยังไม่สามารถเริ่มอัปโหลดได้ — กรุณาชำระค่าประกันให้ครบ'),
+        ),
+      );
+    }
+    return paid;
+  }
+
   void _navigateToAddProduct(BuildContext context, {Product? product}) async {
+    if (product == null) {
+      final allowed = await _ensureCanAddFirstProduct();
+      if (!allowed || !context.mounted) {
+        return;
+      }
+    }
+
     final bool? result = await Navigator.push(
       context,
       MaterialPageRoute(builder: (context) => AddProductScreen(productToEdit: product)),
@@ -143,7 +258,11 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   }
 
   void _deleteProduct(Product product) async {
-    if (product.id == null || _deletingProductIds.contains(product.id!)) return;
+    if (product.isPendingAdminReview ||
+        product.id == null ||
+        _deletingProductIds.contains(product.id!)) {
+      return;
+    }
 
     final confirm = await showDialog<bool>(
       context: context,
@@ -244,7 +363,9 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   }
 
   Future<void> _editProductDiscount(Product product) async {
-    if (product.id == null || _updatingDiscountProductIds.contains(product.id!)) {
+    if (product.isPendingAdminReview ||
+        product.id == null ||
+        _updatingDiscountProductIds.contains(product.id!)) {
       return;
     }
 
@@ -334,6 +455,52 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     }
   }
 
+  Widget _buildPendingReviewBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF8F00),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x66000000),
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: const Text(
+        'รออนุมัติ',
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
+  void _showPendingReviewInfo(Product product) {
+    final reason = (product.aiLegalAnalysisReason ?? '').trim();
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(product.name),
+        content: Text(
+          reason.isNotEmpty
+              ? 'สินค้านี้อยู่ระหว่างรอแอดมินอนุมัติ\n\n$reason'
+              : 'สินค้านี้อยู่ระหว่างรอแอดมินอนุมัติ จะขึ้นขายหลังได้รับการอนุมัติ',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('ตกลง'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildDiscountPercentBadge(double discountPercent) {
     if (discountPercent <= 0) {
       return const SizedBox.shrink();
@@ -411,7 +578,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         leading: IconButton(
-          onPressed: _products.isEmpty ? null : _toggleSelectAllHomeProducts,
+          onPressed: _publishedProducts.isEmpty ? null : _toggleSelectAllHomeProducts,
           tooltip: _areAllProductsSelected ? 'ยกเลิกเลือกทั้งหมด' : 'เลือกสินค้าทั้งหมด',
           icon: Icon(
             _areAllProductsSelected ? Icons.radio_button_unchecked : Icons.task_alt,
@@ -447,7 +614,10 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
 
     /// Toggle the ready-for-sale status for every currently loaded product at once.
     void _toggleSelectAllHomeProducts() {
-      final productIds = _products.where((p) => p.id != null).map((p) => p.id!).toSet();
+      final productIds = _publishedProducts
+          .where((p) => p.id != null)
+          .map((p) => p.id!)
+          .toSet();
       if (productIds.isEmpty) return;
 
       final shouldSelectAll = !_areAllProductsSelected;
@@ -475,7 +645,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
     if (_isFirstLoad) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_products.isEmpty) {
+    if (_displayProducts.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -501,9 +671,9 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
       ),
-      itemCount: _products.length + (_hasMore ? 1 : 0),
+      itemCount: _displayProducts.length + (_hasMore ? 1 : 0),
       itemBuilder: (context, index) {
-        if (index >= _products.length) {
+        if (index >= _displayProducts.length) {
           return _hasMore
               ? const Center(child: Padding(
                   padding: EdgeInsets.all(8.0),
@@ -511,12 +681,18 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                 ))
               : const SizedBox.shrink();
         }
-        final product = _products[index];
-        final isDeleting = product.id != null && _deletingProductIds.contains(product.id!);
-        final isUpdatingDiscount = product.id != null &&
+        final product = _displayProducts[index];
+        final isPendingReview = product.isPendingAdminReview;
+        final isDeleting = !isPendingReview &&
+            product.id != null &&
+            _deletingProductIds.contains(product.id!);
+        final isUpdatingDiscount = !isPendingReview &&
+            product.id != null &&
             _updatingDiscountProductIds.contains(product.id!);
         final isBusy = isDeleting || isUpdatingDiscount;
-        final isHome = product.id != null && _homeProductIds.contains(product.id!);
+        final isHome = !isPendingReview &&
+            product.id != null &&
+            _homeProductIds.contains(product.id!);
         final previewUrl = product.thumbnailUrls.isNotEmpty
           ? product.thumbnailUrls.first
           : (product.imageUrls.isNotEmpty ? product.imageUrls.first : null);
@@ -531,14 +707,25 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                   offset: Offset(0, 2),
                 ),
               ],
-              border: Border.all(color: Colors.grey[300]!),
+              border: Border.all(
+                color: isPendingReview
+                    ? const Color(0xFFFF8F00)
+                    : Colors.grey[300]!,
+                width: isPendingReview ? 2 : 1,
+              ),
             ),
             child: Stack(
               children: [
                 GestureDetector(
                   onTap: isBusy
                       ? null
-                      : () => _navigateToAddProduct(context, product: product),
+                      : () {
+                          if (isPendingReview) {
+                            _showPendingReviewInfo(product);
+                          } else {
+                            _navigateToAddProduct(context, product: product);
+                          }
+                        },
                   child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: previewUrl != null
@@ -637,34 +824,41 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                     ),
                   ),
                 ),
-                Positioned(
-                  top: 8,
-                  left: 8,
-                  child: GestureDetector(
-                    onTap: isBusy || product.id == null ? null : () {
-                      setState(() {
-                        if (isHome) {
-                          _homeProductIds.remove(product.id!);
-                        } else {
-                          _homeProductIds.add(product.id!);
-                        }
-                        if (widget.onHomeProductIdsChanged != null) {
-                          widget.onHomeProductIdsChanged!(_homeProductIds);
-                        }
-                      });
-                    },
-                    child: Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: isHome ? AppColors.accent : Colors.grey,
-                        border: Border.all(color: Colors.white, width: 2)),
-                      child: const Icon(Icons.check, color: Colors.white, size: 18),
+                if (isPendingReview)
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: _buildPendingReviewBadge(),
+                  )
+                else
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: GestureDetector(
+                      onTap: isBusy || product.id == null ? null : () {
+                        setState(() {
+                          if (isHome) {
+                            _homeProductIds.remove(product.id!);
+                          } else {
+                            _homeProductIds.add(product.id!);
+                          }
+                          if (widget.onHomeProductIdsChanged != null) {
+                            widget.onHomeProductIdsChanged!(_homeProductIds);
+                          }
+                        });
+                      },
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isHome ? AppColors.accent : Colors.grey,
+                          border: Border.all(color: Colors.white, width: 2)),
+                        child: const Icon(Icons.check, color: Colors.white, size: 18),
+                      ),
                     ),
                   ),
-                ),
-                if (product.discountPercent > 0)
+                if (!isPendingReview && product.discountPercent > 0)
                   Positioned(
                     top: 44,
                     left: 8,
@@ -673,7 +867,9 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                 Positioned(
                   top: 8,
                   right: 8,
-                  child: isBusy
+                  child: isPendingReview
+                      ? const SizedBox.shrink()
+                      : isBusy
                       ? const SizedBox(
                           width: 148,
                           height: 44,

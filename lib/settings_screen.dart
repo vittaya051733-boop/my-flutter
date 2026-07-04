@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -520,7 +521,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
     try {
       final providers = user.providerData.map((p) => p.providerId).toSet();
-      if (providers.contains('google.com')) {
+      if (providers.contains('google.com') && !kIsWeb) {
         await GoogleSignIn.instance.signOut();
         if (!context.mounted) return;
       }

@@ -1,5 +1,8 @@
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+import 'web_dom_image.dart';
 
 /// Centralized network image widget with disk caching, placeholder, and error UI.
 class CachedAppImage extends StatelessWidget {
@@ -50,7 +53,7 @@ class CachedAppImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = imageUrl;
+    final url = imageUrl?.trim();
     final placeholderWidget = placeholder ?? _defaultPlaceholder(context);
     final error = errorWidget ?? _defaultError(context);
 
@@ -63,6 +66,19 @@ class CachedAppImage extends StatelessWidget {
 
     if (url == null || url.isEmpty) {
       return buildImage(error);
+    }
+
+    if (kIsWeb) {
+      return buildImage(
+        buildWebDomImage(
+          url: url,
+          width: width,
+          height: height,
+          fit: fit,
+          borderRadius: borderRadius,
+          errorBuilder: (_) => error,
+        ),
+      );
     }
 
     return buildImage(

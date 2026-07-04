@@ -1,266 +1,214 @@
-﻿import 'dart:io';
+import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:van1/register_screen.dart';
 import 'package:van1/register_shop_blank.dart';
 
+/// หน้าเลือกประเภทบริการ — ภาพเดียว + โซนกดทับแต่ละการ์ด
 class RegisterShopNextScreen extends StatefulWidget {
   const RegisterShopNextScreen({super.key});
+
+  static const String assetPath = 'assets/merchant_service_select_9_20.png';
+
+  // พิกัดโซนกดอ้างอิงตำแหน่งการ์ดจริงในภาพ (วัดจากไอคอน/ลูกศรของแต่ละการ์ด)
+  // โซนต่อเนื่องกันเพื่อไม่ให้มีจุดตายระหว่างการ์ด
+  static const List<_ServiceTapZone> tapZones = <_ServiceTapZone>[
+    _ServiceTapZone(
+      key: Key('service_tap_market'),
+      serviceType: 'ตลาด',
+      label: 'ตลาด',
+      topRatio: 0.368,
+      heightRatio: 0.161,
+      leftRatio: 0.04,
+      rightRatio: 0.04,
+    ),
+    _ServiceTapZone(
+      key: Key('service_tap_shop'),
+      serviceType: 'ร้านค้า',
+      label: 'ร้านค้า',
+      topRatio: 0.529,
+      heightRatio: 0.147,
+      leftRatio: 0.04,
+      rightRatio: 0.04,
+    ),
+    _ServiceTapZone(
+      key: Key('service_tap_restaurant'),
+      serviceType: 'ร้านอาหาร',
+      label: 'ร้านอาหาร',
+      topRatio: 0.676,
+      heightRatio: 0.136,
+      leftRatio: 0.04,
+      rightRatio: 0.04,
+    ),
+    _ServiceTapZone(
+      key: Key('service_tap_pharmacy'),
+      serviceType: 'ร้านขายยา',
+      label: 'ร้านขายยา',
+      topRatio: 0.812,
+      heightRatio: 0.133,
+      leftRatio: 0.04,
+      rightRatio: 0.04,
+    ),
+  ];
 
   @override
   State<RegisterShopNextScreen> createState() => _RegisterShopNextScreenState();
 }
 
+class _ServiceTapZone {
+  const _ServiceTapZone({
+    required this.key,
+    required this.serviceType,
+    required this.label,
+    required this.topRatio,
+    required this.heightRatio,
+    required this.leftRatio,
+    required this.rightRatio,
+  });
+
+  final Key key;
+  final String serviceType;
+  final String label;
+  final double topRatio;
+  final double heightRatio;
+  final double leftRatio;
+  final double rightRatio;
+}
+
 class _RegisterShopNextScreenState extends State<RegisterShopNextScreen> {
-  DateTime getOneHourAgo() {
-    return DateTime.now().subtract(const Duration(hours: 1));
+  Size _imageSize = const Size(458, 1024);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    unawaited(_resolveImageSize());
   }
 
-  DateTime getThirtyMinutesAgo() {
-    return DateTime.now().subtract(const Duration(minutes: 30));
+  Future<void> _resolveImageSize() async {
+    final stream = AssetImage(RegisterShopNextScreen.assetPath)
+        .resolve(createLocalImageConfiguration(context));
+    final completer = Completer<Size>();
+    late ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (ImageInfo info, bool _) {
+        if (!completer.isCompleted) {
+          completer.complete(
+            Size(
+              info.image.width.toDouble(),
+              info.image.height.toDouble(),
+            ),
+          );
+        }
+        stream.removeListener(listener);
+      },
+      onError: (Object error, StackTrace? stackTrace) {
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+        stream.removeListener(listener);
+      },
+    );
+    stream.addListener(listener);
+
+    try {
+      final size = await completer.future;
+      if (mounted) {
+        setState(() => _imageSize = size);
+      }
+    } catch (_) {
+      // คงค่า default ไว้
+    }
   }
 
-  DateTime getTwoHoursAgo() {
-    return DateTime.now().subtract(const Duration(hours: 2));
+  void _goBack(BuildContext context) {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => const RegisterShopBlankScreen(),
+      ),
+    );
   }
 
-  Future<File> cropImageWithAI(File image) async {
-    // TODO: integrate real AI-based cropping if required.
-    return image;
+  void _selectService(BuildContext context, String serviceType) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => RegisterScreen(serviceType: serviceType),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () {
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => const RegisterShopBlankScreen(),
-              ),
-            );
-          },
-        ),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-        // แก้ไข: ใช้ SingleChildScrollView ครอบ Column เพื่อป้องกัน overflow
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: const [
-              Text(
-                'เลือกบริการ',
-                style: TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final imageSize = _imageSize;
+          final scale = math.min(
+            constraints.maxWidth / imageSize.width,
+            constraints.maxHeight / imageSize.height,
+          );
+          final displayWidth = imageSize.width * scale;
+          final displayHeight = imageSize.height * scale;
+          final offsetX = (constraints.maxWidth - displayWidth) / 2;
+          final offsetY = (constraints.maxHeight - displayHeight) / 2;
+
+          return Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              Positioned(
+                left: offsetX,
+                top: offsetY,
+                width: displayWidth,
+                height: displayHeight,
+                child: Image.asset(
+                  RegisterShopNextScreen.assetPath,
+                  width: displayWidth,
+                  height: displayHeight,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
                 ),
               ),
-              SizedBox(height: 16),
-              _MarketServiceButton(),
-              SizedBox(height: 20),
-              _ShopServiceButton(),
-              SizedBox(height: 20),
-              _RestaurantServiceButton(),
-              SizedBox(height: 20),
-              _PharmacyServiceButton(),
+              for (final zone in RegisterShopNextScreen.tapZones)
+                Positioned(
+                  left: offsetX + displayWidth * zone.leftRatio,
+                  top: offsetY + displayHeight * zone.topRatio,
+                  width: displayWidth * (1 - zone.leftRatio - zone.rightRatio),
+                  height: displayHeight * zone.heightRatio,
+                  child: Semantics(
+                    button: true,
+                    label: zone.label,
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        key: zone.key,
+                        splashColor: Colors.transparent,
+                        highlightColor: Colors.transparent,
+                        onTap: () => _selectService(context, zone.serviceType),
+                      ),
+                    ),
+                  ),
+                ),
+              SafeArea(
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 4, top: 4),
+                    child: Material(
+                      color: Colors.white.withValues(alpha: 0.82),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        icon: const Icon(Icons.arrow_back_ios_new, size: 20),
+                        tooltip: 'ย้อนกลับ',
+                        onPressed: () => _goBack(context),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RestaurantServiceButton extends StatelessWidget {
-  const _RestaurantServiceButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 160,
-        height: 160,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.transparent,
-            foregroundColor: Colors.white,
-            shadowColor: Colors.transparent,
-            padding: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          onPressed: () {
-            Navigator.of(context).push(MaterialPageRoute(
-              builder: (context) => const RegisterScreen(
-                serviceType: 'ร้านอาหาร',
-              ),
-            ));
-          },
-          child: Ink(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: Image.asset(
-                  'assets/file_00000000bbe47207bb71ef6ccfba8497.png',
-                  width: 140,
-                  height: 140,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MarketServiceButton extends StatelessWidget {
-  const _MarketServiceButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 160,
-        height: 160,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.transparent,
-            foregroundColor: Colors.white,
-            shadowColor: Colors.transparent,
-            padding: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          onPressed: () {
-            Navigator.of(context).push(MaterialPageRoute(
-              builder: (context) => const RegisterScreen(
-                serviceType: 'ตลาด',
-              ),
-            ));
-          },
-          child: Ink(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Image.asset(
-                'assets/file_000000005608720696142f5cc8982ea6.png',
-                fit: BoxFit.cover,
-                width: 130,
-                height: 130,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ShopServiceButton extends StatelessWidget {
-  const _ShopServiceButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 160,
-        height: 160,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.transparent,
-            foregroundColor: Colors.white,
-            shadowColor: Colors.transparent,
-            padding: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          onPressed: () {
-            Navigator.of(context).push(MaterialPageRoute(
-              builder: (context) => const RegisterScreen(
-                serviceType: 'ร้านค้า',
-              ),
-            ));
-          },
-          child: Ink(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Image.asset(
-                'assets/file_0000000091107206af5b52f49d594ba6.png',
-                fit: BoxFit.cover,
-                width: 160,
-                height: 160,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _PharmacyServiceButton extends StatelessWidget {
-  const _PharmacyServiceButton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: 208, // 160 + 30% = 208
-        height: 208,
-        child: ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.transparent,
-            foregroundColor: Colors.white,
-            shadowColor: Colors.transparent,
-            padding: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-          onPressed: () {
-            Navigator.of(context).push(MaterialPageRoute(
-              builder: (context) => const RegisterScreen(
-                serviceType: 'ร้านขายยา',
-              ),
-            ));
-          },
-          child: Ink(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: Image.asset(
-                  'assets/pharmacy_equal.png',
-                  width: 220,
-                  height: 220,
-                ),
-              ),
-            ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }

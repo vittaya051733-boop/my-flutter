@@ -18,6 +18,7 @@ import '../order_management_screen_new.dart';
 import '../models/user_profile.dart';
 import '../services/shop_operations_service.dart';
 import '../call_screen.dart';
+import '../add_product_screen.dart';
 import '../firebase_options.dart';
 import '../main.dart';
 import '../widgets/chat_message_popup.dart';
@@ -380,7 +381,19 @@ class NotificationService {
       }
 
       final data = change.doc.data();
-      if (data == null || !_isIncomingShopDecisionNotification(data)) {
+      if (data == null) {
+        continue;
+      }
+      if (_isProductAiReadyNotification(data)) {
+        final payload = <String, dynamic>{
+          ...data,
+          'type': data['type'] ?? 'product_ai_ready',
+          'notificationId': notificationId,
+        };
+        unawaited(_showProductAiReadyNotification(payload));
+        continue;
+      }
+      if (!_isIncomingShopDecisionNotification(data)) {
         continue;
       }
 
@@ -695,6 +708,11 @@ class NotificationService {
       return;
     }
 
+    if (_isProductAiReadyNotification(data)) {
+      await _showProductAiReadyNotification(data);
+      return;
+    }
+
     final fallbackTitle = (data['title'] as String?)?.trim();
     final fallbackBody = (data['body'] as String?)?.trim();
     if (notification != null ||
@@ -788,6 +806,10 @@ class NotificationService {
           _openChatFromNotificationData(decoded);
           return;
         }
+        if (_isProductAiReadyNotification(decoded)) {
+          _openAddProductWithDraft(decoded['draftId'] as String?);
+          return;
+        }
         if (decoded['type'] == 'app_notification') {
           _openOrderManagement(decoded['orderId'] as String?);
           return;
@@ -813,6 +835,11 @@ class NotificationService {
     );
     if (_isIncomingShopDecisionNotification(message.data)) {
       unawaited(_showIncomingOrderDecisionPrompt(message.data));
+      return;
+    }
+
+    if (_isProductAiReadyNotification(message.data)) {
+      _openAddProductWithDraft(message.data['draftId'] as String?);
       return;
     }
 
@@ -859,6 +886,29 @@ class NotificationService {
     final action = (data['action'] as String?)?.trim();
     return (type == null || type.isEmpty || type == 'app_notification') &&
         action == 'order_accepted';
+  }
+
+  bool _isProductAiReadyNotification(Map<String, dynamic> data) {
+    return (data['action'] as String?)?.trim() == 'product_ai_ready' ||
+        (data['type'] as String?)?.trim() == 'product_ai_ready';
+  }
+
+  void _openAddProductWithDraft(String? draftId) {
+    final normalized = draftId?.trim();
+    if (normalized == null || normalized.isEmpty) {
+      return;
+    }
+    final navigator = MyApp.navigatorKey.currentState;
+    if (navigator == null) {
+      return;
+    }
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => AddProductScreen(draftId: normalized),
+        ),
+      ),
+    );
   }
 
   Future<void> markAppNotificationRead(String id) async {
@@ -953,6 +1003,43 @@ class NotificationService {
 
   Future<void> openChatFromNotificationData(Map<String, dynamic> data) {
     return _openChatFromNotificationData(data);
+  }
+
+  Future<void> _showProductAiReadyNotification(
+    Map<String, dynamic> data,
+  ) async {
+    final draftId = (data['draftId'] as String?)?.trim() ?? '';
+    if (draftId.isEmpty) {
+      return;
+    }
+
+    final title =
+        (data['title'] as String?)?.trim() ?? 'AI วิเคราะห์สินค้าเสร็จแล้ว';
+    final body = (data['body'] as String?)?.trim() ??
+        'แตะเพื่อดูผลและเติมข้อมูลสินค้า';
+
+    await _showLocalNotification(
+      title: title,
+      body: body,
+      payload: jsonEncode(<String, dynamic>{
+        'type': 'product_ai_ready',
+        'action': 'product_ai_ready',
+        'draftId': draftId,
+      }),
+    );
+
+    final context = MyApp.navigatorKey.currentState?.context;
+    if (context != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(body),
+          action: SnackBarAction(
+            label: 'เปิด',
+            onPressed: () => _openAddProductWithDraft(draftId),
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _showIncomingOrderDecisionPrompt(

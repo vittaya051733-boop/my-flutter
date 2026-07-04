@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
+
+import 'utils/io_platform.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -13,8 +15,19 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'services/merchant_security_deposit_service.dart';
+
 class WalletTopUpDialog extends StatefulWidget {
-  const WalletTopUpDialog({super.key});
+  const WalletTopUpDialog({
+    super.key,
+    this.initialAmount,
+    this.minimumAmount,
+    this.isSecurityDeposit = false,
+  });
+
+  final double? initialAmount;
+  final double? minimumAmount;
+  final bool isSecurityDeposit;
 
   @override
   State<WalletTopUpDialog> createState() => _WalletTopUpDialogState();
@@ -61,7 +74,19 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
       _promptPayNationalId = '1410400168710';
     } finally {
       if (mounted) setState(() => _loadingConfig = false);
+      _applyInitialAmountIfNeeded();
     }
+  }
+
+  void _applyInitialAmountIfNeeded() {
+    final initial = widget.initialAmount;
+    if (initial == null || initial <= 0 || !mounted) {
+      return;
+    }
+    setState(() {
+      _selectedAmount = initial;
+      _customAmountController.text = '';
+    });
   }
 
   double? get _amount => _selectedAmount;
@@ -90,10 +115,6 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
   }
 
   Future<void> _pickSlipImage() async {
-    if (kIsWeb) {
-      _showSnack('แนบสลิปบน Web ยังไม่รองรับ');
-      return;
-    }
     if (!_canGeneratePromptPayQr) {
       _showSnack('กรุณาเลือกจำนวนเงินก่อน');
       return;
@@ -113,11 +134,6 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
   }
 
   Future<void> _verifySelectedSlip() async {
-    if (kIsWeb) {
-      _showSnack('แนบสลิปบน Web ยังไม่รองรับ');
-      return;
-    }
-
     final image = _selectedSlipImage;
     if (image == null) {
       _showSnack('กรุณาเลือกรูปสลิปก่อน');
@@ -155,8 +171,9 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
       );
 
       final ref = FirebaseStorage.instance.ref().child(objectPath);
-      await ref.putFile(
-        File(image.path),
+      final bytes = await image.readAsBytes();
+      await ref.putData(
+        bytes,
         SettableMetadata(contentType: contentType),
       );
 
@@ -268,6 +285,23 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
           });
           _showSnack('สร้าง QR สำหรับยอดคงเหลือเรียบร้อย');
           return;
+        }
+
+        if (widget.isSecurityDeposit) {
+          final minimum = widget.minimumAmount ??
+              MerchantSecurityDepositService.requiredAmountBaht;
+          final paidEnough =
+              verifiedAmount != null && verifiedAmount >= minimum;
+          if (!paidEnough) {
+            _showSnack(
+              'ยอดที่ตรวจสอบได้ยังไม่ครบ ${minimum.toStringAsFixed(0)} บาท',
+            );
+            return;
+          }
+          await MerchantSecurityDepositService.instance.markPaid(
+            uid: user.uid,
+            amount: verifiedAmount,
+          );
         }
 
         Navigator.of(context).pop(true);
@@ -413,10 +447,25 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
               child: SizedBox(
                 width: double.infinity,
                 height: 160,
-                child: Image.file(
-                  File(selectedSlipImage.path),
-                  fit: BoxFit.cover,
-                ),
+                child: kIsWeb
+                    ? FutureBuilder<Uint8List>(
+                        future: selectedSlipImage.readAsBytes(),
+                        builder: (context, snapshot) {
+                          if (!snapshot.hasData) {
+                            return const Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            );
+                          }
+                          return Image.memory(
+                            snapshot.data!,
+                            fit: BoxFit.cover,
+                          );
+                        },
+                      )
+                    : buildLocalFilePreviewFromXFile(
+                        selectedSlipImage,
+                        fit: BoxFit.cover,
+                      ),
               ),
             ),
             const SizedBox(height: 8),
@@ -617,7 +666,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black87,
         elevation: 0,
-        title: const Text('เติมเครดิต'),
+        title: Text(widget.isSecurityDeposit ? 'เติมเครดิต — ค่าประกัน' : 'เติมเครดิต'),
         leading: IconButton(
           tooltip: 'ย้อนกลับ',
           icon: const Icon(Icons.arrow_back),
@@ -636,6 +685,25 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (widget.isSecurityDeposit) ...<Widget>[
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF7ED),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFFFED7AA)),
+                            ),
+                            child: Text(
+                              'ชำระค่าประกัน ${MerchantSecurityDepositService.requiredAmountBaht.toStringAsFixed(0)} บาท '
+                              'ผ่านการเติมเครดิตและตรวจสลิปให้ผ่านก่อนเริ่มอัปโหลดสินค้า',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
                         _buildTopUpAmountForm(amount),
                         const SizedBox(height: 18),
                         if (!canGenerateQr)
@@ -720,7 +788,7 @@ class _QrCenterAppLogo extends StatelessWidget {
       ),
       clipBehavior: Clip.antiAlias,
       child: Image.asset(
-        'assets/file_00000000be5472069245fc3bdb122dbb.png',
+        'assets/app_logo.png',
         fit: BoxFit.cover,
       ),
     );

@@ -71,7 +71,11 @@ class FriendService {
     if (profile == null) {
       return null;
     }
-    await _syncUserProfileDoc(snapshot.reference, snapshot.data(), profile);
+    try {
+      await _syncUserProfileDoc(snapshot.reference, snapshot.data(), profile);
+    } catch (_) {
+      // อ่านโปรไฟล์ผู้ใช้อื่นได้ แต่เขียน users/{uid} ของคนอื่นไม่ได้ — ข้ามไป
+    }
     return profile;
   }
 
