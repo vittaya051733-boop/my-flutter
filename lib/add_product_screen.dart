@@ -25,6 +25,8 @@ import 'storage_helper.dart';
 import 'services/product_cache_service.dart';
 import 'services/media_cache_service.dart';
 import 'services/product_image_upload_web.dart';
+import 'services/product_draft_service.dart';
+import 'services/product_add_draft_store.dart';
 
 class _ProductImageUploadResult {
   final String originalUrl;
@@ -139,7 +141,8 @@ class AddProductScreen extends StatefulWidget {
   AddProductScreenState createState() => AddProductScreenState();
 }
 
-class AddProductScreenState extends State<AddProductScreen> {
+class AddProductScreenState extends State<AddProductScreen>
+    with WidgetsBindingObserver {
   static const double _gpRate = 0.18;
   static const int _kAiConfidenceThreshold = 80;
   static const Duration _aiCallableTimeout = Duration(seconds: 120);
@@ -149,6 +152,9 @@ class AddProductScreenState extends State<AddProductScreen> {
   /// Merchant editing an already-listed product (not admin delegated upload).
   bool get _isEditingExistingProduct =>
       widget.productToEdit != null && !_isAdminDelegatedUpload;
+
+  bool get _draftPersistenceEnabled =>
+      widget.productToEdit == null && !_isAdminDelegatedUpload;
 
   String? get _effectiveOwnerUid =>
       widget.adminUploadContext?.ownerUid ??
@@ -211,6 +217,12 @@ class AddProductScreenState extends State<AddProductScreen> {
   bool _manualCanShipNationwide = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
   _aiQueueSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _draftWatchSubscription;
+  Timer? _draftSaveDebounce;
+  bool _draftRestoreComplete = false;
+  bool _draftSessionClosed = false;
+  String? _activeDraftId;
   String? _aiQueueStatusText;
   bool _aiQueueExternalRecommendation = false;
   double? _uploadProgress;
@@ -424,6 +436,766 @@ class AddProductScreenState extends State<AddProductScreen> {
       _existingVideoThumbnailUrl = p.videoThumbnailUrl;
       _prefetchExistingMedia();
       unawaited(_hydrateWeightFromFirestore());
+    } else if (_draftPersistenceEnabled) {
+      WidgetsBinding.instance.addObserver(this);
+      unawaited(_initializeDraftSession());
+    }
+  }
+
+  void _attachDraftFieldListeners() {
+    if (!_draftPersistenceEnabled) return;
+    final controllers = <TextEditingController>[
+      _nameController,
+      _descriptionController,
+      _productDescriptionController,
+      _priceController,
+      _stockController,
+      _preparationTimeController,
+      _colorsController,
+      _sizesController,
+      _weightController,
+      _parcelLengthController,
+      _parcelWidthController,
+      _parcelHeightController,
+      _otherUnitController,
+    ];
+    for (final controller in controllers) {
+      controller.addListener(_markDraftDirty);
+    }
+  }
+
+  void _markDraftDirty() {
+    if (!_draftPersistenceEnabled ||
+        !_draftRestoreComplete ||
+        _draftSessionClosed) {
+      return;
+    }
+    _scheduleDraftSave();
+  }
+
+  void _scheduleDraftSave() {
+    if (!_draftPersistenceEnabled ||
+        !_draftRestoreComplete ||
+        _draftSessionClosed) {
+      return;
+    }
+    _draftSaveDebounce?.cancel();
+    _draftSaveDebounce = Timer(const Duration(milliseconds: 900), () {
+      unawaited(_persistDraftNow());
+    });
+  }
+
+  Future<void> _initializeDraftSession() async {
+    final ownerUid = _effectiveOwnerUid;
+    if (ownerUid == null || ownerUid.isEmpty) {
+      _draftRestoreComplete = true;
+      return;
+    }
+
+    final localDraft = await ProductAddDraftStore.instance.load(ownerUid);
+    var draftId = widget.draftId?.trim();
+    if (draftId == null || draftId.isEmpty) {
+      draftId = (localDraft?['draftId'] as String?)?.trim();
+    }
+    draftId = (draftId == null || draftId.isEmpty)
+        ? ProductAddDraftStore.instance.createDraftId(ownerUid)
+        : draftId;
+    _activeDraftId = draftId;
+
+    Map<String, dynamic>? remoteDraft;
+    try {
+      remoteDraft = await ProductDraftService.instance.loadDraft(
+        ownerUid: ownerUid,
+        draftId: draftId,
+      );
+    } catch (error) {
+      debugPrint('Failed to load remote product draft: $error');
+    }
+
+    if (_isDraftCompleted(localDraft) || _isDraftCompleted(remoteDraft)) {
+      await ProductAddDraftStore.instance.clear(ownerUid);
+      if (draftId.isNotEmpty) {
+        try {
+          await ProductDraftService.instance.deleteDraft(
+            ownerUid: ownerUid,
+            draftId: draftId,
+          );
+        } catch (error) {
+          debugPrint('Failed to delete completed remote draft: $error');
+        }
+        await ProductAddDraftStore.instance.deleteDraftMediaDir(
+          ownerUid: ownerUid,
+          draftId: draftId,
+        );
+      }
+      draftId = ProductAddDraftStore.instance.createDraftId(ownerUid);
+      _activeDraftId = draftId;
+    } else {
+      final merged = _mergeDraftSources(
+        local: localDraft,
+        remote: remoteDraft,
+      );
+      if (merged != null && mounted) {
+        await _applyDraftState(merged);
+      }
+    }
+
+    if (!mounted) return;
+    _draftRestoreComplete = true;
+    _attachDraftFieldListeners();
+    _startDraftWatch();
+    unawaited(_persistDraftNow());
+  }
+
+  bool _isDraftCompleted(Map<String, dynamic>? draft) {
+    return (draft?['productSaveStatus'] as String?)?.trim() == 'completed';
+  }
+
+  Map<String, dynamic>? _mergeDraftSources({
+    Map<String, dynamic>? local,
+    Map<String, dynamic>? remote,
+  }) {
+    if (_isDraftCompleted(local) || _isDraftCompleted(remote)) {
+      return null;
+    }
+    if (local == null && remote == null) {
+      return null;
+    }
+    if (local == null) {
+      return Map<String, dynamic>.from(remote!);
+    }
+    if (remote == null) {
+      return Map<String, dynamic>.from(local);
+    }
+
+    final localSavedAt = local['savedAtMillis'] is num
+        ? (local['savedAtMillis'] as num).toInt()
+        : 0;
+    final remoteUpdatedAt = remote['updatedAt'];
+    var remoteMillis = 0;
+    if (remoteUpdatedAt is Timestamp) {
+      remoteMillis = remoteUpdatedAt.millisecondsSinceEpoch;
+    } else if (remote['expiresAtMillis'] is num) {
+      remoteMillis = (remote['expiresAtMillis'] as num).toInt();
+    }
+
+    final merged = Map<String, dynamic>.from(
+      remoteMillis >= localSavedAt ? remote : local,
+    );
+    merged.addAll(local);
+    merged.addAll(remote);
+    return merged;
+  }
+
+  Future<void> _applyDraftState(Map<String, dynamic> draft) async {
+    if (_isDraftCompleted(draft)) {
+      return;
+    }
+
+    void setText(TextEditingController controller, Object? value) {
+      final text = value?.toString() ?? '';
+      if (text.isNotEmpty) {
+        controller.text = text;
+      }
+    }
+
+    setText(_nameController, draft['name']);
+    setText(_descriptionController, draft['toppings']);
+    setText(_productDescriptionController, draft['productDescription']);
+    setText(_priceController, draft['price']);
+    setText(_stockController, draft['stock']);
+    setText(_preparationTimeController, draft['preparationTime']);
+    setText(_colorsController, draft['colors']);
+    setText(_sizesController, draft['sizes']);
+    setText(_weightController, draft['weight']);
+    setText(_parcelLengthController, draft['parcelLengthCm']);
+    setText(_parcelWidthController, draft['parcelWidthCm']);
+    setText(_parcelHeightController, draft['parcelHeightCm']);
+
+    final unit = (draft['unit'] as String?)?.trim();
+    if (unit != null && unit.isNotEmpty) {
+      if (_units.contains(unit)) {
+        _selectedUnit = unit;
+        _otherUnitController.clear();
+      } else {
+        _selectedUnit = 'อื่นๆ';
+        _otherUnitController.text = unit;
+      }
+    }
+
+    final weightUnit = (draft['weightUnit'] as String?)?.trim();
+    if (weightUnit == 'kg' || weightUnit == 'g') {
+      _weightUnit = weightUnit!;
+    }
+
+    final category = (draft['productCategory'] as String?)?.trim();
+    if (category != null &&
+        category.isNotEmpty &&
+        _productCategories.contains(category)) {
+      _selectedProductCategory = category;
+    }
+
+    _isFreshProduct = draft['isFreshProduct'] == true;
+    _isProcessed = draft['isProcessed'] == true;
+    _pharmacyIsTaxable = draft['pharmacyIsTaxable'] != false;
+    _manualCanShipNationwide = draft['manualCanShipNationwide'] == true;
+    _hasUsedAiDescriptionForProduct =
+        draft['hasUsedAiDescriptionForProduct'] == true;
+    _hasUsedAiProductAnalysisForProduct =
+        draft['hasUsedAiProductAnalysisForProduct'] == true;
+    _hasAiTaxAnalysis = draft['hasAiTaxAnalysis'] == true;
+    _aiTaxAnalysisReason = (draft['aiTaxAnalysisReason'] as String?)?.trim();
+    _aiIsLegalInThailand = draft['aiIsLegalInThailand'] is bool
+        ? draft['aiIsLegalInThailand'] as bool
+        : null;
+    _aiLegalAnalysisReason =
+        (draft['aiLegalAnalysisReason'] as String?)?.trim();
+    _aiProductType = (draft['aiProductType'] as String?)?.trim();
+    _aiCanShipNationwide = draft['aiCanShipNationwide'] is bool
+        ? draft['aiCanShipNationwide'] as bool
+        : null;
+    _aiNationwideShippingReason =
+        (draft['aiNationwideShippingReason'] as String?)?.trim();
+    _aiParcelDimensionReason =
+        (draft['aiParcelDimensionReason'] as String?)?.trim();
+    _aiProductNameConfidence = draft['aiProductNameConfidence'] is num
+        ? (draft['aiProductNameConfidence'] as num).toInt()
+        : null;
+    _aiTaxConfidence = draft['aiTaxConfidence'] is num
+        ? (draft['aiTaxConfidence'] as num).toInt()
+        : null;
+    _aiProductTypeConfidence = draft['aiProductTypeConfidence'] is num
+        ? (draft['aiProductTypeConfidence'] as num).toInt()
+        : null;
+    _aiNationwideShippingConfidence =
+        draft['aiNationwideShippingConfidence'] is num
+        ? (draft['aiNationwideShippingConfidence'] as num).toInt()
+        : null;
+    _aiLegalConfidence = draft['aiLegalConfidence'] is num
+        ? (draft['aiLegalConfidence'] as num).toInt()
+        : null;
+    _aiRequiresAdminReview = draft['aiRequiresAdminReview'] is bool
+        ? draft['aiRequiresAdminReview'] as bool
+        : null;
+    final reviewLabels = draft['aiReviewReasonLabels'];
+    if (reviewLabels is List) {
+      _aiReviewReasonLabels = reviewLabels
+          .map((entry) => entry?.toString().trim() ?? '')
+          .where((entry) => entry.isNotEmpty)
+          .toList(growable: false);
+    }
+
+    final existingImages = draft['existingImageUrls'];
+    if (existingImages is List) {
+      _existingImageUrls = existingImages
+          .map((entry) => entry?.toString().trim() ?? '')
+          .where((entry) => entry.isNotEmpty)
+          .toList(growable: false);
+    }
+    final existingThumbs = draft['existingThumbnailUrls'];
+    if (existingThumbs is List) {
+      _existingThumbnailUrls = existingThumbs
+          .map((entry) => entry?.toString().trim() ?? '')
+          .where((entry) => entry.isNotEmpty)
+          .toList(growable: false);
+    } else if (_existingImageUrls.isNotEmpty) {
+      _existingThumbnailUrls = List<String>.from(_existingImageUrls);
+    }
+
+    final imageUrl = (draft['imageUrl'] as String?)?.trim();
+    if (imageUrl != null &&
+        imageUrl.isNotEmpty &&
+        !_existingImageUrls.contains(imageUrl)) {
+      _existingImageUrls = <String>[imageUrl];
+      final thumbUrl = (draft['thumbnailUrl'] as String?)?.trim();
+      _existingThumbnailUrls = <String>[
+        thumbUrl != null && thumbUrl.isNotEmpty ? thumbUrl : imageUrl,
+      ];
+    }
+
+    _existingVideoUrl = (draft['existingVideoUrl'] as String?)?.trim();
+    _existingVideoThumbnailUrl =
+        (draft['existingVideoThumbnailUrl'] as String?)?.trim();
+
+    final localImagePaths = draft['localImagePaths'];
+    if (localImagePaths is List) {
+      final restoredImages = <XFile>[];
+      for (var index = 0; index < localImagePaths.length; index++) {
+        final path = localImagePaths[index]?.toString().trim() ?? '';
+        if (path.isEmpty) continue;
+        if (kIsWeb) {
+          restoredImages.add(XFile(path));
+          continue;
+        }
+        if (await File(path).exists()) {
+          restoredImages.add(XFile(path));
+        }
+      }
+      _newImageFiles
+        ..clear()
+        ..addAll(restoredImages);
+    }
+
+    final localVideoPath = (draft['localVideoPath'] as String?)?.trim();
+    if (localVideoPath != null && localVideoPath.isNotEmpty) {
+      if (kIsWeb || await File(localVideoPath).exists()) {
+        _videoFile = XFile(
+          localVideoPath,
+          name: (draft['pendingVideoName'] as String?)?.trim() ?? '',
+        );
+      }
+    }
+
+    final videoCompressStatus = (draft['videoCompressStatus'] as String?)?.trim();
+    if (videoCompressStatus == 'compressing' && _videoFile != null) {
+      _isCompressingVideo = true;
+      _uploadStatusText = 'กำลังบีบอัดวิดีโอ (720p)...';
+      unawaited(_finishVideoCompression(_videoFile!));
+    }
+
+    final productSaveStatus = (draft['productSaveStatus'] as String?)?.trim();
+    if (productSaveStatus == 'saving') {
+      unawaited(_persistDraftPatch({'productSaveStatus': null}));
+    }
+
+    final aiStatus = (draft['aiStatus'] as String?)?.trim();
+    if (aiStatus == 'queued' || aiStatus == 'processing') {
+      _isAnalyzingProductWithAi = true;
+      _aiQueueStatusText = aiStatus == 'processing'
+          ? 'ถึงคิวแล้ว กำลังประมวลผล AI...'
+          : 'กำลังรอคิว AI...';
+    }
+
+    final aiResult = draft['aiResult'];
+    if (aiResult is Map &&
+        (aiStatus == 'completed' || _hasUsedAiProductAnalysisForProduct)) {
+      _applyAiProductAnalysis(_aiResultFromDynamicMap(aiResult));
+      _hasUsedAiProductAnalysisForProduct = true;
+      _isAnalyzingProductWithAi = false;
+    }
+
+    if (mounted) {
+      setState(() {});
+    }
+    if (_existingImageUrls.isNotEmpty || _existingVideoUrl != null) {
+      _prefetchExistingMedia();
+    }
+  }
+
+  Map<String, dynamic> _buildDraftPayload() {
+    final resolvedUnit = _selectedUnit == 'อื่นๆ'
+        ? _otherUnitController.text.trim()
+        : (_selectedUnit ?? '').trim();
+    return <String, dynamic>{
+      'draftId': _activeDraftId,
+      'name': _nameController.text.trim(),
+      'toppings': _descriptionController.text.trim(),
+      'productDescription': _productDescriptionController.text.trim(),
+      'price': _priceController.text.trim(),
+      'stock': _stockController.text.trim(),
+      'preparationTime': _preparationTimeController.text.trim(),
+      'colors': _colorsController.text.trim(),
+      'sizes': _sizesController.text.trim(),
+      'weight': _weightController.text.trim(),
+      'weightUnit': _weightUnit,
+      'parcelLengthCm': _parcelLengthController.text.trim(),
+      'parcelWidthCm': _parcelWidthController.text.trim(),
+      'parcelHeightCm': _parcelHeightController.text.trim(),
+      'unit': resolvedUnit,
+      'productCategory': _selectedProductCategory,
+      'isFreshProduct': _isFreshProduct,
+      'isProcessed': _isProcessed,
+      'pharmacyIsTaxable': _pharmacyIsTaxable,
+      'manualCanShipNationwide': _manualCanShipNationwide,
+      'hasUsedAiDescriptionForProduct': _hasUsedAiDescriptionForProduct,
+      'hasUsedAiProductAnalysisForProduct': _hasUsedAiProductAnalysisForProduct,
+      'hasAiTaxAnalysis': _hasAiTaxAnalysis,
+      'aiTaxAnalysisReason': _aiTaxAnalysisReason,
+      'aiIsLegalInThailand': _aiIsLegalInThailand,
+      'aiLegalAnalysisReason': _aiLegalAnalysisReason,
+      'aiProductType': _aiProductType,
+      'aiCanShipNationwide': _aiCanShipNationwide,
+      'aiNationwideShippingReason': _aiNationwideShippingReason,
+      'aiParcelDimensionReason': _aiParcelDimensionReason,
+      'aiProductNameConfidence': _aiProductNameConfidence,
+      'aiTaxConfidence': _aiTaxConfidence,
+      'aiProductTypeConfidence': _aiProductTypeConfidence,
+      'aiNationwideShippingConfidence': _aiNationwideShippingConfidence,
+      'aiLegalConfidence': _aiLegalConfidence,
+      'aiRequiresAdminReview': _aiRequiresAdminReview,
+      if (_aiReviewReasonLabels.isNotEmpty)
+        'aiReviewReasonLabels': _aiReviewReasonLabels,
+      'existingImageUrls': _existingImageUrls,
+      'existingThumbnailUrls': _existingThumbnailUrls,
+      'existingVideoUrl': _existingVideoUrl,
+      'existingVideoThumbnailUrl': _existingVideoThumbnailUrl,
+      'localImagePaths': _newImageFiles.map((file) => file.path).toList(),
+      'localVideoPath': _videoFile?.path,
+      'isAnalyzingProductWithAi': _isAnalyzingProductWithAi,
+      if (_isCompressingVideo) 'videoCompressStatus': 'compressing',
+      if (_isSaving) 'productSaveStatus': 'saving',
+    };
+  }
+
+  Future<void> _persistDraftPatch(Map<String, dynamic> patch) async {
+    if (!_draftPersistenceEnabled || _draftSessionClosed) {
+      return;
+    }
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid == null || ownerUid.isEmpty || draftId == null) {
+      return;
+    }
+
+    final existing =
+        await ProductAddDraftStore.instance.load(ownerUid) ??
+        <String, dynamic>{};
+    final merged = <String, dynamic>{
+      ...existing,
+      ..._buildDraftPayload(),
+      ...patch,
+      'draftId': draftId,
+    };
+
+    try {
+      await ProductAddDraftStore.instance.save(ownerUid, merged);
+      await ProductDraftService.instance.upsertDraft(
+        ownerUid: ownerUid,
+        draftId: draftId,
+        patch: merged,
+      );
+    } catch (error) {
+      debugPrint('Failed to persist product draft patch: $error');
+    }
+  }
+
+  Future<void> _persistDraftNow() async {
+    if (!_draftPersistenceEnabled ||
+        !_draftRestoreComplete ||
+        _draftSessionClosed) {
+      return;
+    }
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid == null || ownerUid.isEmpty || draftId == null) {
+      return;
+    }
+
+    final payload = _buildDraftPayload();
+    final persistedImagePaths = <String>[];
+    for (var index = 0; index < _newImageFiles.length; index++) {
+      final file = _newImageFiles[index];
+      final persisted = await ProductAddDraftStore.instance.persistMediaFile(
+        sourcePath: file.path,
+        ownerUid: ownerUid,
+        draftId: draftId,
+        fileName:
+            'image_$index.${_extensionFromPath(file.path, fallback: 'jpg')}',
+      );
+      if (persisted != null && persisted.isNotEmpty) {
+        persistedImagePaths.add(persisted);
+      }
+    }
+    if (persistedImagePaths.isNotEmpty) {
+      payload['localImagePaths'] = persistedImagePaths;
+    }
+
+    final videoPath = _videoFile?.path;
+    if (videoPath != null && videoPath.isNotEmpty) {
+      final persistedVideo = await ProductAddDraftStore.instance.persistMediaFile(
+        sourcePath: videoPath,
+        ownerUid: ownerUid,
+        draftId: draftId,
+        fileName: 'video.${_extensionFromPath(videoPath, fallback: 'mp4')}',
+      );
+      if (persistedVideo != null && persistedVideo.isNotEmpty) {
+        payload['localVideoPath'] = persistedVideo;
+      }
+    }
+
+    try {
+      await ProductAddDraftStore.instance.save(ownerUid, payload);
+      await ProductDraftService.instance.upsertDraft(
+        ownerUid: ownerUid,
+        draftId: draftId,
+        patch: payload,
+      );
+    } catch (error) {
+      debugPrint('Failed to persist product draft: $error');
+    }
+  }
+
+  Future<void> _clearDraftSession() async {
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid == null || ownerUid.isEmpty) return;
+
+    await ProductAddDraftStore.instance.clear(ownerUid);
+    if (draftId != null && draftId.isNotEmpty) {
+      try {
+        await ProductDraftService.instance.deleteDraft(
+          ownerUid: ownerUid,
+          draftId: draftId,
+        );
+      } catch (error) {
+        debugPrint('Failed to delete remote product draft: $error');
+      }
+      await ProductAddDraftStore.instance.deleteDraftMediaDir(
+        ownerUid: ownerUid,
+        draftId: draftId,
+      );
+    }
+    _activeDraftId = null;
+  }
+
+  Future<void> _closeDraftSessionPermanently({String? savedProductId}) async {
+    if (!_draftPersistenceEnabled || _draftSessionClosed) {
+      return;
+    }
+
+    _draftSaveDebounce?.cancel();
+    _draftSaveDebounce = null;
+    _draftWatchSubscription?.cancel();
+    _draftWatchSubscription = null;
+    _draftSessionClosed = true;
+    _draftRestoreComplete = false;
+
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid != null &&
+        ownerUid.isNotEmpty &&
+        draftId != null &&
+        draftId.isNotEmpty) {
+      final completionMarker = <String, dynamic>{
+        'productSaveStatus': 'completed',
+        if (savedProductId != null && savedProductId.isNotEmpty)
+          'savedProductId': savedProductId,
+      };
+      try {
+        await ProductAddDraftStore.instance.save(ownerUid, {
+          ...completionMarker,
+          'draftId': draftId,
+        });
+        await ProductDraftService.instance.upsertDraft(
+          ownerUid: ownerUid,
+          draftId: draftId,
+          patch: completionMarker,
+        );
+      } catch (error) {
+        debugPrint('Failed to mark draft completed before close: $error');
+      }
+    }
+
+    await _clearDraftSession();
+  }
+
+  void _startDraftWatch() {
+    if (!_draftPersistenceEnabled) return;
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid == null || draftId == null) return;
+
+    _draftWatchSubscription?.cancel();
+    _draftWatchSubscription = ProductDraftService.instance
+        .watchDraft(ownerUid: ownerUid, draftId: draftId)
+        .listen(
+          (snapshot) {
+            if (!mounted || !snapshot.exists) return;
+            unawaited(_handleDraftSnapshot(snapshot.data() ?? <String, dynamic>{}));
+          },
+          onError: (Object error) {
+            debugPrint('Draft watch failed: $error');
+          },
+        );
+  }
+
+  Future<void> _handleDraftSnapshot(Map<String, dynamic> data) async {
+    if (_draftSessionClosed || _isDraftCompleted(data)) {
+      return;
+    }
+
+    final aiStatus = (data['aiStatus'] as String?)?.trim();
+    final aiResult = data['aiResult'];
+
+    if (aiStatus == 'queued' || aiStatus == 'processing') {
+      if (!_isAnalyzingProductWithAi && mounted) {
+        setState(() {
+          _isAnalyzingProductWithAi = true;
+          _aiQueueStatusText = aiStatus == 'processing'
+              ? 'ถึงคิวแล้ว กำลังประมวลผล AI...'
+              : 'กำลังรอคิว AI...';
+        });
+      }
+      return;
+    }
+
+    if (aiStatus == 'failed') {
+      if (mounted) {
+        setState(() {
+          _isAnalyzingProductWithAi = false;
+          _hasUsedAiProductAnalysisForProduct = false;
+          _aiQueueStatusText = (data['aiError'] as String?)?.trim().isNotEmpty ==
+                  true
+              ? (data['aiError'] as String).trim()
+              : 'AI ประมวลผลไม่สำเร็จ';
+        });
+      }
+      await _persistDraftNow();
+      return;
+    }
+
+    if (aiStatus == 'completed' && aiResult is Map) {
+      if (!_hasUsedAiProductAnalysisForProduct) {
+        _applyAiProductAnalysis(_aiResultFromDynamicMap(aiResult));
+      }
+      if (mounted) {
+        setState(() {
+          _hasUsedAiProductAnalysisForProduct = true;
+          _isAnalyzingProductWithAi = false;
+          _aiQueueStatusText = 'ประมวลผล AI สำเร็จ';
+        });
+      }
+      await _persistDraftNow();
+    }
+  }
+
+  _AiProductAnalysisResult _aiResultFromDynamicMap(Map<dynamic, dynamic> data) {
+    return _AiProductAnalysisResult(
+      productName: (data['productName'] ?? '').toString().trim(),
+      description: (data['description'] ?? '').toString().trim(),
+      taxStatus: (data['taxStatus'] ?? '').toString().trim(),
+      taxReason: (data['taxReason'] ?? '').toString().trim(),
+      productCategory: (data['productCategory'] ?? '').toString().trim(),
+      productType: (data['productType'] ?? '').toString().trim(),
+      isLegalInThailand: data['isLegalInThailand'] is bool
+          ? data['isLegalInThailand'] as bool
+          : null,
+      legalReason: (data['legalReason'] ?? '').toString().trim(),
+      isFreshProduct: data['isFreshProduct'] is bool
+          ? data['isFreshProduct'] as bool
+          : null,
+      isProcessed: data['isProcessed'] is bool
+          ? data['isProcessed'] as bool
+          : null,
+      canShipNationwide: data['canShipNationwide'] is bool
+          ? data['canShipNationwide'] as bool
+          : null,
+      nationwideShippingReason: (data['nationwideShippingReason'] ?? '')
+          .toString()
+          .trim(),
+      productNameConfidence: _parseAiConfidence(data['productNameConfidence']),
+      taxConfidence: _parseAiConfidence(data['taxConfidence']),
+      productTypeConfidence: _parseAiConfidence(data['productTypeConfidence']),
+      nationwideShippingConfidence: _parseAiConfidence(
+        data['nationwideShippingConfidence'],
+      ),
+      legalConfidence: _parseAiConfidence(data['legalConfidence']),
+      parcelLengthCm: _parseParcelDimensionCm(data['parcelLengthCm']),
+      parcelWidthCm: _parseParcelDimensionCm(data['parcelWidthCm']),
+      parcelHeightCm: _parseParcelDimensionCm(data['parcelHeightCm']),
+      parcelDimensionReason: (data['parcelDimensionReason'] ?? '')
+          .toString()
+          .trim(),
+      parcelDimensionConfidence: _parseAiConfidence(
+        data['parcelDimensionConfidence'],
+      ),
+      saleUnit: (data['saleUnit'] ?? '').toString().trim(),
+      requiresAdminReview: data['requiresAdminReview'] is bool
+          ? data['requiresAdminReview'] as bool
+          : null,
+      reviewReasonLabels: _parseAiStringList(
+        data['reviewReasonLabels'] ?? data['reviewReasons'],
+      ),
+    );
+  }
+
+  Future<({String imageUrl, String? thumbnailUrl})?> _resolveDraftImageUrls() async {
+    if (_existingImageUrls.isNotEmpty) {
+      return (
+        imageUrl: _existingImageUrls.first,
+        thumbnailUrl: _existingThumbnailUrls.isNotEmpty
+            ? _existingThumbnailUrls.first
+            : _existingImageUrls.first,
+      );
+    }
+    if (_newImageFiles.isEmpty) {
+      return null;
+    }
+
+    final uploaded = await _uploadImageToFirebase(_newImageFiles.first);
+    if (uploaded == null) {
+      return null;
+    }
+
+    if (mounted) {
+      setState(() {
+        _existingImageUrls.add(uploaded.originalUrl);
+        _existingThumbnailUrls.add(uploaded.thumbnailUrl);
+        _newImageFiles.removeAt(0);
+      });
+    } else {
+      _existingImageUrls.add(uploaded.originalUrl);
+      _existingThumbnailUrls.add(uploaded.thumbnailUrl);
+      _newImageFiles.removeAt(0);
+    }
+    await _persistDraftNow();
+    return (
+      imageUrl: uploaded.originalUrl,
+      thumbnailUrl: uploaded.thumbnailUrl,
+    );
+  }
+
+  Future<void> _enqueueProductAiAnalysis({required bool automatic}) async {
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    if (ownerUid == null || draftId == null) {
+      throw Exception('ไม่พบ draft session สำหรับ AI');
+    }
+
+    final imageUrls = await _resolveDraftImageUrls();
+    if (imageUrls == null) {
+      throw Exception('กรุณาเพิ่มรูปสินค้าก่อนให้ AI วิเคราะห์');
+    }
+
+    final requestId = _createAiRequestId();
+    final callable = _aiCallable('enqueueProductAiAnalysis');
+    await callable.call(<String, dynamic>{
+      'requestId': requestId,
+      'draftId': draftId,
+      'imageUrl': imageUrls.imageUrl,
+      'thumbnailUrl': imageUrls.thumbnailUrl,
+      'productName': _nameController.text.trim(),
+      'description': _productDescriptionController.text.trim(),
+      'category': (_selectedProductCategory ?? '').trim(),
+      'price': _priceController.text.trim(),
+      'unit': _selectedUnit == 'อื่นๆ'
+          ? _otherUnitController.text.trim()
+          : (_selectedUnit ?? '').trim(),
+      'weight': _weightController.text.trim(),
+      'weightUnit': _weightUnit,
+    });
+
+    if (mounted) {
+      setState(() {
+        _isAnalyzingProductWithAi = true;
+        _aiQueueStatusText = 'กำลังเข้าคิว AI...';
+      });
+    }
+    await _persistDraftNow();
+
+    if (!automatic && mounted) {
+      _showSnack('ส่งคำขอ AI แล้ว — ออกจากหน้านี้ได้ ระบบจะแจ้งเมื่อเสร็จ');
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_draftSessionClosed) {
+      return;
+    }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      unawaited(_persistDraftNow());
     }
   }
 
@@ -477,6 +1249,14 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   @override
   void dispose() {
+    if (_draftPersistenceEnabled) {
+      if (!_draftSessionClosed) {
+        unawaited(_persistDraftNow());
+      }
+      WidgetsBinding.instance.removeObserver(this);
+    }
+    _draftSaveDebounce?.cancel();
+    _draftWatchSubscription?.cancel();
     // Dispose controllers
     _nameController.dispose();
     _descriptionController.dispose();
@@ -1068,6 +1848,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       final compressedToAdd = await _compressPickedImages(imagesToAdd);
       if (compressedToAdd.isEmpty) return;
       setState(() => _newImageFiles.addAll(compressedToAdd));
+      unawaited(_persistDraftNow());
       unawaited(_analyzeProductWithAi(automatic: true));
 
       if (picks.length > remainingSlots) {
@@ -1114,6 +1895,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       final compressed = await _compressPickedImages(<XFile>[photo]);
       if (compressed.isEmpty) return;
       setState(() => _newImageFiles.add(compressed.first));
+      unawaited(_persistDraftNow());
       unawaited(_analyzeProductWithAi(automatic: true));
     } on PlatformException catch (error) {
       _showSnack(
@@ -1208,6 +1990,103 @@ class AddProductScreenState extends State<AddProductScreen> {
     return source;
   }
 
+  Future<void> _finishVideoCompression(XFile video) async {
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    final videoName = video.name;
+    var workingPath = video.path;
+
+    try {
+      final compressed = await _compressProductVideoIfNeeded(File(workingPath));
+      var finalPath = compressed.path;
+
+      if (_draftPersistenceEnabled && ownerUid != null && draftId != null) {
+        final persisted = await ProductAddDraftStore.instance.persistMediaFile(
+          sourcePath: finalPath,
+          ownerUid: ownerUid,
+          draftId: draftId,
+          fileName: 'video.${_extensionFromPath(finalPath, fallback: 'mp4')}',
+        );
+        if (persisted != null && persisted.isNotEmpty) {
+          finalPath = persisted;
+        }
+        await _persistDraftPatch(<String, dynamic>{
+          'videoCompressStatus': 'ready',
+          'localVideoPath': finalPath,
+          'pendingVideoName': videoName,
+        });
+      }
+
+      if (mounted) {
+        setState(() {
+          _videoFile = XFile(finalPath, name: videoName);
+          _existingVideoUrl = null;
+          _existingVideoThumbnailUrl = null;
+        });
+      }
+    } catch (error, stack) {
+      debugPrint('Product video compression pipeline failed: $error');
+      debugPrint('$stack');
+      if (_draftPersistenceEnabled && ownerUid != null && draftId != null) {
+        await _persistDraftPatch(<String, dynamic>{
+          'videoCompressStatus': 'ready',
+          'localVideoPath': workingPath,
+          'pendingVideoName': videoName,
+        });
+      }
+      if (mounted) {
+        setState(() {
+          _videoFile = XFile(workingPath, name: videoName);
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCompressingVideo = false;
+          if (_uploadStatusText == 'กำลังบีบอัดวิดีโอ (720p)...') {
+            _uploadStatusText = null;
+          }
+        });
+      }
+    }
+  }
+
+  Future<void> _processPickedVideo(XFile video) async {
+    final ownerUid = _effectiveOwnerUid;
+    final draftId = _activeDraftId;
+    final videoName = video.name;
+    var workingPath = video.path;
+
+    if (_draftPersistenceEnabled && ownerUid != null && draftId != null) {
+      final persistedRaw = await ProductAddDraftStore.instance.persistMediaFile(
+        sourcePath: video.path,
+        ownerUid: ownerUid,
+        draftId: draftId,
+        fileName: 'video_raw.${_extensionFromPath(video.path, fallback: 'mp4')}',
+      );
+      if (persistedRaw != null && persistedRaw.isNotEmpty) {
+        workingPath = persistedRaw;
+      }
+      await _persistDraftPatch(<String, dynamic>{
+        'videoCompressStatus': 'compressing',
+        'localVideoPath': workingPath,
+        'pendingVideoName': videoName,
+      });
+    }
+
+    if (mounted) {
+      setState(() {
+        _videoFile = XFile(workingPath, name: videoName);
+        _existingVideoUrl = null;
+        _existingVideoThumbnailUrl = null;
+        _isCompressingVideo = true;
+        _uploadStatusText = 'กำลังบีบอัดวิดีโอ (720p)...';
+      });
+    }
+
+    await _finishVideoCompression(XFile(workingPath, name: videoName));
+  }
+
   Future<void> _pickVideo() async {
     if (_isResolvingServiceType) {
       return;
@@ -1228,6 +2107,7 @@ class AddProductScreenState extends State<AddProductScreen> {
           _existingVideoUrl = null;
           _existingVideoThumbnailUrl = null;
         });
+        unawaited(_persistDraftNow());
       } catch (error) {
         _showSnack('เลือกวิดีโอไม่สำเร็จ: $error');
       }
@@ -1277,27 +2157,7 @@ class AddProductScreenState extends State<AddProductScreen> {
     }
     if (video == null) return;
 
-    setState(() {
-      _isCompressingVideo = true;
-      _uploadStatusText = 'กำลังบีบอัดวิดีโอ (720p)...';
-    });
-
-    try {
-      final compressed = await _compressProductVideoIfNeeded(File(video.path));
-      if (!mounted) return;
-      setState(() {
-        _videoFile = XFile(compressed.path, name: video!.name);
-        _existingVideoUrl = null;
-        _existingVideoThumbnailUrl = null;
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isCompressingVideo = false;
-          _uploadStatusText = null;
-        });
-      }
-    }
+    unawaited(_processPickedVideo(video));
   }
 
   void _removeExistingImageAt(int index) {
@@ -1311,12 +2171,14 @@ class AddProductScreenState extends State<AddProductScreen> {
         _existingThumbnailUrls.removeAt(index);
       }
     });
+    _scheduleDraftSave();
   }
 
   void _removeNewImageAt(int index) {
     setState(() {
       _newImageFiles.removeAt(index);
     });
+    _scheduleDraftSave();
   }
 
   void _removeVideo() {
@@ -1331,6 +2193,7 @@ class AddProductScreenState extends State<AddProductScreen> {
       _existingVideoUrl = null;
       _existingVideoThumbnailUrl = null;
     });
+    _scheduleDraftSave();
   }
 
   void _prefetchExistingMedia() {
@@ -1974,6 +2837,7 @@ class AddProductScreenState extends State<AddProductScreen> {
         result.reviewReasonLabels ?? const <String>[],
       );
     });
+    _scheduleDraftSave();
   }
 
   Future<void> _analyzeProductWithAi({bool automatic = false}) async {
@@ -1985,9 +2849,54 @@ class AddProductScreenState extends State<AddProductScreen> {
       return;
     }
 
+    if (_isAnalyzingProductWithAi && _draftPersistenceEnabled) {
+      if (automatic) return;
+      _showSnack(
+        'กำลังให้ AI วิเคราะห์อยู่ — ออกจากหน้านี้ได้ ระบบจะเก็บข้อมูลไว้',
+      );
+      return;
+    }
+
     final productName = _nameController.text.trim();
     if (!automatic && productName.isEmpty) {
       _showSnack('กรุณากรอกชื่อสินค้าก่อนให้ AI วิเคราะห์');
+      return;
+    }
+
+    if (_draftPersistenceEnabled) {
+      if (_currentImageCount == 0) {
+        _showSnack('กรุณาเพิ่มรูปสินค้าก่อนให้ AI วิเคราะห์');
+        return;
+      }
+
+      setState(() {
+        _isAnalyzingProductWithAi = true;
+      });
+
+      try {
+        await _enqueueProductAiAnalysis(automatic: automatic);
+      } on FirebaseFunctionsException catch (e) {
+        if (mounted) {
+          setState(() => _isAnalyzingProductWithAi = false);
+        }
+        final message = _aiFunctionErrorMessage(e);
+        debugPrint('enqueueProductAiAnalysis failed: ${e.code} $message');
+        _showSnack(
+          automatic
+              ? 'AI วิเคราะห์อัตโนมัติไม่สำเร็จ — กดปุ่ม "วิเคราะห์สินค้า" เพื่อลองอีกครั้ง'
+              : message,
+        );
+      } catch (e) {
+        if (mounted) {
+          setState(() => _isAnalyzingProductWithAi = false);
+        }
+        debugPrint('enqueueProductAiAnalysis failed: $e');
+        _showSnack(
+          automatic
+              ? 'AI วิเคราะห์อัตโนมัติไม่สำเร็จ — กดปุ่ม "วิเคราะห์สินค้า" เพื่อลองอีกครั้ง'
+              : 'AI วิเคราะห์สินค้าไม่สำเร็จ: $e',
+        );
+      }
       return;
     }
 
@@ -2513,6 +3422,11 @@ class AddProductScreenState extends State<AddProductScreen> {
       _isSaving = true;
     });
 
+    if (_draftPersistenceEnabled) {
+      await _persistDraftNow();
+      await _persistDraftPatch(<String, dynamic>{'productSaveStatus': 'saving'});
+    }
+
     try {
       await _backfillProductActiveFieldsForOwner(ownerUid);
 
@@ -2835,7 +3749,12 @@ class AddProductScreenState extends State<AddProductScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(snackMessage)),
           );
-          Navigator.pop(context, true);
+          await _closeDraftSessionPermanently();
+          if (mounted) {
+            Navigator.pop(context, true);
+          }
+        } else {
+          await _closeDraftSessionPermanently();
         }
         return;
       }
@@ -2876,9 +3795,17 @@ class AddProductScreenState extends State<AddProductScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('บันทึกสินค้าเรียบร้อยแล้ว')),
         );
-        Navigator.pop(context, true);
+        await _closeDraftSessionPermanently(savedProductId: docRef.id);
+        if (mounted) {
+          Navigator.pop(context, true);
+        }
+      } else {
+        await _closeDraftSessionPermanently(savedProductId: docRef.id);
       }
     } on FirebaseException catch (e) {
+      if (_draftPersistenceEnabled) {
+        await _persistDraftPatch(<String, dynamic>{'productSaveStatus': null});
+      }
       final message = switch (e.code) {
         'permission-denied' =>
           'ไม่มีสิทธิ์อ่านข้อมูลร้านหรือบันทึกสินค้า กรุณาตรวจสอบสิทธิ์ Firestore แล้วลองใหม่',
@@ -2892,6 +3819,9 @@ class AddProductScreenState extends State<AddProductScreen> {
         ).showSnackBar(SnackBar(content: Text(message)));
       }
     } catch (e) {
+      if (_draftPersistenceEnabled) {
+        await _persistDraftPatch(<String, dynamic>{'productSaveStatus': null});
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('เกิดข้อผิดพลาดในการบันทึก: $e')),
@@ -3002,7 +3932,13 @@ class AddProductScreenState extends State<AddProductScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (didPop && !_draftSessionClosed) {
+          unawaited(_persistDraftNow());
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text(
           widget.productToEdit == null ? 'เพิ่มสินค้าใหม่' : 'แก้ไขสินค้า',
@@ -3045,19 +3981,39 @@ class AddProductScreenState extends State<AddProductScreen> {
             ),
             const SizedBox(height: 12),
             _buildMediaSection(),
-            if (_uploadProgress != null || _uploadStatusText != null)
+            if (_uploadProgress != null ||
+                _uploadStatusText != null ||
+                _isCompressingVideo ||
+                (_isSaving &&
+                    (_videoFile != null ||
+                        (_existingVideoUrl?.isNotEmpty ?? false))))
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    LinearProgressIndicator(value: _uploadProgress),
-                    const SizedBox(height: 8),
+                    if (_uploadProgress != null)
+                      LinearProgressIndicator(value: _uploadProgress),
+                    if (_uploadProgress != null) const SizedBox(height: 8),
                     Text(
                       _uploadProgress != null
                           ? '${_uploadStatusText ?? 'กำลังอัปโหลด'}: ${(100 * _uploadProgress!).toStringAsFixed(0)}%'
                           : (_uploadStatusText ?? 'กำลังอัปโหลด'),
                     ),
+                    if (_isCompressingVideo ||
+                        (_isSaving &&
+                            (_videoFile != null ||
+                                (_existingVideoUrl?.isNotEmpty ?? false))))
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text(
+                          'ออกจากหน้านี้หรือปิดแอปได้ — ระบบเก็บข้อมูลไว้ให้',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF1565C0),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -3236,6 +4192,7 @@ class AddProductScreenState extends State<AddProductScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 

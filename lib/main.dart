@@ -300,25 +300,52 @@ class AuthWrapper extends StatefulWidget {
 }
 
 class _AuthWrapperState extends State<AuthWrapper> {
+  static const Duration _navigationTimeout = Duration(seconds: 20);
+  bool _showRetry = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _navigate());
   }
 
+  Future<void> _saveFcmTokenInBackground(String uid) async {
+    try {
+      await NotificationService()
+          .saveUserFcmToken(uid)
+          .timeout(const Duration(seconds: 8));
+    } catch (e) {
+      debugPrint('FCM token save skipped during startup: $e');
+    }
+  }
+
   Future<void> _navigate() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null && mounted) {
-      if (!kIsWeb) {
-        await NotificationService().saveUserFcmToken(user.uid);
-        if (!mounted) return;
-      }
-      // ใช้ NavigationHelper เพื่อตรวจสอบและนำทาง
+    if (user == null || !mounted) return;
+
+    if (mounted) {
+      setState(() => _showRetry = false);
+    }
+
+    if (!kIsWeb) {
+      // อย่าบล็อกการนำทาง — getToken()/Firestore อาจค้างบางเครื่อง
+      unawaited(_saveFcmTokenInBackground(user.uid));
+    }
+
+    try {
       await NavigationHelper.navigateBasedOnUserStatus(
         context,
         user,
         replace: true,
-      );
+      ).timeout(_navigationTimeout);
+    } on TimeoutException {
+      debugPrint('Auth navigation timed out after $_navigationTimeout');
+      if (!mounted) return;
+      Navigator.of(context).pushReplacementNamed('/home');
+    } catch (e, stackTrace) {
+      debugPrint('Auth navigation failed: $e\n$stackTrace');
+      if (!mounted) return;
+      setState(() => _showRetry = true);
     }
   }
 
@@ -341,9 +368,25 @@ class _AuthWrapperState extends State<AuthWrapper> {
               height: logoSize,
             ),
             const SizedBox(height: 24),
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            const Text('กำลังตรวจสอบข้อมูล...'),
+            if (!_showRetry) ...[
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              const Text('กำลังตรวจสอบข้อมูล...'),
+            ] else ...[
+              const Text('ไม่สามารถตรวจสอบข้อมูลได้'),
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: _navigate,
+                child: const Text('ลองใหม่'),
+              ),
+              TextButton(
+                onPressed: () {
+                  if (!context.mounted) return;
+                  Navigator.of(context).pushReplacementNamed('/home');
+                },
+                child: const Text('เข้าแอปต่อ'),
+              ),
+            ],
           ],
         ),
       ),

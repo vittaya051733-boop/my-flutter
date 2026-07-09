@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'models/order_model.dart';
 import 'admin_support_thread_screen.dart';
 import 'services/notification_service.dart';
+import 'wallet_screen.dart';
 
 enum _NotificationCategory {
   order,
@@ -125,6 +126,8 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           'order_rejected',
           'shop_rejected_order',
           'shop_accepted_order',
+          'payout_pending',
+          'payout_paid',
           'low_stock_alert',
         }.contains(action)) {
       return _NotificationCategory.order;
@@ -301,6 +304,15 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     }
 
     final action = (data['action'] as String?)?.trim() ?? '';
+    if (action == 'payout_pending' || action == 'payout_paid') {
+      if (!mounted) {
+        return;
+      }
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const WalletScreen()),
+      );
+      return;
+    }
     if (action == 'admin_support_reply') {
       final ticketId = (data['ticketId'] as String?)?.trim();
       if (!mounted) {

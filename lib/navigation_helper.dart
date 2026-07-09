@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Helper class สำหรับตรวจสอบสถานะการลงทะเบียนและนำทางไปหน้าที่เหมาะสม
 class NavigationHelper {
+  static const Duration _firestoreTimeout = Duration(seconds: 12);
   /// ตรวจสอบสถานะและนำทางไปหน้าที่เหมาะสม
   static Future<void> navigateBasedOnUserStatus(
     BuildContext context,
@@ -11,7 +14,9 @@ class NavigationHelper {
     bool replace = true,
   }) async {
   try {
-      final shopLookup = await _fetchShopRegistration(user.uid);
+      final shopLookup = await _fetchShopRegistration(user.uid).timeout(
+        _firestoreTimeout,
+      );
       final bool hasCompletedShopProfile = _hasCompletedShopProfile(shopLookup.data);
 
       // หากลงทะเบียนร้านครบถ้วนแล้ว ให้ไปหน้าโฮมทันที ไม่ต้องยืนยันอีเมล/เบอร์ซ้ำ
@@ -38,7 +43,8 @@ class NavigationHelper {
       final contractDoc = await FirebaseFirestore.instance
           .collection('contracts')
           .doc(user.uid)
-          .get();
+          .get()
+          .timeout(_firestoreTimeout);
 
       if ((!contractDoc.exists || contractDoc.data()?['status'] != 'accepted') && context.mounted) {
         // ยังไม่เซ็นสัญญา -> ไปหน้าเซ็นสัญญา
@@ -71,21 +77,9 @@ class NavigationHelper {
       }
     } catch (e, stackTrace) {
       debugPrint('Error in navigateBasedOnUserStatus: $e\n$stackTrace');
-      // หากเกิดข้อผิดพลาด ให้แสดง SnackBar และอาจมีปุ่มให้ลองใหม่
-      // แทนที่จะนำทางไปหน้าอื่นทันที ซึ่งอาจทำให้ผู้ใช้สับสน
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('เกิดข้อผิดพลาดในการตรวจสอบสถานะ: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 10),
-            action: SnackBarAction(
-              label: 'ลองใหม่',
-              onPressed: () => navigateBasedOnUserStatus(context, user, replace: replace),
-            ),
-          ),
-        );
-      }
+      if (!context.mounted) return;
+      // อย่าค้างที่ AuthWrapper — โยน error ให้ caller จัดการ fallback/retry
+      rethrow;
     }
   }
 
@@ -241,7 +235,11 @@ class NavigationHelper {
     ];
 
     for (final collectionName in possibleCollections) {
-      final doc = await FirebaseFirestore.instance.collection(collectionName).doc(userId).get();
+      final doc = await FirebaseFirestore.instance
+          .collection(collectionName)
+          .doc(userId)
+          .get()
+          .timeout(_firestoreTimeout);
       if (doc.exists) {
         return _ShopRegistrationLookup(doc: doc, data: doc.data(), collection: collectionName);
       }

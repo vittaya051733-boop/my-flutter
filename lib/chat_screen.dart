@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'chat_room_screen.dart';
 import 'models/user_profile.dart';
+import 'services/friend_list_cache_service.dart';
 import 'services/friend_service.dart';
+import 'services/friend_warmup_service.dart';
 import 'services/chat_warmup.dart';
 import 'utils/app_colors.dart';
+import 'widgets/cached_app_avatar.dart';
 
 /// Conversation list with friend management similar to LINE.
 class ChatScreen extends StatefulWidget {
@@ -18,10 +23,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   static const Color _lineOrange = AppColors.accent;
 
-  final FriendService _friendService = FriendService();
+  final FriendService _friendService = FriendService.instance;
   Stream<List<FriendPreview>>? _friendsStream;
-  bool _initializing = true;
-  // Removed: _error (no longer needed)
+  List<FriendPreview> _cachedFriends = const <FriendPreview>[];
+  bool _loadedDiskCache = false;
 
   @override
   void initState() {
@@ -29,28 +34,24 @@ class _ChatScreenState extends State<ChatScreen> {
     _bootstrap();
   }
 
-  Future<void> _bootstrap() async {
+  void _bootstrap() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      setState(() {
-        _initializing = false;
-      });
       return;
     }
 
-    try {
-      await _friendService.ensureCurrentUserProfile(user);
-      if (!mounted) return;
-      setState(() {
-        _friendsStream = _friendService.watchFriends(user.uid);
-        _initializing = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _initializing = false;
-      });
-    }
+    _friendsStream = _friendService.watchFriends(user.uid);
+    unawaited(_loadDiskCache(user.uid));
+    unawaited(_friendService.ensureCurrentUserProfile(user));
+  }
+
+  Future<void> _loadDiskCache(String ownerId) async {
+    final cached = await FriendListCacheService.instance.load(ownerId);
+    if (!mounted) return;
+    setState(() {
+      _cachedFriends = cached;
+      _loadedDiskCache = true;
+    });
   }
 
   Future<void> _openAddFriendSheet() async {
@@ -66,14 +67,15 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (added == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('เพิ่มเพื่อนสำเร็จ')),);
+        const SnackBar(content: Text('เพิ่มเพื่อนสำเร็จ')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-      return Scaffold(
-        backgroundColor: Colors.white,
+    return Scaffold(
+      backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: _lineOrange,
         elevation: 0,
@@ -103,10 +105,6 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildFriendList() {
-    if (_initializing) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
     if (_friendsStream == null) {
       return const _EmptyState(message: 'ไม่พบผู้ใช้');
     }
@@ -114,35 +112,59 @@ class _ChatScreenState extends State<ChatScreen> {
     return StreamBuilder<List<FriendPreview>>(
       stream: _friendsStream,
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
         if (snapshot.hasError) {
-          return const _EmptyState(message: 'เกิดข้อผิดพลาดในการโหลดรายชื่อเพื่อน');
+          if (_cachedFriends.isNotEmpty) {
+            return _buildFriendsListView(_cachedFriends);
+          }
+          return const _EmptyState(
+            message: 'เกิดข้อผิดพลาดในการโหลดรายชื่อเพื่อน',
+          );
         }
 
-        final friends = snapshot.data ?? const [];
-        if (friends.isEmpty) {
-          return const _EmptyState(message: 'ยังไม่มีเพื่อนในระบบ');
+        final friends = snapshot.data;
+        if (friends != null && friends.isNotEmpty) {
+          _cachedFriends = friends;
+          ChatWarmup.prefetchRoomsForFriends(
+            friends.map((friend) => friend.profile).toList(growable: false),
+            friendService: _friendService,
+          );
+          return _buildFriendsListView(friends);
         }
 
-        ChatWarmup.prefetchRoomsForFriends(
-          friends.map((friend) => friend.profile).toList(growable: false),
-          friendService: _friendService,
-        );
+        if (_cachedFriends.isNotEmpty) {
+          return _buildFriendsListView(_cachedFriends);
+        }
 
-        return ListView.separated(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          itemBuilder: (context, index) => _ChatTile(
-            friend: friends[index],
-            accent: _lineOrange,
-            onTap: () => _openChat(friends[index]),
-          ),
-          separatorBuilder: (context, index) => const Divider(height: 1, indent: 88),
-          itemCount: friends.length,
-        );
+        final warmupFriends = FriendWarmupService.instance.latestFriends;
+        if (warmupFriends.isNotEmpty) {
+          return _buildFriendsListView(warmupFriends);
+        }
+
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !_loadedDiskCache) {
+          return const _FriendListSkeleton();
+        }
+
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const _FriendListSkeleton();
+        }
+
+        return const _EmptyState(message: 'ยังไม่มีเพื่อนในระบบ');
       },
+    );
+  }
+
+  Widget _buildFriendsListView(List<FriendPreview> friends) {
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      itemBuilder: (context, index) => _ChatTile(
+        friend: friends[index],
+        accent: _lineOrange,
+        onTap: () => _openChat(friends[index]),
+      ),
+      separatorBuilder: (context, index) =>
+          const Divider(height: 1, indent: 88),
+      itemCount: friends.length,
     );
   }
 
@@ -159,6 +181,62 @@ class _ChatScreenState extends State<ChatScreen> {
       MaterialPageRoute(
         builder: (_) => ChatRoomScreen(friendProfile: friend.profile),
       ),
+    );
+  }
+}
+
+class _FriendListSkeleton extends StatelessWidget {
+  const _FriendListSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      itemCount: 6,
+      separatorBuilder: (context, index) =>
+          const Divider(height: 1, indent: 88),
+      itemBuilder: (context, index) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: const BoxDecoration(
+                  color: Color(0xFFECECEC),
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      height: 14,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFECECEC),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      height: 12,
+                      width: 180,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF3F3F3),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -207,13 +285,15 @@ class _ChatTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final titleStyle = theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600);
-    final subtitleStyle = theme.textTheme.bodyMedium?.copyWith(color: Colors.grey[600]);
+    final titleStyle =
+        theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600);
+    final subtitleStyle =
+        theme.textTheme.bodyMedium?.copyWith(color: Colors.grey[600]);
 
     return InkWell(
       onTap: onTap,
       child: Container(
-           color: Colors.white,
+        color: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           children: [
@@ -233,8 +313,11 @@ class _ChatTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      Text(friend.lastActivityLabel,
-                          style: theme.textTheme.bodySmall?.copyWith(color: Colors.grey[500])),
+                      Text(
+                        friend.lastActivityLabel,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: Colors.grey[500]),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -250,7 +333,8 @@ class _ChatTile extends StatelessWidget {
                       ),
                       if (friend.isMuted) ...[
                         const SizedBox(width: 6),
-                        const Icon(Icons.volume_off, size: 16, color: Colors.grey),
+                        const Icon(Icons.volume_off,
+                            size: 16, color: Colors.grey),
                       ],
                       if (friend.unreadCount > 0) ...[
                         const SizedBox(width: 6),
@@ -262,7 +346,10 @@ class _ChatTile extends StatelessWidget {
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
                           color: AppColors.accentSoft,
                           borderRadius: BorderRadius.circular(16),
@@ -272,7 +359,14 @@ class _ChatTile extends StatelessWidget {
                           children: [
                             Icon(Icons.verified, color: accent, size: 14),
                             const SizedBox(width: 4),
-                            Text('บัญชีทางการ', style: TextStyle(color: accent, fontSize: 12, fontWeight: FontWeight.w600)),
+                            Text(
+                              'บัญชีทางการ',
+                              style: TextStyle(
+                                color: accent,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -299,17 +393,17 @@ class _Avatar extends StatelessWidget {
         ? name.characters.first.toUpperCase()
         : '?';
 
-    return CircleAvatar(
+    return CachedAppAvatar(
+      imageUrl: profile.photoUrl,
       radius: 30,
-      backgroundImage:
-          profile.photoUrl != null ? NetworkImage(profile.photoUrl!) : null,
-      backgroundColor: const Color(0xFFE0E0E0),
-      child: profile.photoUrl == null
-          ? Text(
-              initial,
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 24),
-            )
-          : null,
+      fallback: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+          fontSize: 24,
+        ),
+      ),
     );
   }
 }
@@ -330,7 +424,11 @@ class _UnreadBadge extends StatelessWidget {
       ),
       child: Text(
         count > 99 ? '99+' : '$count',
-        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
       ),
     );
   }
@@ -349,9 +447,14 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey),
+            const Icon(Icons.chat_bubble_outline,
+                size: 64, color: Colors.grey),
             const SizedBox(height: 16),
-            Text(message, style: const TextStyle(fontSize: 16), textAlign: TextAlign.center),
+            Text(
+              message,
+              style: const TextStyle(fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
           ],
         ),
       ),
@@ -384,7 +487,9 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
   @override
   void initState() {
     super.initState();
-    _suggestionsFuture = widget.friendService.fetchSuggestedProfiles(ownerId: widget.ownerId);
+    _suggestionsFuture = widget.friendService.fetchSuggestedProfiles(
+      ownerId: widget.ownerId,
+    );
   }
 
   @override
@@ -398,15 +503,20 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('เพิ่มเพื่อนด้วยชื่อร้าน',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text(
+              'เพิ่มเพื่อนด้วยชื่อร้าน',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 12),
-            // No phone input, only show suggestions
-            const Text('เลือกจากรายชื่อร้านค้าด้านล่างเพื่อเพิ่มเป็นเพื่อน',
-                style: TextStyle(fontSize: 16)),
+            const Text(
+              'เลือกจากรายชื่อร้านค้าด้านล่างเพื่อเพิ่มเป็นเพื่อน',
+              style: TextStyle(fontSize: 16),
+            ),
             const SizedBox(height: 20),
-            const Text('ร้านค้าที่อาจรู้จัก',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text(
+              'ร้านค้าที่อาจรู้จัก',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 12),
             FutureBuilder<List<UserProfile>>(
               future: _suggestionsFuture,
@@ -416,7 +526,9 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
                 }
                 final suggestions = snapshot.data ?? const [];
                 if (suggestions.isEmpty) {
-                  return const Text('ยังไม่มีร้านค้าอื่นที่พร้อมให้เพิ่มเป็นเพื่อน');
+                  return const Text(
+                    'ยังไม่มีร้านค้าอื่นที่พร้อมให้เพิ่มเป็นเพื่อน',
+                  );
                 }
                 return Column(
                   children: suggestions
@@ -425,7 +537,8 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
                           padding: const EdgeInsets.only(bottom: 12),
                           child: _FriendResultCard(
                             profile: profile,
-                            onAdd: _searching ? null : () => _addSuggested(profile),
+                            onAdd:
+                                _searching ? null : () => _addSuggested(profile),
                           ),
                         ),
                       )
@@ -439,17 +552,18 @@ class _AddFriendSheetState extends State<AddFriendSheet> {
     );
   }
 
-  // Removed: _search() (no longer needed)
-
   Future<void> _addFriend() async {
     final target = _result;
     if (target == null) return;
     setState(() => _searching = true);
     try {
-      await widget.friendService.addFriend(ownerId: widget.ownerId, friend: target);
+      await widget.friendService.addFriend(
+        ownerId: widget.ownerId,
+        friend: target,
+      );
       if (!mounted) return;
       Navigator.of(context).pop(true);
-    } catch (e) {
+    } catch (_) {
       // Optionally show error with SnackBar or ignore
     } finally {
       if (mounted) setState(() => _searching = false);
@@ -477,7 +591,13 @@ class _FriendResultCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 8, offset: Offset(0, 4))],
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 8,
+            offset: Offset(0, 4),
+          ),
+        ],
       ),
       child: Row(
         children: [
@@ -487,11 +607,23 @@ class _FriendResultCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(profile.displayName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Text(
+                  profile.displayName,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 if (profile.phoneNumber != null)
-                  Text(profile.phoneNumber!, style: const TextStyle(color: Colors.grey)),
+                  Text(
+                    profile.phoneNumber!,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
                 if (profile.serviceType != null)
-                  Text(profile.serviceType!, style: const TextStyle(color: Colors.grey)),
+                  Text(
+                    profile.serviceType!,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
               ],
             ),
           ),
@@ -500,7 +632,9 @@ class _FriendResultCard extends StatelessWidget {
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.accent,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
             ),
             child: const Text('เพิ่ม'),
           ),

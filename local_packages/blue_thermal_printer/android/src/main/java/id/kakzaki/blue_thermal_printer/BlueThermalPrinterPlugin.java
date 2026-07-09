@@ -59,11 +59,15 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
   private static final String TAG = "BThermalPrinterPlugin";
   private static final String NAMESPACE = "blue_thermal_printer";
   private static final int REQUEST_COARSE_LOCATION_PERMISSIONS = 1451;
+  private static final int REQUEST_BLUETOOTH_RUNTIME_PERMISSIONS = 1452;
+  private static final int REQUEST_BONDED_DEVICES_PERMISSIONS = 1;
   private static final UUID MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
   private static ConnectedThread THREAD = null;
   private BluetoothAdapter mBluetoothAdapter;
+  private String pendingConnectAddress;
 
   private Result pendingResult;
+  private Result pendingConnectResult;
 
   private EventSink readSink;
   private EventSink statusSink;
@@ -407,13 +411,39 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
    */
   @Override
   public boolean onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+    if (requestCode == REQUEST_BONDED_DEVICES_PERMISSIONS) {
+      if (pendingResult != null) {
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+          getBondedDevices(pendingResult);
+        } else {
+          pendingResult.error("no_permissions", "this plugin requires bluetooth permissions", null);
+        }
+        pendingResult = null;
+      }
+      return true;
+    }
 
     if (requestCode == REQUEST_COARSE_LOCATION_PERMISSIONS) {
-      if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-        getBondedDevices(pendingResult);
-      } else {
-        pendingResult.error("no_permissions", "this plugin requires location permissions for scanning", null);
+      if (pendingResult != null) {
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+          getBondedDevices(pendingResult);
+        } else {
+          pendingResult.error("no_permissions", "this plugin requires location permissions for scanning", null);
+        }
         pendingResult = null;
+      }
+      return true;
+    }
+
+    if (requestCode == REQUEST_BLUETOOTH_RUNTIME_PERMISSIONS) {
+      if (pendingConnectResult != null) {
+        if (hasBluetoothConnectPermissions()) {
+          performConnect(pendingConnectResult, pendingConnectAddress);
+        } else {
+          pendingConnectResult.error("no_permissions", "this plugin requires bluetooth connect permission", null);
+        }
+        pendingConnectResult = null;
+        pendingConnectAddress = null;
       }
       return true;
     }
@@ -498,16 +528,79 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
     return sw.toString();
   }
 
+  private boolean hasBluetoothConnectPermissions() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      return ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT)
+          == PackageManager.PERMISSION_GRANTED;
+    }
+    return true;
+  }
+
+  private void closeActiveConnection() {
+    if (THREAD != null) {
+      try {
+        THREAD.cancel();
+      } catch (Exception ignored) {
+      }
+      THREAD = null;
+    }
+  }
+
+  private BluetoothSocket openBluetoothSocket(BluetoothDevice device) throws IOException {
+    mBluetoothAdapter.cancelDiscovery();
+    BluetoothSocket socket = null;
+    try {
+      socket = device.createRfcommSocketToServiceRecord(MY_UUID);
+      socket.connect();
+      return socket;
+    } catch (IOException connectException) {
+      Log.w(TAG, "Standard RFCOMM connect failed, trying fallback channel 1", connectException);
+      if (socket != null) {
+        try {
+          socket.close();
+        } catch (IOException ignored) {
+        }
+      }
+      try {
+        socket = (BluetoothSocket) device.getClass()
+            .getMethod("createRfcommSocket", int.class)
+            .invoke(device, 1);
+        socket.connect();
+        return socket;
+      } catch (Exception fallbackException) {
+        IOException io = new IOException("Unable to connect to bluetooth printer", connectException);
+        io.initCause(fallbackException);
+        throw io;
+      }
+    }
+  }
+
   /**
    * @param result  result
    * @param address address
    */
   private void connect(Result result, String address) {
-
-    if (THREAD != null) {
-      result.error("connect_error", "already connected", null);
+    if (!hasBluetoothConnectPermissions()) {
+      pendingConnectResult = result;
+      pendingConnectAddress = address;
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        ActivityCompat.requestPermissions(
+            activity,
+            new String[] {
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_SCAN,
+            },
+            REQUEST_BLUETOOTH_RUNTIME_PERMISSIONS);
+      } else {
+        result.error("no_permissions", "this plugin requires bluetooth connect permission", null);
+      }
       return;
     }
+    performConnect(result, address);
+  }
+
+  private void performConnect(Result result, String address) {
+    closeActiveConnection();
     AsyncTask.execute(() -> {
       try {
         BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(address);
@@ -517,26 +610,12 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
           return;
         }
 
-        BluetoothSocket socket = device.createRfcommSocketToServiceRecord(MY_UUID);
-
-        if (socket == null) {
-          result.error("connect_error", "socket connection not established", null);
-          return;
-        }
-
-        // Cancel bt discovery, even though we didn't start it
-        mBluetoothAdapter.cancelDiscovery();
-
-        try {
-          socket.connect();
-          THREAD = new ConnectedThread(socket);
-          THREAD.start();
-          result.success(true);
-        } catch (Exception ex) {
-          Log.e(TAG, ex.getMessage(), ex);
-          result.error("connect_error", ex.getMessage(), exceptionToString(ex));
-        }
+        BluetoothSocket socket = openBluetoothSocket(device);
+        THREAD = new ConnectedThread(socket);
+        THREAD.start();
+        result.success(true);
       } catch (Exception ex) {
+        closeActiveConnection();
         Log.e(TAG, ex.getMessage(), ex);
         result.error("connect_error", ex.getMessage(), exceptionToString(ex));
       }
@@ -549,7 +628,7 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
   private void disconnect(Result result) {
 
     if (THREAD == null) {
-      result.error("disconnection_error", "not connected", null);
+      result.success(true);
       return;
     }
     AsyncTask.execute(() -> {
@@ -926,6 +1005,9 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
       if (bmp != null) {
         byte[] command = Utils.decodeBitmap(bmp);
         THREAD.write(command);
+        THREAD.write(PrinterCommands.FEED_LINE);
+        THREAD.write(PrinterCommands.FEED_LINE);
+        THREAD.write(PrinterCommands.FEED_LINE);
       } else {
         Log.e("Print Photo error", "the file isn't exists");
       }
@@ -974,6 +1056,7 @@ public class BlueThermalPrinterPlugin implements FlutterPlugin, ActivityAware,Me
     public void write(byte[] bytes) {
       try {
         outputStream.write(bytes);
+        outputStream.flush();
       } catch (IOException e) {
         e.printStackTrace();
       }

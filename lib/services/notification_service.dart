@@ -593,7 +593,9 @@ class NotificationService {
 
   /// บันทึก FCM token ของผู้ใช้ลง Firestore
   Future<void> saveUserFcmToken(String userId) async {
-    final token = await _firebaseMessaging.getToken();
+    final token = await _firebaseMessaging
+        .getToken()
+        .timeout(const Duration(seconds: 8));
     if (token == null) return;
 
     try {

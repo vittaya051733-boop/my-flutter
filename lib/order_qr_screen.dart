@@ -3,7 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'models/order_model.dart';
+import 'services/merchant_bluetooth_printer_service.dart';
+import 'services/order_qr_receipt_bitmap.dart';
+import 'services/order_qr_receipt_layout.dart';
 import 'utils/app_colors.dart';
+
+const String orderQrReceiptTitle = 'แว๊นตลาด ORDER QR';
 
 String orderQrCodeText(DetailedOrder order) {
   final code = order.orderCode?.trim();
@@ -11,77 +16,53 @@ String orderQrCodeText(DetailedOrder order) {
   return 'VAN_ORDER:${order.orderId}|$orderCode|${order.totalAmount.toStringAsFixed(2)}';
 }
 
-double orderQrProductSubtotal(DetailedOrder order) {
-  final itemTotal = order.items.fold<double>(
-    0,
-    (runningTotal, item) => runningTotal + (item.price * item.quantity),
-  );
-  if (itemTotal > 0) return itemTotal;
-  final fromGrandTotal = order.totalAmount - order.shippingFee;
-  return fromGrandTotal > 0 ? fromGrandTotal : order.totalAmount;
-}
-
 String orderQrOrderCode(DetailedOrder order) {
   final code = order.orderCode?.trim();
   return code != null && code.isNotEmpty ? code : '';
 }
 
+Future<void> _feedLines(BlueThermalPrinter printer, int count) async {
+  for (var i = 0; i < count; i++) {
+    await printer.printNewLine();
+  }
+}
+
 Future<void> printOrderQr(BuildContext context, DetailedOrder order) async {
-  final printer = BlueThermalPrinter.instance;
+  final printerService = MerchantBluetoothPrinterService.instance;
   final universalQr = orderQrCodeText(order);
-  final resolvedOrderCode = orderQrOrderCode(order);
+  final receiptLayout = buildOrderQrReceiptLayout(order);
+
   try {
-    final devices = await printer.getBondedDevices();
-    if (devices.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ไม่พบเครื่องปริ้นเตอร์ที่เชื่อมต่อ')),
-      );
-      return;
-    }
+    final device = await printerService.resolvePrinterDevice(context);
+    await printerService.connect(device);
+    final printer = printerService.printer;
 
-    await printer.connect(devices.first);
-
-    await printer.printCustom('VAN ORDER QR', 2, 1);
-    await printer.write('Order ID: ${order.orderId}');
-    await printer.write(
-      'Order Code: ${resolvedOrderCode.isEmpty ? '-' : resolvedOrderCode}',
+    final receiptPng = await buildOrderQrReceiptPngBytes(
+      qrPayload: universalQr,
+      layout: receiptLayout,
+      receiptTitle: orderQrReceiptTitle,
     );
-    await printer.write('--------------------------');
-    await printer.printCustom('ORDER QR', 1, 1);
-    await printer.printQRcode(universalQr, 300, 300, 1);
-    await printer.write(universalQr);
-    await printer.write('--------------------------');
-    await printer.printCustom('QR VERIFY DATA', 1, 0);
-    await printer.write('Order ID: ${order.orderId}');
-    await printer.write(
-      'Order Code: ${resolvedOrderCode.isEmpty ? '-' : resolvedOrderCode}',
-    );
-    await printer.write(
-      'Product subtotal: ${orderQrProductSubtotal(order).toStringAsFixed(2)} THB',
-    );
-    await printer.write(
-      'Shipping fee: ${order.shippingFee.toStringAsFixed(2)} THB',
-    );
-    await printer.write(
-      'Grand total: ${order.totalAmount.toStringAsFixed(2)} THB',
-    );
-    await printer.write('--------------------------');
-    await printer.printCustom('ITEMS', 1, 0);
-    for (final item in order.items) {
-      await printer.write(
-        '${item.productName} x${item.quantity} ${item.price.toStringAsFixed(2)} THB',
-      );
-    }
-    await printer.write('--------------------------');
+    await printer.printImageBytes(receiptPng);
+    await _feedLines(printer, 3);
     await printer.paperCut();
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('พิมพ์ QR Code และข้อมูลตรวจสอบแล้ว')),
-    );
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('พิมพ์ QR และรายละเอียดออเดอร์แล้ว')),
+      );
+    }
+  } on PrinterUserException catch (error) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.message)),
+      );
+    }
   } catch (e) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาด: $e')));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('เกิดข้อผิดพลาด: $e')),
+      );
+    }
   }
 }
 
@@ -90,20 +71,11 @@ class OrderQRScreen extends StatelessWidget {
 
   final DetailedOrder order;
 
-  String get _orderCode {
-    return orderQrOrderCode(order);
-  }
+  String get _orderCode => orderQrOrderCode(order);
 
   String _qrPayload(String type) {
     if (type == 'VAN_ORDER') return orderQrCodeText(order);
     return '$type:${order.orderId}|$_orderCode|${order.totalAmount.toStringAsFixed(2)}';
-  }
-
-  Future<void> _printAllQrCodes(
-    BuildContext context, {
-    required String universalQr,
-  }) async {
-    await printOrderQr(context, order);
   }
 
   @override
@@ -122,10 +94,9 @@ class OrderQRScreen extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             FilledButton.icon(
-              onPressed: () =>
-                  _printAllQrCodes(context, universalQr: universalQr),
+              onPressed: () => printOrderQr(context, order),
               icon: const Icon(Icons.print_outlined),
-              label: const Text('พิมพ์ QR เดียวพร้อมข้อมูลตรวจสอบ'),
+              label: const Text('พิมพ์ QR พร้อมรายละเอียดออเดอร์'),
               style: FilledButton.styleFrom(
                 backgroundColor: AppColors.accent,
                 padding: const EdgeInsets.symmetric(vertical: 14),
@@ -140,7 +111,7 @@ class OrderQRScreen extends StatelessWidget {
               payload: universalQr,
             ),
             const SizedBox(height: 16),
-            _OrderQrDetails(order: order, orderCode: _orderCode),
+            _OrderQrDetails(order: order),
           ],
         ),
       ),
@@ -243,23 +214,14 @@ class _QrPayloadCard extends StatelessWidget {
 }
 
 class _OrderQrDetails extends StatelessWidget {
-  const _OrderQrDetails({required this.order, required this.orderCode});
+  const _OrderQrDetails({required this.order});
 
   final DetailedOrder order;
-  final String orderCode;
-
-  double get _productSubtotal {
-    final itemTotal = order.items.fold<double>(
-      0,
-      (runningTotal, item) => runningTotal + (item.price * item.quantity),
-    );
-    if (itemTotal > 0) return itemTotal;
-    final fromGrandTotal = order.totalAmount - order.shippingFee;
-    return fromGrandTotal > 0 ? fromGrandTotal : order.totalAmount;
-  }
 
   @override
   Widget build(BuildContext context) {
+    final layout = buildOrderQrReceiptLayout(order);
+
     return Card(
       color: const Color(0xFFFFFBEB),
       elevation: 0,
@@ -274,34 +236,83 @@ class _OrderQrDetails extends StatelessWidget {
               style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
             ),
             const SizedBox(height: 10),
-            Text('Order ID: ${order.orderId}'),
-            Text('เลขออเดอร์: ${orderCode.isEmpty ? '-' : orderCode}'),
-            Text('ค่าสินค้า: ฿${_productSubtotal.toStringAsFixed(2)}'),
-            Text('ค่าส่ง: ฿${order.shippingFee.toStringAsFixed(2)}'),
-            Text('ยอดรวม: ฿${order.totalAmount.toStringAsFixed(2)}'),
-            if (order.items.isNotEmpty) ...[
-              const Divider(height: 24),
-              const Text(
-                'รายการสินค้า',
-                style: TextStyle(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 8),
-              ...order.items.map(
-                (item) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(item.productName)),
-                      Text('x${item.quantity}'),
-                      const SizedBox(width: 12),
-                      Text('฿${item.price.toStringAsFixed(2)}'),
-                    ],
-                  ),
+            Text('Order ID: ${layout.orderId}'),
+            Text('เลขออเดอร์: ${layout.orderCode.isEmpty ? '-' : layout.orderCode}'),
+            Text('วันที่: ${layout.dateTimeText}'),
+            const SizedBox(height: 8),
+            const Text(
+              'รายการสินค้า',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            _AmountRow(
+              label: 'ค่าสินค้า',
+              value: formatOrderQrMoney(layout.productSubtotal),
+            ),
+            const SizedBox(height: 4),
+            ...layout.items.expand((item) {
+              final rows = <Widget>[
+                _AmountRow(
+                  label: '${item.name} x${item.quantity}',
+                  value: formatOrderQrMoney(item.lineTotal),
                 ),
-              ),
-            ],
+              ];
+              final toppings = item.toppings;
+              if (toppings != null) {
+                rows.add(
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8, top: 2, bottom: 2),
+                    child: Text(
+                      'ท็อปปิ้ง: $toppings',
+                      style: TextStyle(fontSize: 13, color: Colors.grey[700]),
+                    ),
+                  ),
+                );
+              }
+              return rows;
+            }),
+            const SizedBox(height: 6),
+            _AmountRow(
+              label: 'ค่าส่ง',
+              value: formatOrderQrMoney(layout.shippingFee),
+            ),
+            _AmountRow(
+              label: 'ยอดรวม',
+              value: formatOrderQrMoney(layout.grandTotal),
+              bold: true,
+            ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AmountRow extends StatelessWidget {
+  const _AmountRow({
+    required this.label,
+    required this.value,
+    this.bold = false,
+  });
+
+  final String label;
+  final String value;
+  final bool bold;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      fontWeight: bold ? FontWeight.w800 : FontWeight.normal,
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: Text(label, style: style)),
+          const SizedBox(width: 8),
+          Text(value, style: style),
+        ],
       ),
     );
   }

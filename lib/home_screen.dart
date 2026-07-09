@@ -19,6 +19,7 @@ import 'widgets/product_video_player.dart';
 import 'services/product_cache_service.dart';
 import 'services/shop_operations_service.dart';
 import 'services/video_prefetch_service.dart';
+import 'services/friend_warmup_service.dart';
 import 'models/shop_operations_settings.dart';
 import 'merchant_pricing_policy.dart';
 import 'utils/shop_profile_resolver.dart';
@@ -83,6 +84,7 @@ class _HomeScreenState extends State<HomeScreen>
     _listenUnreadChats();
     _listenShopOperationsSettings();
     _listenUnreadAppNotifications();
+    _startChatWarmup();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
     SystemChrome.setSystemUIOverlayStyle(
@@ -192,6 +194,22 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (e) {
       debugPrint('Failed to load shop details: $e');
+    }
+  }
+
+  void _startChatWarmup() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return;
+    }
+    FriendWarmupService.instance.start(ownerId: user.uid);
+    if (_pages[7] == null) {
+      Future<void>.delayed(const Duration(milliseconds: 800), () {
+        if (!mounted || _pages[7] != null) {
+          return;
+        }
+        setState(() => _pages[7] = _buildPage(7));
+      });
     }
   }
 
@@ -960,19 +978,15 @@ class _HomeDashboard extends StatelessWidget {
     );
   }
 
-  void _showProductGallery(BuildContext context, Map<String, dynamic> data) {
-    final List<String> allImages = _extractImages(
+  void _showProductGallery(
+    BuildContext context,
+    Map<String, dynamic> data, {
+    String? preferredFirstUrl,
+  }) {
+    final List<String> imageUrls = _extractGalleryImages(
       data,
-      preferThumbnails: false,
+      preferredFirstUrl: preferredFirstUrl,
     );
-    // Always show the selected imageUrl (from grid) as the first image
-    final selectedImageUrl = allImages.isNotEmpty ? allImages.first : null;
-    final List<String> imageUrls = selectedImageUrl != null
-        ? [
-            selectedImageUrl,
-            ...allImages.where((url) => url != selectedImageUrl),
-          ]
-        : allImages;
     final videoUrl = data['videoUrl'] as String?;
     final name = (data['name'] ?? '').toString();
     final price = (data['price'] ?? '').toString();
@@ -1027,6 +1041,70 @@ class _HomeDashboard extends StatelessWidget {
       return originals;
     }
     return thumbnails.isNotEmpty ? thumbnails : originals;
+  }
+
+  /// One URL per logical product image (original preferred, else thumbnail).
+  /// Avoids counting thumbnail + original as two separate gallery pages.
+  List<String> _extractGalleryImages(
+    Map<String, dynamic> data, {
+    String? preferredFirstUrl,
+  }) {
+    List<String> readList(String key) =>
+        (data[key] as List?)
+            ?.whereType<String>()
+            .where((url) => url.trim().isNotEmpty)
+            .map((url) => url.trim())
+            .toList() ??
+        const [];
+
+    final thumbnails = readList('thumbnailUrls');
+    final originals = readList('imageUrls');
+    final imageCount = originals.isNotEmpty
+        ? originals.length
+        : thumbnails.length;
+
+    final urls = <String>[];
+    final seen = <String>{};
+    for (var i = 0; i < imageCount; i++) {
+      final original = i < originals.length ? originals[i] : '';
+      final thumb = i < thumbnails.length ? thumbnails[i] : '';
+      final pick = original.isNotEmpty ? original : thumb;
+      if (pick.isNotEmpty && seen.add(pick)) {
+        urls.add(pick);
+      }
+    }
+
+    final videoUrl = (data['videoUrl'] as String?)?.trim();
+    final filtered = videoUrl != null && videoUrl.isNotEmpty
+        ? urls.where((url) => url != videoUrl).toList(growable: false)
+        : List<String>.from(urls);
+
+    final preferred = preferredFirstUrl?.trim();
+    if (preferred == null || preferred.isEmpty || filtered.isEmpty) {
+      return filtered;
+    }
+
+    var matchIndex = filtered.indexOf(preferred);
+    if (matchIndex < 0) {
+      for (var i = 0; i < imageCount; i++) {
+        final original = i < originals.length ? originals[i] : '';
+        final thumb = i < thumbnails.length ? thumbnails[i] : '';
+        if (preferred == original || preferred == thumb) {
+          if (i < filtered.length) {
+            matchIndex = i;
+          }
+          break;
+        }
+      }
+    }
+
+    if (matchIndex <= 0) {
+      return filtered;
+    }
+    return [
+      filtered[matchIndex],
+      ...filtered.where((url) => url != filtered[matchIndex]),
+    ];
   }
 
   void _prefetchProductVideos(List<CachedProduct> docs, int selectedIndex) {
@@ -1302,34 +1380,15 @@ class _HomeDashboard extends StatelessWidget {
                               return GestureDetector(
                                 onTap: () {
                                   _prefetchProductVideos(visibleDocs, index);
-                                  // จัดลำดับภาพนิ่งให้เป็นภาพแรกเสมอ
-                                  final List<String> allImages = _extractImages(
-                                    data,
-                                    preferThumbnails: false,
-                                  );
-                                  // กรอง videoUrl ออกจาก imageUrls
-                                  final videoUrl = data['videoUrl'] as String?;
-                                  final filteredImages = videoUrl != null
-                                      ? allImages
-                                            .where((url) => url != videoUrl)
-                                            .toList()
-                                      : allImages;
-                                  final selectedImageUrl = imageUrl;
-                                  final List<String> galleryImages =
-                                      selectedImageUrl != null
-                                      ? [
-                                          selectedImageUrl,
-                                          ...filteredImages.where(
-                                            (url) => url != selectedImageUrl,
-                                          ),
-                                        ]
-                                      : filteredImages;
                                   final modalData = Map<String, dynamic>.from(
                                     data,
                                   );
-                                  modalData['imageUrls'] = galleryImages;
                                   modalData['documentId'] = doc.id;
-                                  _showProductGallery(context, modalData);
+                                  _showProductGallery(
+                                    context,
+                                    modalData,
+                                    preferredFirstUrl: imageUrl,
+                                  );
                                 },
                                 child: Container(
                                   decoration: BoxDecoration(
@@ -2247,6 +2306,7 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
     final totalPages = hasImages
         ? widget.images.length + (hasVideo ? 1 : 0)
         : (hasVideo ? 1 : 0);
+    final canSwipe = totalPages > 1;
 
     return SizedBox(
       width: MediaQuery.of(context).size.width * 0.85,
@@ -2275,80 +2335,14 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
           ),
           const SizedBox(height: 12),
           Expanded(
-            child: totalPages > 0
-                ? PageView.builder(
-                    controller: _pageController,
-                    itemCount: totalPages,
-                    onPageChanged: (index) =>
-                        setState(() => _currentIndex = index),
-                    itemBuilder: (context, index) {
-                      // Always show images first, video last
-                      if (hasImages && index < widget.images.length) {
-                        final url = widget.images[index];
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: CachedNetworkImage(
-                            imageUrl: url,
-                            fit: BoxFit.cover,
-                            memCacheWidth: 800, // Optimize memory usage
-                            maxWidthDiskCache: 1000, // Optimize disk storage
-                            placeholder: (context, _) => const Center(
-                              child: CircularProgressIndicator(),
-                            ),
-                            errorWidget: (context, _, __) => Container(
-                              color: Colors.grey[200],
-                              alignment: Alignment.center,
-                              child: const Icon(
-                                Icons.broken_image,
-                                size: 48,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ),
-                        );
-                      } else if (hasVideo && index == totalPages - 1) {
-                        // Last page: show video
-                        final isVideoPageActive = _currentIndex == index;
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: _KeepAlivePage(
-                            child: ProductVideoPlayer(
-                              videoUrl: widget.videoUrl!,
-                              thumbnailUrl: widget.videoThumbnailUrl,
-                              isActive: isVideoPageActive,
-                            ),
-                          ),
-                        );
-                      } else {
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: Colors.grey[200],
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          alignment: Alignment.center,
-                          child: const Icon(
-                            Icons.image_not_supported,
-                            size: 64,
-                            color: Colors.grey,
-                          ),
-                        );
-                      }
-                    },
-                  )
-                : Container(
-                    decoration: BoxDecoration(
-                      color: Colors.grey[200],
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    alignment: Alignment.center,
-                    child: const Icon(
-                      Icons.image_not_supported,
-                      size: 64,
-                      color: Colors.grey,
-                    ),
-                  ),
+            child: _buildGalleryArea(
+              hasImages: hasImages,
+              hasVideo: hasVideo,
+              canSwipe: canSwipe,
+              totalPages: totalPages,
+            ),
           ),
-          if (totalPages > 1)
+          if (canSwipe && totalPages > 1)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12),
               child: Row(
@@ -2411,6 +2405,91 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildGalleryArea({
+    required bool hasImages,
+    required bool hasVideo,
+    required bool canSwipe,
+    required int totalPages,
+  }) {
+    if (!hasImages && !hasVideo) {
+      return _buildGalleryPlaceholder();
+    }
+
+    if (!canSwipe) {
+      if (hasImages) {
+        return _buildGalleryImage(widget.images.first);
+      }
+      return _buildGalleryVideo(isActive: true);
+    }
+
+    return PageView.builder(
+      controller: _pageController,
+      itemCount: totalPages,
+      onPageChanged: (index) => setState(() => _currentIndex = index),
+      itemBuilder: (context, index) {
+        if (hasImages && index < widget.images.length) {
+          return _buildGalleryImage(widget.images[index]);
+        }
+        if (hasVideo && index == totalPages - 1) {
+          return _buildGalleryVideo(isActive: _currentIndex == index);
+        }
+        return _buildGalleryPlaceholder();
+      },
+    );
+  }
+
+  Widget _buildGalleryImage(String url) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        memCacheWidth: 800,
+        maxWidthDiskCache: 1000,
+        placeholder: (context, _) => const Center(
+          child: CircularProgressIndicator(),
+        ),
+        errorWidget: (context, _, __) => Container(
+          color: Colors.grey[200],
+          alignment: Alignment.center,
+          child: const Icon(
+            Icons.broken_image,
+            size: 48,
+            color: Colors.grey,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGalleryVideo({required bool isActive}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: _KeepAlivePage(
+        child: ProductVideoPlayer(
+          videoUrl: widget.videoUrl!,
+          thumbnailUrl: widget.videoThumbnailUrl,
+          isActive: isActive,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGalleryPlaceholder() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.grey[200],
+        borderRadius: BorderRadius.circular(12),
+      ),
+      alignment: Alignment.center,
+      child: const Icon(
+        Icons.image_not_supported,
+        size: 64,
+        color: Colors.grey,
       ),
     );
   }

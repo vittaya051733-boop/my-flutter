@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'merchant_pricing_policy.dart';
 import 'services/merchant_wallet_service.dart';
+import 'utils/settlement_payout_support.dart';
 import 'wallet_top_up_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
@@ -520,17 +521,20 @@ class _WalletScreenState extends State<WalletScreen> {
               if (status != 'delivered') continue;
               final productRevenue = _readProductRevenue(data);
               if (productRevenue <= 0) continue;
+              final payoutInfo = readShopPayoutInfo(data);
+              final payoutStatus = payoutInfo?.displayStatus ?? 'รอชำระ';
               final orderCode = data['orderCode']?.toString().trim();
               items.add(
                 _WalletHistoryItem(
                   title: 'รายได้ค่าสินค้า',
                   subtitle: orderCode == null || orderCode.isEmpty
-                      ? 'ออเดอร์ส่งสำเร็จ'
-                      : 'ออเดอร์: $orderCode',
+                      ? 'ออเดอร์ส่งสำเร็จ • $payoutStatus'
+                      : 'ออเดอร์: $orderCode • $payoutStatus',
                   amount: productRevenue,
                   happenedAt: _orderDeliveredAt(data),
                   icon: Icons.shopping_bag_outlined,
                   color: _dashboardOrangeMid,
+                  payoutStatus: payoutStatus,
                 ),
               );
             }
@@ -580,6 +584,19 @@ class _WalletScreenState extends State<WalletScreen> {
                           color: Colors.black54,
                         ),
                       ),
+                      if (item.payoutStatus != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          item.payoutStatus!,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: item.payoutStatus == 'จ่ายแล้ว'
+                                ? Colors.green.shade700
+                                : Colors.orange.shade800,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 );
@@ -714,6 +731,7 @@ class _WalletHistoryItem {
     required this.color,
     this.subtitle,
     this.happenedAt,
+    this.payoutStatus,
   });
 
   final String title;
@@ -722,4 +740,5 @@ class _WalletHistoryItem {
   final DateTime? happenedAt;
   final IconData icon;
   final Color color;
+  final String? payoutStatus;
 }

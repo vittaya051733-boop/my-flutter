@@ -1,11 +1,18 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/user_profile.dart';
 import '../utils/shop_profile_resolver.dart';
 
 class FriendService {
-  FriendService();
+  FriendService._();
+
+  static final FriendService instance = FriendService._();
+
+  factory FriendService() => instance;
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   static const Duration _cacheTtl = Duration(minutes: 5);
@@ -30,19 +37,39 @@ class FriendService {
         .collection('friends')
         .orderBy('lastActivity', descending: true);
 
-    return ref.snapshots().asyncMap((snapshot) async {
-      final previews = <FriendPreview>[];
-      for (final doc in snapshot.docs) {
-        try {
-          previews.add(await _buildFriendPreview(ownerId, doc));
-        } catch (_) {
-          try {
-            previews.add(FriendPreview.fromSnapshot(doc));
-          } catch (_) {}
-        }
+    return ref.snapshots().asyncExpand((snapshot) async* {
+      if (snapshot.docs.isEmpty) {
+        yield const <FriendPreview>[];
+        return;
       }
-      return previews;
+
+      final fastPreviews = snapshot.docs
+          .map(FriendPreview.fromSnapshot)
+          .toList(growable: false);
+      yield fastPreviews;
+
+      try {
+        final enriched = await Future.wait(
+          snapshot.docs.map((doc) => _buildFriendPreview(ownerId, doc)),
+        );
+        yield enriched;
+      } catch (error) {
+        debugPrint('Friend preview enrichment failed: $error');
+      }
     });
+  }
+
+  static bool friendDocHasDisplayProfile(Map<String, dynamic> data) {
+    final name = (data['displayName'] ?? data['name'] ?? '').toString().trim();
+    final photo = (data['photoUrl'] ??
+            data['imageUrl'] ??
+            data['shopImageUrl'] ??
+            '')
+        .toString()
+        .trim();
+    return name.isNotEmpty &&
+        name != 'ผู้ใช้ใหม่' &&
+        photo.isNotEmpty;
   }
 
   Future<UserProfile?> ensureCurrentUserProfile(User user) async {
@@ -529,21 +556,27 @@ class FriendService {
   ) async {
     final data = doc.data() ?? const <String, dynamic>{};
     final Timestamp? ts = data['lastActivity'] as Timestamp?;
-    final profile =
-        await _resolveCanonicalProfile(
-          data['uid']?.toString() ?? doc.id,
-          userData: data,
-          fallbackDisplayName:
-              (data['displayName'] ?? data['name'] ?? 'ผู้ใช้ใหม่').toString(),
-          fallbackPhotoUrl:
-              (data['photoUrl'] ?? data['imageUrl'] ?? data['shopImageUrl'])
-                  as String?,
-          fallbackPhoneNumber:
-              (data['phoneNumber'] ?? data['phone']) as String?,
-        ) ??
-        UserProfile.fromMap(data['uid']?.toString() ?? doc.id, data);
+    final uid = data['uid']?.toString() ?? doc.id;
 
-    await _syncFriendPreviewDocIfNeeded(ownerId, doc.id, data, profile);
+    final UserProfile profile;
+    if (friendDocHasDisplayProfile(data)) {
+      profile = UserProfile.fromMap(uid, data);
+    } else {
+      profile =
+          await _resolveCanonicalProfile(
+            uid,
+            userData: data,
+            fallbackDisplayName:
+                (data['displayName'] ?? data['name'] ?? 'ผู้ใช้ใหม่').toString(),
+            fallbackPhotoUrl:
+                (data['photoUrl'] ?? data['imageUrl'] ?? data['shopImageUrl'])
+                    as String?,
+            fallbackPhoneNumber:
+                (data['phoneNumber'] ?? data['phone']) as String?,
+          ) ??
+          UserProfile.fromMap(uid, data);
+      unawaited(_syncFriendPreviewDocIfNeeded(ownerId, doc.id, data, profile));
+    }
 
     return FriendPreview(
       profile: profile,
@@ -756,6 +789,48 @@ class FriendPreview {
       unreadCount: (data['unreadCount'] as int?) ?? 0,
       lastActivity: ts?.toDate(),
       isMuted: (data['isMuted'] as bool?) ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'profile': <String, dynamic>{
+        'uid': profile.uid,
+        'displayName': profile.displayName,
+        if (profile.phoneNumber != null) 'phoneNumber': profile.phoneNumber,
+        if (profile.photoUrl != null) 'photoUrl': profile.photoUrl,
+        if (profile.serviceType != null) 'serviceType': profile.serviceType,
+        'isOfficial': profile.isOfficial,
+        'profileCompleted': profile.profileCompleted,
+      },
+      'lastMessage': lastMessage,
+      'unreadCount': unreadCount,
+      if (lastActivity != null)
+        'lastActivityMillis': lastActivity!.millisecondsSinceEpoch,
+      'isMuted': isMuted,
+    };
+  }
+
+  factory FriendPreview.fromJson(Map<String, dynamic> json) {
+    final profileMap = json['profile'];
+    final profile = profileMap is Map<String, dynamic>
+        ? UserProfile.fromMap(
+            (profileMap['uid'] as String?) ?? '',
+            profileMap,
+          )
+        : UserProfile(
+            uid: '',
+            displayName: 'ผู้ใช้ใหม่',
+          );
+    final lastActivityMillis = json['lastActivityMillis'];
+    return FriendPreview(
+      profile: profile,
+      lastMessage: (json['lastMessage'] as String?) ?? 'แตะเพื่อเริ่มสนทนา',
+      unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
+      lastActivity: lastActivityMillis is num
+          ? DateTime.fromMillisecondsSinceEpoch(lastActivityMillis.toInt())
+          : null,
+      isMuted: json['isMuted'] == true,
     );
   }
 
