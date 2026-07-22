@@ -40,9 +40,8 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    _friendsStream = _friendService.watchFriends(user.uid);
+    _friendsStream = FriendWarmupService.instance.watchFriends(user.uid);
     unawaited(_loadDiskCache(user.uid));
-    unawaited(_friendService.ensureCurrentUserProfile(user));
   }
 
   Future<void> _loadDiskCache(String ownerId) async {
@@ -124,10 +123,6 @@ class _ChatScreenState extends State<ChatScreen> {
         final friends = snapshot.data;
         if (friends != null && friends.isNotEmpty) {
           _cachedFriends = friends;
-          ChatWarmup.prefetchRoomsForFriends(
-            friends.map((friend) => friend.profile).toList(growable: false),
-            friendService: _friendService,
-          );
           return _buildFriendsListView(friends);
         }
 

@@ -86,10 +86,15 @@ void main() {
             .timeout(const Duration(seconds: 5)); // กันค้าง
         await FirebaseAppCheck.instance.setTokenAutoRefreshEnabled(true);
 
-        // เพิ่ม: พิมพ์ Debug Token ออกมาใน Console ทุกครั้งที่แอปเริ่มทำงาน (เฉพาะ Debug Mode)
         if (kDebugMode || kAppCheckForceDebug) {
+          var loggedAppCheckToken = '';
           FirebaseAppCheck.instance.onTokenChange.listen((token) {
-            debugPrint('App Check Debug Token: $token');
+            final normalized = token?.trim() ?? '';
+            if (normalized.isEmpty || normalized == loggedAppCheckToken) {
+              return;
+            }
+            loggedAppCheckToken = normalized;
+            debugPrint('App Check Debug Token: $normalized');
           });
         }
 
@@ -182,7 +187,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SHOP',
+      title: 'แว๊นตลาด ร้านค้า',
       debugShowCheckedModeBanner: false,
       navigatorKey: navigatorKey,
       theme: ThemeData(

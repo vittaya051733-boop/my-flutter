@@ -17,6 +17,7 @@ import 'utils/app_colors.dart';
 import 'chat_screen.dart';
 import 'widgets/product_video_player.dart';
 import 'services/product_cache_service.dart';
+import 'services/shop_profile_cache_service.dart';
 import 'services/shop_operations_service.dart';
 import 'services/video_prefetch_service.dart';
 import 'services/friend_warmup_service.dart';
@@ -35,6 +36,7 @@ class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   static const String _shopOperationsCollection = 'shop_operations';
   static const String _notificationTargetApp = 'van1';
+  static const Duration _firestoreReadTimeout = Duration(seconds: 8);
 
   int _notificationCount = 0;
   String? _activeNotification;
@@ -81,10 +83,8 @@ class _HomeScreenState extends State<HomeScreen>
     _pages[0] = _buildPage(0);
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
-    _listenUnreadChats();
-    _listenShopOperationsSettings();
-    _listenUnreadAppNotifications();
     _startChatWarmup();
+    _startBackgroundListeners();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
     SystemChrome.setSystemUIOverlayStyle(
@@ -95,6 +95,17 @@ class _HomeScreenState extends State<HomeScreen>
         systemNavigationBarContrastEnforced: false,
       ),
     );
+  }
+
+  void _startBackgroundListeners() {
+    // Keep Firestore available for the profile and product reads that make the
+    // home screen useful before attaching non-critical real-time listeners.
+    Future<void>.delayed(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      _listenUnreadChats();
+      _listenShopOperationsSettings();
+      _listenUnreadAppNotifications();
+    });
   }
 
   void _listenShopOperationsSettings() {
@@ -139,58 +150,98 @@ class _HomeScreenState extends State<HomeScreen>
 
       _currentUserId = user.uid;
       _hydrateCachedProducts(user.uid);
+      _hydrateCachedShopProfile(user.uid);
       unawaited(_ensureShopOperationsDoc(user.uid));
 
       final collectionsToCheck = await _collectionsToCheck(user);
       if (collectionsToCheck.isEmpty) return;
 
-      final futures = collectionsToCheck.map((collectionName) async {
-        final docRef = FirebaseFirestore.instance
+      DocumentReference<Map<String, dynamic>>? foundDocRef;
+      DocumentSnapshot<Map<String, dynamic>>? foundSnapshot;
+
+      if (collectionsToCheck.length == 1) {
+        final collectionName = collectionsToCheck.first;
+        foundDocRef = FirebaseFirestore.instance
             .collection(collectionName)
             .doc(user.uid);
-        final snapshot = await docRef.get();
-        return MapEntry(docRef, snapshot);
-      }).toList();
-
-      final results = await Future.wait(futures);
-      for (final entry in results) {
-        final snapshot = entry.value;
-        if (!snapshot.exists) continue;
-        final data = snapshot.data();
-        if (data == null) continue;
-
-        final String? imageUrl = ShopProfileResolver.resolveImageUrl(data);
-        final String? name = ShopProfileResolver.resolveName(data);
-        final bool isOpen = data['isOpen'] as bool? ?? true;
-        final Set<String> homeIds =
-            ((data['homeProductIds'] as List?) ?? const [])
-                .whereType<String>()
-                .toSet();
-
-        if (!mounted) return;
-        setState(() {
-          _shopDocRef = entry.key;
-          if (imageUrl != null && imageUrl.isNotEmpty) {
-            _shopImageUrl = imageUrl;
+        try {
+          foundSnapshot = await foundDocRef.get().timeout(
+            _firestoreReadTimeout,
+          );
+          if (!foundSnapshot.exists) {
+            foundSnapshot = null;
           }
-          if (name != null && name.isNotEmpty) {
-            _shopName = name;
-          }
-          _isShopOpen = isOpen;
-          _homeProductIds = homeIds;
-          _pages[0] = _buildPage(0);
-        });
-        unawaited(_syncShopOperationsStatus(user.uid, isOpen));
-        _updateHomeProductsCache();
-
-        if (imageUrl != null && imageUrl.isNotEmpty) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              precacheImage(CachedNetworkImageProvider(imageUrl), context);
-            }
-          });
+        } catch (error) {
+          debugPrint('Shop doc read failed ($collectionName): $error');
         }
-        break;
+      } else {
+        final results = await Future.wait(
+          collectionsToCheck.map((collectionName) async {
+            final docRef = FirebaseFirestore.instance
+                .collection(collectionName)
+                .doc(user.uid);
+            try {
+              final snapshot = await docRef.get().timeout(
+                _firestoreReadTimeout,
+              );
+              if (snapshot.exists) {
+                return (docRef, snapshot);
+              }
+            } catch (error) {
+              debugPrint('Shop doc read failed ($collectionName): $error');
+            }
+            return null;
+          }),
+        );
+        final firstHit = results
+            .whereType<
+              (
+                DocumentReference<Map<String, dynamic>>,
+                DocumentSnapshot<Map<String, dynamic>>,
+              )
+            >()
+            .firstOrNull;
+        if (firstHit != null) {
+          foundDocRef = firstHit.$1;
+          foundSnapshot = firstHit.$2;
+        }
+      }
+
+      if (foundSnapshot == null || !foundSnapshot.exists) return;
+      final data = foundSnapshot.data();
+      if (data == null) return;
+
+      final String? imageUrl = ShopProfileResolver.resolveImageUrl(data);
+      final String? name = ShopProfileResolver.resolveName(data);
+      final bool isOpen = data['isOpen'] as bool? ?? true;
+      final Set<String> homeIds =
+          ((data['homeProductIds'] as List?) ?? const [])
+              .whereType<String>()
+              .toSet();
+
+      if (!mounted) return;
+      setState(() {
+        _shopDocRef = foundDocRef;
+        if (imageUrl != null && imageUrl.isNotEmpty) {
+          _shopImageUrl = imageUrl;
+        }
+        if (name != null && name.isNotEmpty) {
+          _shopName = name;
+        }
+        _isShopOpen = isOpen;
+        _homeProductIds = homeIds;
+        _pages[0] = _buildPage(0);
+      });
+      unawaited(ShopProfileCacheService.instance.saveProfile(user.uid, data));
+      unawaited(_syncShopOperationsStatus(user.uid, isOpen));
+      _updateHomeProductsCache();
+
+      if (imageUrl != null && imageUrl.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            precacheImage(CachedNetworkImageProvider(imageUrl), context);
+          }
+        });
       }
     } catch (e) {
       debugPrint('Failed to load shop details: $e');
@@ -202,7 +253,12 @@ class _HomeScreenState extends State<HomeScreen>
     if (user == null) {
       return;
     }
-    FriendWarmupService.instance.start(ownerId: user.uid);
+    Future<void>.delayed(const Duration(seconds: 2), () {
+      if (!mounted) {
+        return;
+      }
+      FriendWarmupService.instance.start(ownerId: user.uid);
+    });
     if (_pages[7] == null) {
       Future<void>.delayed(const Duration(milliseconds: 800), () {
         if (!mounted || _pages[7] != null) {
@@ -320,6 +376,42 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
+  Future<void> _hydrateCachedShopProfile(String userId) async {
+    final cached = await ShopProfileCacheService.instance.loadProfile(userId);
+    if (!mounted || cached == null) return;
+
+    final imageUrl = ShopProfileResolver.resolveImageUrl(cached);
+    final name = ShopProfileResolver.resolveName(cached);
+    final homeIds = ((cached['homeProductIds'] as List?) ?? const [])
+        .whereType<String>()
+        .toSet();
+    final isOpen = cached['isOpen'] as bool? ?? true;
+
+    setState(() {
+      if (imageUrl != null && imageUrl.isNotEmpty) {
+        _shopImageUrl = imageUrl;
+      }
+      if (name != null && name.isNotEmpty) {
+        _shopName = name;
+      }
+      _homeProductIds = homeIds;
+      _isShopOpen = isOpen;
+      _pages[0] = _buildPage(0);
+    });
+
+    if (homeIds.isNotEmpty && isOpen) {
+      final cachedProducts = await ProductCacheService.instance.loadProducts(
+        userId,
+      );
+      final orderedProducts = _orderHomeProducts(cachedProducts, homeIds);
+      if (!mounted || orderedProducts.isEmpty) return;
+      setState(() {
+        _localCachedProducts = orderedProducts;
+        _pages[0] = _buildPage(0);
+      });
+    }
+  }
+
   Future<List<CachedProduct>> _fetchHomeProducts(
     String userId,
     Set<String> ids,
@@ -348,7 +440,8 @@ class _HomeScreenState extends State<HomeScreen>
               FieldPath.documentId,
               whereIn: orderedIds.sublist(start, end),
             )
-            .get(),
+            .get()
+            .timeout(_firestoreReadTimeout),
       );
     }
 
@@ -431,36 +524,27 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<List<String>> _collectionsToCheck(User user) async {
-    final List<String> collections = [];
     try {
       final contractDoc = await FirebaseFirestore.instance
           .collection('contracts')
           .doc(user.uid)
-          .get();
+          .get()
+          .timeout(_firestoreReadTimeout);
       final String? serviceType = contractDoc.data()?['serviceType'] as String?;
       if (serviceType != null && serviceType.trim().isNotEmpty) {
-        final resolved = _collectionForServiceType(serviceType);
-        collections.add(resolved);
+        return <String>[_collectionForServiceType(serviceType)];
       }
     } catch (e) {
       debugPrint('Failed to read service type: $e');
     }
 
-    const fallbackCollections = [
-      'market_registrations',
+    return const <String>[
       'shop_registrations',
+      'market_registrations',
       'restaurant_registrations',
       'pharmacy_registrations',
       'other_registrations',
     ];
-
-    for (final name in fallbackCollections) {
-      if (!collections.contains(name)) {
-        collections.add(name);
-      }
-    }
-
-    return collections;
   }
 
   String _collectionForServiceType(String serviceType) {
@@ -626,10 +710,14 @@ class _HomeScreenState extends State<HomeScreen>
     final collections = await _collectionsToCheck(user);
     for (final name in collections) {
       final docRef = FirebaseFirestore.instance.collection(name).doc(user.uid);
-      final snapshot = await docRef.get();
-      if (snapshot.exists) {
-        _shopDocRef = docRef;
-        return _shopDocRef;
+      try {
+        final snapshot = await docRef.get().timeout(_firestoreReadTimeout);
+        if (snapshot.exists) {
+          _shopDocRef = docRef;
+          return _shopDocRef;
+        }
+      } catch (error) {
+        debugPrint('Shop doc lookup failed ($name): $error');
       }
     }
     return null;
@@ -1362,17 +1450,17 @@ class _HomeDashboard extends StatelessWidget {
                               final price = (data['price'] ?? '').toString();
                               final discountPercent =
                                   MerchantPricingPolicy.parseDiscountPercent(
-                                data['discountPercent'],
-                              );
+                                    data['discountPercent'],
+                                  );
                               final basePrice =
                                   MerchantPricingPolicy.parseNumber(
-                                data['price'] ?? price,
-                              );
+                                    data['price'] ?? price,
+                                  );
                               final discountedPrice =
                                   MerchantPricingPolicy.applyDiscount(
-                                basePrice,
-                                discountPercent,
-                              );
+                                    basePrice,
+                                    discountPercent,
+                                  );
                               final stock = data['stock']?.toString() ?? '0';
                               final description = (data['description'] ?? '')
                                   .toString();
@@ -1523,9 +1611,8 @@ class _HomeDashboard extends StatelessWidget {
                                                     style: const TextStyle(
                                                       fontSize: 12,
                                                       color: Colors.white60,
-                                                      decoration:
-                                                          TextDecoration
-                                                              .lineThrough,
+                                                      decoration: TextDecoration
+                                                          .lineThrough,
                                                     ),
                                                     maxLines: 1,
                                                     overflow:
@@ -2450,17 +2537,12 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
         fit: BoxFit.cover,
         memCacheWidth: 800,
         maxWidthDiskCache: 1000,
-        placeholder: (context, _) => const Center(
-          child: CircularProgressIndicator(),
-        ),
+        placeholder: (context, _) =>
+            const Center(child: CircularProgressIndicator()),
         errorWidget: (context, _, __) => Container(
           color: Colors.grey[200],
           alignment: Alignment.center,
-          child: const Icon(
-            Icons.broken_image,
-            size: 48,
-            color: Colors.grey,
-          ),
+          child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
         ),
       ),
     );

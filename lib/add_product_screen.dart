@@ -222,6 +222,7 @@ class AddProductScreenState extends State<AddProductScreen>
   Timer? _draftSaveDebounce;
   bool _draftRestoreComplete = false;
   bool _draftSessionClosed = false;
+  Future<void>? _draftSessionFuture;
   String? _activeDraftId;
   String? _aiQueueStatusText;
   bool _aiQueueExternalRecommendation = false;
@@ -438,7 +439,20 @@ class AddProductScreenState extends State<AddProductScreen>
       unawaited(_hydrateWeightFromFirestore());
     } else if (_draftPersistenceEnabled) {
       WidgetsBinding.instance.addObserver(this);
-      unawaited(_initializeDraftSession());
+      _draftSessionFuture = _initializeDraftSession();
+    }
+  }
+
+  Future<void> _ensureDraftReadyForAi() async {
+    if (!_draftPersistenceEnabled) {
+      return;
+    }
+    final initFuture = _draftSessionFuture;
+    if (initFuture != null) {
+      await initFuture;
+    }
+    if (_activeDraftId == null || _activeDraftId!.isEmpty) {
+      throw Exception('ไม่พบ draft session สำหรับ AI');
     }
   }
 
@@ -682,7 +696,7 @@ class AddProductScreenState extends State<AddProductScreen>
       _aiReviewReasonLabels = reviewLabels
           .map((entry) => entry?.toString().trim() ?? '')
           .where((entry) => entry.isNotEmpty)
-          .toList(growable: false);
+          .toList();
     }
 
     final existingImages = draft['existingImageUrls'];
@@ -690,14 +704,14 @@ class AddProductScreenState extends State<AddProductScreen>
       _existingImageUrls = existingImages
           .map((entry) => entry?.toString().trim() ?? '')
           .where((entry) => entry.isNotEmpty)
-          .toList(growable: false);
+          .toList();
     }
     final existingThumbs = draft['existingThumbnailUrls'];
     if (existingThumbs is List) {
       _existingThumbnailUrls = existingThumbs
           .map((entry) => entry?.toString().trim() ?? '')
           .where((entry) => entry.isNotEmpty)
-          .toList(growable: false);
+          .toList();
     } else if (_existingImageUrls.isNotEmpty) {
       _existingThumbnailUrls = List<String>.from(_existingImageUrls);
     }
@@ -764,6 +778,13 @@ class AddProductScreenState extends State<AddProductScreen>
       _aiQueueStatusText = aiStatus == 'processing'
           ? 'ถึงคิวแล้ว กำลังประมวลผล AI...'
           : 'กำลังรอคิว AI...';
+    } else if (aiStatus == 'failed') {
+      _isAnalyzingProductWithAi = false;
+      _hasUsedAiProductAnalysisForProduct = false;
+      _aiQueueStatusText =
+          (draft['aiError'] as String?)?.trim().isNotEmpty == true
+          ? (draft['aiError'] as String).trim()
+          : 'AI ประมวลผลไม่สำเร็จ';
     }
 
     final aiResult = draft['aiResult'];
@@ -1124,7 +1145,7 @@ class AddProductScreenState extends State<AddProductScreen>
 
     final uploaded = await _uploadImageToFirebase(_newImageFiles.first);
     if (uploaded == null) {
-      return null;
+      throw Exception('อัปโหลดรูปไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่');
     }
 
     if (mounted) {
@@ -1796,6 +1817,117 @@ class AddProductScreenState extends State<AddProductScreen>
     return true;
   }
 
+  bool get _canReplaceProductImageAtCapacity =>
+      !_isEditingExistingProduct &&
+      _maxImageCount == 1 &&
+      _currentImageCount >= _maxImageCount &&
+      !_isAnalyzingProductWithAi;
+
+  void _clearAiProductAnalysisState({bool clearAiFilledFields = true}) {
+    if (clearAiFilledFields && _hasUsedAiDescriptionForProduct) {
+      _productDescriptionController.clear();
+      _hasUsedAiDescriptionForProduct = false;
+    }
+
+    _hasUsedAiProductAnalysisForProduct = false;
+    _isAnalyzingProductWithAi = false;
+    _aiQueueStatusText = null;
+    _aiQueueExternalRecommendation = false;
+    _hasAiTaxAnalysis = false;
+    _aiTaxAnalysisReason = null;
+    _aiIsLegalInThailand = null;
+    _aiLegalAnalysisReason = null;
+    _aiProductType = null;
+    _aiCanShipNationwide = null;
+    _aiNationwideShippingReason = null;
+    _aiParcelDimensionReason = null;
+    _aiProductNameConfidence = null;
+    _aiTaxConfidence = null;
+    _aiProductTypeConfidence = null;
+    _aiNationwideShippingConfidence = null;
+    _aiLegalConfidence = null;
+    _aiRequiresAdminReview = null;
+    _aiReviewReasonLabels = <String>[];
+
+    if (clearAiFilledFields && _draftPersistenceEnabled) {
+      _selectedProductCategory = null;
+      _isFreshProduct = false;
+      _isProcessed = false;
+      _pharmacyIsTaxable = true;
+      _manualCanShipNationwide = false;
+      _parcelLengthController.clear();
+      _parcelWidthController.clear();
+      _parcelHeightController.clear();
+    }
+
+    _aiQueueSubscription?.cancel();
+    _aiQueueSubscription = null;
+  }
+
+  Future<void> _resetAiProductAnalysisForImageChange() async {
+    _clearAiProductAnalysisState();
+    if (mounted) {
+      setState(() {});
+    }
+    if (!_draftPersistenceEnabled) {
+      return;
+    }
+    await _persistDraftPatch(<String, dynamic>{
+      'hasUsedAiProductAnalysisForProduct': false,
+      'hasUsedAiDescriptionForProduct': false,
+      'hasAiTaxAnalysis': false,
+      'aiTaxAnalysisReason': null,
+      'aiIsLegalInThailand': null,
+      'aiLegalAnalysisReason': null,
+      'aiProductType': null,
+      'aiCanShipNationwide': null,
+      'aiNationwideShippingReason': null,
+      'aiParcelDimensionReason': null,
+      'aiProductNameConfidence': null,
+      'aiTaxConfidence': null,
+      'aiProductTypeConfidence': null,
+      'aiNationwideShippingConfidence': null,
+      'aiLegalConfidence': null,
+      'aiRequiresAdminReview': null,
+      'aiReviewReasonLabels': <String>[],
+      'aiStatus': null,
+      'aiResult': null,
+      'aiError': null,
+      'imageUrl': null,
+      'thumbnailUrl': null,
+      'isAnalyzingProductWithAi': false,
+    });
+  }
+
+  Future<void> _applySelectedProductImages(
+    List<XFile> images, {
+    required bool replaceExisting,
+  }) async {
+    if (images.isEmpty) {
+      return;
+    }
+
+    final imagesToKeep = images.take(_maxImageCount).toList();
+    if (replaceExisting) {
+      await _resetAiProductAnalysisForImageChange();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _existingImageUrls.clear();
+        _existingThumbnailUrls.clear();
+        _newImageFiles
+          ..clear()
+          ..addAll(imagesToKeep);
+      });
+    } else {
+      setState(() => _newImageFiles.addAll(imagesToKeep));
+    }
+
+    unawaited(_persistDraftNow());
+    unawaited(_analyzeProductWithAi(automatic: true));
+  }
+
   Future<void> _pickImagesFromGallery() async {
     if (_isResolvingServiceType) return;
 
@@ -1806,13 +1938,15 @@ class AddProductScreenState extends State<AddProductScreen>
     }
 
     final remainingSlots = _maxImageCount - _currentImageCount;
-    if (remainingSlots <= 0) {
+    final replaceExisting = _canReplaceProductImageAtCapacity;
+    if (remainingSlots <= 0 && !replaceExisting) {
       _showSnack('ใส่รูปได้สูงสุด $_maxImageCount รูป');
       return;
     }
 
     final bool pickSingleOnly =
         _maxImageCount == 1 ||
+        replaceExisting ||
         (_usesFirstImageAiGate && _currentImageCount == 0);
 
     try {
@@ -1844,16 +1978,19 @@ class AddProductScreenState extends State<AddProductScreen>
       }
       if (picks.isEmpty) return;
 
-      final imagesToAdd = picks.take(remainingSlots).toList();
-      final compressedToAdd = await _compressPickedImages(imagesToAdd);
+      final picksToProcess = replaceExisting
+          ? picks.take(_maxImageCount).toList()
+          : picks.take(remainingSlots).toList();
+      final compressedToAdd = await _compressPickedImages(picksToProcess);
       if (compressedToAdd.isEmpty) return;
-      setState(() => _newImageFiles.addAll(compressedToAdd));
-      unawaited(_persistDraftNow());
-      unawaited(_analyzeProductWithAi(automatic: true));
+      await _applySelectedProductImages(
+        compressedToAdd,
+        replaceExisting: replaceExisting,
+      );
 
-      if (picks.length > remainingSlots) {
+      if (!replaceExisting && picks.length > remainingSlots) {
         _showSnack(
-          'ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${imagesToAdd.length} รูปแรก',
+          'ระบบเพิ่มรูปได้เพียง $_maxImageCount รูป แสดงเฉพาะ ${picksToProcess.length} รูปแรก',
         );
       }
     } on PlatformException catch (error) {
@@ -1870,8 +2007,9 @@ class AddProductScreenState extends State<AddProductScreen>
   Future<void> _captureImage() async {
     if (_isResolvingServiceType) return;
 
+    final replaceExisting = _canReplaceProductImageAtCapacity;
     final blocked = _imagePickBlockedReason;
-    if (blocked != null) {
+    if (blocked != null && !replaceExisting) {
       _showSnack(blocked);
       return;
     }
@@ -1894,9 +2032,10 @@ class AddProductScreenState extends State<AddProductScreen>
       if (photo == null) return;
       final compressed = await _compressPickedImages(<XFile>[photo]);
       if (compressed.isEmpty) return;
-      setState(() => _newImageFiles.add(compressed.first));
-      unawaited(_persistDraftNow());
-      unawaited(_analyzeProductWithAi(automatic: true));
+      await _applySelectedProductImages(
+        compressed,
+        replaceExisting: replaceExisting,
+      );
     } on PlatformException catch (error) {
       _showSnack(
         error.message?.trim().isNotEmpty == true
@@ -2161,6 +2300,10 @@ class AddProductScreenState extends State<AddProductScreen>
   }
 
   void _removeExistingImageAt(int index) {
+    final shouldResetAi =
+        !_isEditingExistingProduct &&
+        (_hasUsedAiProductAnalysisForProduct || _hasAiTaxAnalysis) &&
+        (index == 0 || _maxImageCount == 1);
     setState(() {
       if (index >= 0 && index < _existingImageUrls.length) {
         _localMediaPaths.remove(_existingImageUrls[index]);
@@ -2171,13 +2314,23 @@ class AddProductScreenState extends State<AddProductScreen>
         _existingThumbnailUrls.removeAt(index);
       }
     });
+    if (shouldResetAi) {
+      unawaited(_resetAiProductAnalysisForImageChange());
+    }
     _scheduleDraftSave();
   }
 
   void _removeNewImageAt(int index) {
+    final shouldResetAi =
+        !_isEditingExistingProduct &&
+        (_hasUsedAiProductAnalysisForProduct || _hasAiTaxAnalysis) &&
+        ((index == 0 && _existingImageUrls.isEmpty) || _maxImageCount == 1);
     setState(() {
       _newImageFiles.removeAt(index);
     });
+    if (shouldResetAi) {
+      unawaited(_resetAiProductAnalysisForImageChange());
+    }
     _scheduleDraftSave();
   }
 
@@ -2874,6 +3027,7 @@ class AddProductScreenState extends State<AddProductScreen>
       });
 
       try {
+        await _ensureDraftReadyForAi();
         await _enqueueProductAiAnalysis(automatic: automatic);
       } on FirebaseFunctionsException catch (e) {
         if (mounted) {

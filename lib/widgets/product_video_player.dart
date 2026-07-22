@@ -19,17 +19,21 @@ class ProductVideoPlayer extends StatefulWidget {
     /// When set, parent (e.g. PageView) controls play/pause explicitly.
     /// When null, playback follows [VisibilityDetector].
     this.isActive,
+    /// When false, playback stops and the controller is released.
+    this.hostActive = true,
   });
 
   final String videoUrl;
   final String? thumbnailUrl;
   final bool? isActive;
+  final bool hostActive;
 
   @override
   State<ProductVideoPlayer> createState() => _ProductVideoPlayerState();
 }
 
-class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
+class _ProductVideoPlayerState extends State<ProductVideoPlayer>
+    with WidgetsBindingObserver {
   static const BetterPlayerConfiguration _playerConfig =
       BetterPlayerConfiguration(
     autoPlay: true,
@@ -70,7 +74,8 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   bool _released = false;
   int _thumbnailRequestId = 0;
 
-  bool get _isPlaybackAllowed => widget.isActive ?? _isVisible;
+  bool get _isPlaybackAllowed =>
+      widget.hostActive && (widget.isActive ?? _isVisible);
   String? _thumbnailSource;
   bool _thumbnailIsFile = false;
 
@@ -84,6 +89,7 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     VideoPrefetchService.instance.preloadVideo(widget.videoUrl);
     _loadThumbnail();
     if (widget.isActive == true) {
@@ -106,7 +112,13 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
     if (widget.thumbnailUrl != oldWidget.thumbnailUrl) {
       _loadThumbnail();
     }
-    if (widget.isActive != oldWidget.isActive) {
+    if (widget.hostActive != oldWidget.hostActive && !widget.hostActive) {
+      _wantsAutoplay = false;
+      unawaited(_releaseController());
+      return;
+    }
+    if (widget.isActive != oldWidget.isActive ||
+        widget.hostActive != oldWidget.hostActive) {
       _onPlaybackAllowedChanged();
     }
   }
@@ -121,6 +133,10 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
       return;
     }
     _wantsAutoplay = false;
+    if (!widget.hostActive) {
+      unawaited(_releaseController());
+      return;
+    }
     _safePause();
   }
 
@@ -355,30 +371,49 @@ class _ProductVideoPlayerState extends State<ProductVideoPlayer> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _wantsAutoplay = false;
+      unawaited(_releaseController());
+      return;
+    }
+    if (state == AppLifecycleState.resumed && !_released) {
+      _onPlaybackAllowedChanged();
+    }
+  }
+
+  @override
   void dispose() {
     _released = true;
     _wantsAutoplay = false;
+    WidgetsBinding.instance.removeObserver(this);
     final controller = _controller;
     _controller = null;
     _isInitialized = false;
     _isPlaying = false;
     _isBuffering = false;
     if (controller != null) {
-      controller.removeEventsListener(_handleBetterPlayerEvent);
-      unawaited(_disposeControllerQuietly(controller));
+      _disposeControllerSync(controller);
     }
     super.dispose();
   }
 
-  Future<void> _disposeControllerQuietly(BetterPlayerController controller) async {
+  void _disposeControllerSync(BetterPlayerController controller) {
     try {
-      await controller.pause();
+      controller.removeEventsListener(_handleBetterPlayerEvent);
+      if (!controller.isDisposed) {
+        controller.dispose(forceDispose: true);
+      }
     } catch (error) {
-      debugPrint('ProductVideoPlayer: pause on release failed -> $error');
+      debugPrint('ProductVideoPlayer: sync dispose failed -> $error');
     }
-    if (!controller.isDisposed) {
-      controller.dispose(forceDispose: true);
-    }
+  }
+
+  Future<void> _disposeControllerQuietly(BetterPlayerController controller) async {
+    _disposeControllerSync(controller);
   }
 
   Future<void> _releaseController() async {

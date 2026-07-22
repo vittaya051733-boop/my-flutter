@@ -24,7 +24,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <application
-        android:label="SHOP"
+        android:label="แว๊นตลาด ร้านค้า"
         android:name="van.merchant.VanMerchantApp"
         android:icon="@mipmap/ic_launcher">
         <meta-data

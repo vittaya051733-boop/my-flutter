@@ -14,10 +14,27 @@ class FriendWarmupService {
   static final FriendWarmupService instance = FriendWarmupService._();
 
   StreamSubscription<List<FriendPreview>>? _subscription;
+  StreamController<List<FriendPreview>>? _friendsController;
   String? _activeOwnerId;
   List<FriendPreview> _latestFriends = const <FriendPreview>[];
 
   List<FriendPreview> get latestFriends => _latestFriends;
+
+  Stream<List<FriendPreview>> watchFriends(String ownerId) {
+    start(ownerId: ownerId);
+    final controller = _friendsController;
+    if (controller == null) {
+      return const Stream<List<FriendPreview>>.empty();
+    }
+    if (_latestFriends.isNotEmpty) {
+      scheduleMicrotask(() {
+        if (!(controller.isClosed)) {
+          controller.add(_latestFriends);
+        }
+      });
+    }
+    return controller.stream;
+  }
 
   void start({String? ownerId}) {
     final uid = ownerId?.trim().isNotEmpty == true
@@ -32,12 +49,20 @@ class FriendWarmupService {
 
     stop();
     _activeOwnerId = uid;
+    _friendsController = StreamController<List<FriendPreview>>.broadcast();
 
     unawaited(_loadDiskCache(uid));
 
     _subscription = FriendService.instance.watchFriends(uid).listen(
       (friends) {
+        if (FriendPreview.listsEqual(_latestFriends, friends)) {
+          return;
+        }
         _latestFriends = friends;
+        final controller = _friendsController;
+        if (controller != null && !controller.isClosed) {
+          controller.add(friends);
+        }
         unawaited(FriendListCacheService.instance.save(uid, friends));
         ChatWarmup.prefetchRoomsForFriends(
           friends.map((friend) => friend.profile).toList(growable: false),
@@ -61,6 +86,10 @@ class FriendWarmupService {
       return;
     }
     _latestFriends = cached;
+    final controller = _friendsController;
+    if (controller != null && !controller.isClosed) {
+      controller.add(cached);
+    }
     ChatWarmup.prefetchRoomsForFriends(
       cached.map((friend) => friend.profile).toList(growable: false),
       friendService: FriendService.instance,
@@ -70,6 +99,8 @@ class FriendWarmupService {
   void stop() {
     _subscription?.cancel();
     _subscription = null;
+    _friendsController?.close();
+    _friendsController = null;
     _activeOwnerId = null;
   }
 }

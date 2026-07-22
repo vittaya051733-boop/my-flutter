@@ -227,21 +227,65 @@ class NavigationHelper {
   }
 
   static Future<_ShopRegistrationLookup> _fetchShopRegistration(String userId) async {
-    final possibleCollections = [
-      'market_registrations',
+    String? preferredCollection;
+    try {
+      final contractDoc = await FirebaseFirestore.instance
+          .collection('contracts')
+          .doc(userId)
+          .get()
+          .timeout(_firestoreTimeout);
+      final serviceType = contractDoc.data()?['serviceType'] as String?;
+      if (serviceType != null && serviceType.trim().isNotEmpty) {
+        preferredCollection = _collectionForServiceName(serviceType);
+        final preferredDoc = await FirebaseFirestore.instance
+            .collection(preferredCollection)
+            .doc(userId)
+            .get()
+            .timeout(_firestoreTimeout);
+        if (preferredDoc.exists) {
+          return _ShopRegistrationLookup(
+            doc: preferredDoc,
+            data: preferredDoc.data(),
+            collection: preferredCollection,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Shop registration contract lookup failed: $e');
+    }
+
+    const possibleCollections = <String>[
       'shop_registrations',
+      'market_registrations',
       'restaurant_registrations',
       'pharmacy_registrations',
     ];
 
-    for (final collectionName in possibleCollections) {
-      final doc = await FirebaseFirestore.instance
-          .collection(collectionName)
-          .doc(userId)
-          .get()
-          .timeout(_firestoreTimeout);
-      if (doc.exists) {
-        return _ShopRegistrationLookup(doc: doc, data: doc.data(), collection: collectionName);
+    final lookups = await Future.wait(
+      possibleCollections
+          .where((collectionName) => collectionName != preferredCollection)
+          .map((collectionName) async {
+            try {
+              final doc = await FirebaseFirestore.instance
+                  .collection(collectionName)
+                  .doc(userId)
+                  .get()
+                  .timeout(_firestoreTimeout);
+              if (doc.exists) {
+                return _ShopRegistrationLookup(
+                  doc: doc,
+                  data: doc.data(),
+                  collection: collectionName,
+                );
+              }
+            } catch (_) {}
+            return const _ShopRegistrationLookup();
+          }),
+    );
+
+    for (final lookup in lookups) {
+      if (lookup.doc != null) {
+        return lookup;
       }
     }
 

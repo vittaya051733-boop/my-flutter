@@ -30,6 +30,52 @@ class FriendService {
     'pharmacy_registrations',
   ];
 
+  static const Set<String> _transientFirestoreCodes = <String>{
+    'unavailable',
+    'deadline-exceeded',
+    'resource-exhausted',
+    'aborted',
+    'internal',
+  };
+
+  Future<T> _withFirestoreRetry<T>(
+    Future<T> Function() action, {
+    int maxAttempts = 3,
+  }) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await action();
+      } on FirebaseException catch (error) {
+        lastError = error;
+        final isTransient = _transientFirestoreCodes.contains(error.code);
+        if (!isTransient || attempt >= maxAttempts) {
+          rethrow;
+        }
+        final delayMs = 250 * (1 << (attempt - 1));
+        if (kDebugMode && attempt == 1) {
+          debugPrint(
+            'Firestore transient ${error.code}, retrying up to $maxAttempts times',
+          );
+        }
+        await Future<void>.delayed(Duration(milliseconds: delayMs));
+      }
+    }
+    throw lastError ?? StateError('Firestore retry failed');
+  }
+
+  Future<DocumentSnapshot<Map<String, dynamic>>> _getDocument(
+    DocumentReference<Map<String, dynamic>> ref,
+  ) {
+    return _withFirestoreRetry(ref.get);
+  }
+
+  Future<QuerySnapshot<Map<String, dynamic>>> _runQuery(
+    Query<Map<String, dynamic>> query,
+  ) {
+    return _withFirestoreRetry(query.get);
+  }
+
   Stream<List<FriendPreview>> watchFriends(String ownerId) {
     final ref = _firestore
         .collection('users')
@@ -46,13 +92,24 @@ class FriendService {
       final fastPreviews = snapshot.docs
           .map(FriendPreview.fromSnapshot)
           .toList(growable: false);
+      final needsEnrichment = snapshot.docs.any(
+        (doc) => !friendDocHasDisplayProfile(doc.data()),
+      );
+
+      if (!needsEnrichment) {
+        yield fastPreviews;
+        return;
+      }
+
       yield fastPreviews;
 
       try {
         final enriched = await Future.wait(
           snapshot.docs.map((doc) => _buildFriendPreview(ownerId, doc)),
         );
-        yield enriched;
+        if (!FriendPreview.listsEqual(fastPreviews, enriched)) {
+          yield enriched;
+        }
       } catch (error) {
         debugPrint('Friend preview enrichment failed: $error');
       }
@@ -74,7 +131,7 @@ class FriendService {
 
   Future<UserProfile?> ensureCurrentUserProfile(User user) async {
     final docRef = _firestore.collection('users').doc(user.uid);
-    final snapshot = await docRef.get();
+    final snapshot = await _getDocument(docRef);
     final profile = await _resolveCanonicalProfile(
       user.uid,
       userData: snapshot.data(),
@@ -90,7 +147,7 @@ class FriendService {
   }
 
   Future<UserProfile?> getProfile(String uid) async {
-    final snapshot = await _firestore.collection('users').doc(uid).get();
+    final snapshot = await _getDocument(_firestore.collection('users').doc(uid));
     final profile = await _resolveCanonicalProfile(
       uid,
       userData: snapshot.data(),
@@ -110,21 +167,23 @@ class FriendService {
     final normalized = _normalizePhone(rawInput);
     if (normalized.isEmpty) return null;
 
-    final directQuery = await _firestore
-        .collection('users')
-        .where('phoneNumber', isEqualTo: normalized)
-        .limit(1)
-        .get();
+    final directQuery = await _runQuery(
+      _firestore
+          .collection('users')
+          .where('phoneNumber', isEqualTo: normalized)
+          .limit(1),
+    );
     if (directQuery.docs.isNotEmpty) {
       return UserProfile.fromSnapshot(directQuery.docs.first);
     }
 
     for (final collection in _shopCollections) {
-      final query = await _firestore
-          .collection(collection)
-          .where('phone', isEqualTo: normalized)
-          .limit(1)
-          .get();
+      final query = await _runQuery(
+        _firestore
+            .collection(collection)
+            .where('phone', isEqualTo: normalized)
+            .limit(1),
+      );
       if (query.docs.isEmpty) continue;
       final doc = query.docs.first;
       final data = doc.data();
@@ -161,10 +220,9 @@ class FriendService {
 
     final futures = _shopCollections
         .map(
-          (collection) => _firestore
-              .collection(collection)
-              .limit(_perCollectionSearchLimit)
-              .get(),
+          (collection) => _runQuery(
+            _firestore.collection(collection).limit(_perCollectionSearchLimit),
+          ),
         )
         .toList(growable: false);
 
@@ -219,12 +277,13 @@ class FriendService {
     }
 
     final exclude = <String>{ownerId};
-    final existingFriends = await _firestore
-        .collection('users')
-        .doc(ownerId)
-        .collection('friends')
-        .limit(200)
-        .get();
+    final existingFriends = await _runQuery(
+      _firestore
+          .collection('users')
+          .doc(ownerId)
+          .collection('friends')
+          .limit(200),
+    );
     for (final doc in existingFriends.docs) {
       exclude.add(doc.id);
     }
@@ -250,10 +309,11 @@ class FriendService {
         .toList(growable: false);
     final futures = limitedCollections
         .map(
-          (collection) => _firestore
-              .collection(collection)
-              .limit(_perCollectionSuggestionLimit)
-              .get(),
+          (collection) => _runQuery(
+            _firestore
+                .collection(collection)
+                .limit(_perCollectionSuggestionLimit),
+          ),
         )
         .toList(growable: false);
     final snapshots = await Future.wait(futures);
@@ -305,11 +365,12 @@ class FriendService {
       final fallbackLimit = ((limit - suggestions.length) * 3)
           .clamp(12, 60)
           .toInt();
-      final userSnapshot = await _firestore
-          .collection('users')
-          .orderBy('updatedAt', descending: true)
-          .limit(fallbackLimit)
-          .get();
+      final userSnapshot = await _runQuery(
+        _firestore
+            .collection('users')
+            .orderBy('updatedAt', descending: true)
+            .limit(fallbackLimit),
+      );
 
       final candidates = <UserProfile>[];
       for (final doc in userSnapshot.docs) {
@@ -390,7 +451,7 @@ class FriendService {
 
   Future<String?> _getOwnerServiceType(String ownerId) async {
     try {
-      final userDoc = await _firestore.collection('users').doc(ownerId).get();
+      final userDoc = await _getDocument(_firestore.collection('users').doc(ownerId));
       final serviceType = (userDoc.data()?['serviceType'] as String?)?.trim();
       if (serviceType != null && serviceType.isNotEmpty) {
         return serviceType;
@@ -398,10 +459,9 @@ class FriendService {
     } catch (_) {}
 
     try {
-      final contractDoc = await _firestore
-          .collection('contracts')
-          .doc(ownerId)
-          .get();
+      final contractDoc = await _getDocument(
+        _firestore.collection('contracts').doc(ownerId),
+      );
       final serviceType = (contractDoc.data()?['serviceType'] as String?)
           ?.trim();
       if (serviceType != null && serviceType.isNotEmpty) {
@@ -468,7 +528,7 @@ class FriendService {
         .doc(ownerId)
         .collection('friends')
         .doc(friend.uid);
-    final already = await ownerFriendRef.get();
+    final already = await _getDocument(ownerFriendRef);
     if (already.exists) {
       throw const FriendException('คุณเพิ่มเพื่อนคนนี้ไว้แล้ว');
     }
@@ -512,10 +572,9 @@ class FriendService {
   Future<Map<String, dynamic>?> _loadShopData(String uid) async {
     for (final collection in _shopCollections) {
       try {
-        final directSnapshot = await _firestore
-            .collection(collection)
-            .doc(uid)
-            .get();
+        final directSnapshot = await _getDocument(
+          _firestore.collection(collection).doc(uid),
+        );
         if (directSnapshot.exists) {
           final data = directSnapshot.data();
           if (data != null) {
@@ -527,11 +586,12 @@ class FriendService {
           }
         }
 
-        final ownerQuery = await _firestore
-            .collection(collection)
-            .where('ownerId', isEqualTo: uid)
-            .limit(1)
-            .get();
+        final ownerQuery = await _runQuery(
+          _firestore
+              .collection(collection)
+              .where('ownerId', isEqualTo: uid)
+              .limit(1),
+        );
         if (ownerQuery.docs.isNotEmpty) {
           final ownerDoc = ownerQuery.docs.first;
           final data = ownerDoc.data();
@@ -643,7 +703,7 @@ class FriendService {
   }
 
   Future<Map<String, dynamic>?> _loadUserData(String uid) async {
-    final snapshot = await _firestore.collection('users').doc(uid).get();
+    final snapshot = await _getDocument(_firestore.collection('users').doc(uid));
     return snapshot.data();
   }
 
@@ -790,6 +850,35 @@ class FriendPreview {
       lastActivity: ts?.toDate(),
       isMuted: (data['isMuted'] as bool?) ?? false,
     );
+  }
+
+  bool isSamePresentationAs(FriendPreview other) {
+    return profile.uid == other.profile.uid &&
+        profile.displayName == other.profile.displayName &&
+        profile.photoUrl == other.profile.photoUrl &&
+        lastMessage == other.lastMessage &&
+        unreadCount == other.unreadCount &&
+        isMuted == other.isMuted &&
+        lastActivity?.millisecondsSinceEpoch ==
+            other.lastActivity?.millisecondsSinceEpoch;
+  }
+
+  static bool listsEqual(
+    List<FriendPreview> left,
+    List<FriendPreview> right,
+  ) {
+    if (identical(left, right)) {
+      return true;
+    }
+    if (left.length != right.length) {
+      return false;
+    }
+    for (var index = 0; index < left.length; index++) {
+      if (!left[index].isSamePresentationAs(right[index])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Map<String, dynamic> toJson() {
