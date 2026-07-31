@@ -51,6 +51,8 @@ app.*.map.json
 /releases/
 
 # Eclipse / Buildship IDE metadata
+**/.project
+**/.settings/
 android/.project
 android/.settings/
 **/android/.project
