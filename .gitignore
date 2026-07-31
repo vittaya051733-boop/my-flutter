@@ -60,4 +60,7 @@ android/.settings/
 android/build/reports/
 **/android/build/reports/
 
+# Gradle local cache (never commit)
+**/.gradle/
+
 node_modules
