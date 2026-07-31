@@ -23,7 +23,7 @@ alwaysApply: true
 
 ```powershell
 ..\..\..\van2\scripts\deploy-readiness.ps1 -App van1 -Target storage
-..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage -ConfirmDeploy "APPROVE:van1:van-merchant" -FinalAcknowledge "YES I UNDERSTAND"
+..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage -ConfirmDeploy "อนุมัติ:van1:van-merchant" -ConfirmImpact "เฉพาะ:van1" -ConfirmFile "storage.rules" -FinalAcknowledge "ฉันเข้าใจแล้ว"
 ```
 
 Deploy Firestore rules → `deploy-self.ps1 -App van2 -Target firestore` (SHARED — กระทบไรเดอร์)

@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'utils/io_platform.dart';
 
@@ -16,6 +14,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'services/merchant_security_deposit_service.dart';
+import 'services/promptpay_qr_payload.dart';
 
 class WalletTopUpDialog extends StatefulWidget {
   const WalletTopUpDialog({
@@ -35,7 +34,7 @@ class WalletTopUpDialog extends StatefulWidget {
 
 class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
   static const List<double> _presets = <double>[500, 1000, 2000, 3000];
-  static const String _promptPayPurposeNote = 'เติม เครดิตร้านค้า';
+  static const double _maxTopUpAmount = 5000;
 
   final TextEditingController _customAmountController = TextEditingController();
 
@@ -43,6 +42,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
   bool _isBusy = false;
 
   String? _promptPayNationalId;
+  String? _recipientDisplayName;
   double? _selectedAmount;
   XFile? _selectedSlipImage;
 
@@ -66,12 +66,13 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
           .get()
           .timeout(const Duration(seconds: 5));
       final data = snapshot.data() ?? const <String, dynamic>{};
-      final value = data['promptPayNationalIdOrTaxId']?.toString().trim();
-      _promptPayNationalId = value != null && value.isNotEmpty
-          ? value
-          : '1410400168710';
+      _promptPayNationalId = _resolvePromptPayId(data) ?? '1410400168710';
+      final name = data['recipientDisplayName']?.toString().trim();
+      _recipientDisplayName =
+          name != null && name.isNotEmpty ? name : 'วิทยา ทนหงษา';
     } catch (_) {
       _promptPayNationalId = '1410400168710';
+      _recipientDisplayName = 'วิทยา ทนหงษา';
     } finally {
       if (mounted) setState(() => _loadingConfig = false);
       _applyInitialAmountIfNeeded();
@@ -84,34 +85,77 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
       return;
     }
     setState(() {
-      _selectedAmount = initial;
+      _selectedAmount = initial.clamp(0, _maxTopUpAmount);
       _customAmountController.text = '';
     });
   }
 
   double? get _amount => _selectedAmount;
 
+  String? _resolvePromptPayId(Map<String, dynamic> data) {
+    const fallback = '1410400168710';
+
+    String digitsOnly(String? raw) =>
+        raw?.replaceAll(RegExp(r'\D'), '') ?? '';
+
+    final nationalDigits = digitsOnly(
+      data['promptPayNationalIdOrTaxId']?.toString(),
+    );
+    if (nationalDigits.length == 13) {
+      return nationalDigits;
+    }
+
+    final phoneDigits = digitsOnly(data['promptPayPhoneNumber']?.toString());
+    if (phoneDigits.length >= 9 && phoneDigits.length <= 10) {
+      return phoneDigits;
+    }
+
+    if (nationalDigits.length >= 9 && nationalDigits.length <= 10) {
+      return nationalDigits;
+    }
+
+    final fallbackDigits = digitsOnly(fallback);
+    return fallbackDigits.length == 13 ? fallbackDigits : null;
+  }
+
+  String? _buildPromptPayPayload(double amount) {
+    final promptPayId = _promptPayNationalId;
+    if (promptPayId == null || promptPayId.isEmpty) {
+      return null;
+    }
+    return PromptPayQrPayload.build(promptPayId: promptPayId, amount: amount);
+  }
+
   bool get _canGeneratePromptPayQr {
     final amount = _amount;
-    final nationalId = _promptPayNationalId;
-    return amount != null &&
-        amount > 0 &&
-        nationalId != null &&
-        nationalId.isNotEmpty;
+    if (amount == null || amount <= 0) {
+      return false;
+    }
+    return _buildPromptPayPayload(amount) != null;
   }
 
   void _selectPreset(double amount) {
     setState(() {
-      _selectedAmount = amount;
+      _selectedAmount = amount.clamp(0, _maxTopUpAmount);
       _customAmountController.text = '';
     });
   }
 
   void _onCustomAmountChanged(String value) {
     final parsed = double.tryParse(value);
-    setState(
-      () => _selectedAmount = parsed != null && parsed > 0 ? parsed : null,
-    );
+    setState(() {
+      if (parsed == null || parsed <= 0) {
+        _selectedAmount = null;
+        return;
+      }
+      _selectedAmount = parsed > _maxTopUpAmount ? _maxTopUpAmount : parsed;
+      if (parsed > _maxTopUpAmount) {
+        _customAmountController.value = TextEditingValue(
+          text: _maxTopUpAmount.toStringAsFixed(0),
+          selection: TextSelection.collapsed(offset: _maxTopUpAmount.toStringAsFixed(0).length),
+        );
+      }
+    });
   }
 
   Future<void> _pickSlipImage() async {
@@ -149,6 +193,10 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
     final amount = _amount;
     if (amount == null || amount <= 0) {
       _showSnack('กรุณาเลือกจำนวนเงินก่อน');
+      return;
+    }
+    if (amount > _maxTopUpAmount) {
+      _showSnack('ยอดเติมสูงสุด ${_maxTopUpAmount.toStringAsFixed(0)} บาทต่อครั้ง');
       return;
     }
 
@@ -192,6 +240,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
       final response = await callable.call(<String, dynamic>{
         'uid': user.uid,
         'expectedAmount': amount,
+        'expectedPromptPayId': _promptPayNationalId,
         'storagePath': objectPath,
         'bucket': Firebase.app().options.storageBucket,
         'paymentGroupId': paymentGroupId,
@@ -488,58 +537,6 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
     );
   }
 
-  static String _twoDigitLength(int length) =>
-      length < 10 ? '0$length' : '$length';
-
-  static int _crc16CcittFalse(String data) {
-    var crc = 0xFFFF;
-    final bytes = utf8.encode(data);
-    for (final byte in bytes) {
-      var value = ((crc >> 8) ^ byte) & 0xFF;
-      value ^= value >> 4;
-      crc = ((crc << 8) ^ (value << 12) ^ (value << 5) ^ value) & 0xFFFF;
-    }
-    return crc;
-  }
-
-  static String _generatePromptPayPayload({
-    required String promptPayId,
-    required double amount,
-    String? purposeNote,
-  }) {
-    if (promptPayId.length != 10 && promptPayId.length != 13) return '';
-
-    const start = '000201';
-    const acceptRecycle = '010211';
-    const merchantInfo = '0016A000000677010111';
-    final merchantInfoType = promptPayId.length == 10
-        ? '2937$merchantInfo'
-              '01130066${promptPayId.substring(1)}'
-        : '2937$merchantInfo'
-              '0213$promptPayId';
-    const country = '5802TH';
-    const currencyISO = '5303764';
-    final amountText = amount.toStringAsFixed(2);
-    final dataAmount = '54${_twoDigitLength(amountText.length)}$amountText';
-
-    var additionalData = '';
-    final note = purposeNote?.trim();
-    if (note != null && note.isNotEmpty) {
-      final noteByteLen = utf8.encode(note).length;
-      final subField = '08${_twoDigitLength(noteByteLen)}$note';
-      final subFieldByteLen = utf8.encode(subField).length;
-      additionalData = '62${_twoDigitLength(subFieldByteLen)}$subField';
-    }
-
-    const checkSumTag = '6304';
-    final payloadBeforeCrc =
-        '$start$acceptRecycle$merchantInfoType$country$dataAmount$currencyISO$additionalData$checkSumTag';
-    final crc = _crc16CcittFalse(
-      payloadBeforeCrc,
-    ).toRadixString(16).toUpperCase().padLeft(4, '0');
-    return '$payloadBeforeCrc$crc';
-  }
-
   Widget _buildTopUpAmountForm(double? amount) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -547,6 +544,10 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
         const Text(
           'เลือกจำนวนเงิน',
           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        Text(
+          'สูงสุด ${_maxTopUpAmount.toStringAsFixed(0)} บาทต่อครั้ง · ส่งสลิปได้ไม่เกิน 3 ครั้งต่อวัน',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 10),
         Wrap(
@@ -566,10 +567,10 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
           controller: _customAmountController,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           enabled: !_isBusy,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: 'กำหนดเอง',
-            hintText: 'เช่น 1500',
-            border: OutlineInputBorder(),
+            hintText: 'เช่น 1500 (สูงสุด ${_maxTopUpAmount.toStringAsFixed(0)})',
+            border: const OutlineInputBorder(),
           ),
           onChanged: _onCustomAmountChanged,
         ),
@@ -580,13 +581,11 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
   Widget _buildPromptPayQrCard({
     required double amount,
     required String nationalId,
+    required String recipientName,
   }) {
     final amountLabel = amount.toStringAsFixed(2);
-    final payload = _generatePromptPayPayload(
-      promptPayId: nationalId,
-      amount: amount,
-      purposeNote: _promptPayPurposeNote,
-    );
+    final payload = _buildPromptPayPayload(amount);
+    final maskedPromptPay = PromptPayQrPayload.maskedDisplayLabel(nationalId);
 
     return Center(
       child: Container(
@@ -604,7 +603,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
             const SizedBox(height: 10),
             const _PromptPayWordmark(),
             const SizedBox(height: 12),
-            if (payload.isEmpty)
+            if (payload == null || payload.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 64),
                 child: Text('PromptPay ID ไม่ถูกต้อง'),
@@ -628,15 +627,25 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
               ),
             const SizedBox(height: 12),
             Text(
-              'Account ($nationalId)',
+              'โอนให้ $recipientName',
+              style: const TextStyle(
+                color: Color(0xFF2D2D2D),
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              maskedPromptPay,
               style: const TextStyle(
                 color: Color(0xFF2D2D2D),
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
               ),
               textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 6),
             Text(
@@ -659,6 +668,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
     final canGenerateQr = _canGeneratePromptPayQr;
     final amount = _amount;
     final nationalId = _promptPayNationalId;
+    final recipientName = _recipientDisplayName ?? 'วิทยา ทนหงษา';
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -726,6 +736,7 @@ class _WalletTopUpDialogState extends State<WalletTopUpDialog> {
                           _buildPromptPayQrCard(
                             amount: amount!,
                             nationalId: nationalId!,
+                            recipientName: recipientName,
                           ),
                         const SizedBox(height: 14),
                         _buildSlipPickerPanel(),

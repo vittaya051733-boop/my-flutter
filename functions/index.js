@@ -580,6 +580,10 @@ const PAYMENT_CONFIG_DOC_ID = 'collection';
 const SLIPOK_ENDPOINT = 'https://api.slipok.com/api/line/apikey/64492';
 const SLIPOK_FEEDBACK_COLLECTION = 'slipok_feedback';
 const SHOP_TOPUP_SLIPS_COLLECTION = 'shop_topup_slips';
+const SLIP_TRANS_REF_COLLECTION = 'slip_trans_refs';
+const TOPUP_SLIP_DAILY_ATTEMPTS_COLLECTION = 'topup_slip_daily_attempts';
+const TOP_UP_MAX_AMOUNT = 5000;
+const TOP_UP_MAX_DAILY_VERIFICATION_ATTEMPTS = 3;
 const ALLOWED_TOPUP_STORAGE_BUCKETS = new Set([
   'van-merchant-van1-storage-802503541368',
   'van-merchant-van2-storage-802503541368',
@@ -602,6 +606,45 @@ function amountsMatch(actualAmount, expectedAmount) {
     return false;
   }
   return Math.abs(actualAmount - expectedAmount) < 0.01;
+}
+
+function getBangkokDateKey(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+function getTopUpDailyAttemptDocId(uid) {
+  return `${uid}_${getBangkokDateKey()}`;
+}
+
+async function consumeTopUpDailyVerificationAttempt(uid) {
+  const docId = getTopUpDailyAttemptDocId(uid);
+  const ref = db.collection(TOPUP_SLIP_DAILY_ATTEMPTS_COLLECTION).doc(docId);
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const count = snap.exists ? Number(snap.data()?.count || 0) : 0;
+    if (count >= TOP_UP_MAX_DAILY_VERIFICATION_ATTEMPTS) {
+      throw new HttpsError(
+        'resource-exhausted',
+        'ส่งสลิปครบ 3 ครั้งต่อวันแล้ว กรุณาลองใหม่พรุ่งนี้',
+      );
+    }
+    tx.set(
+      ref,
+      {
+        uid,
+        dateKey: getBangkokDateKey(),
+        count: count + 1,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  });
 }
 
 function readRequiredConfiguredSecret(secret, label, purpose) {
@@ -634,13 +677,7 @@ async function getPaymentCollectionSettings() {
       .get();
     const data = snapshot.data() || {};
 
-    return {
-      recipientDisplayName: String(data.recipientDisplayName || defaults.recipientDisplayName).trim() || defaults.recipientDisplayName,
-      bankAccountNumber: String(data.bankAccountNumber || defaults.bankAccountNumber).trim() || defaults.bankAccountNumber,
-      promptPayPhoneNumber: String(data.promptPayPhoneNumber || '').trim(),
-      promptPayNationalIdOrTaxId:
-        String(data.promptPayNationalIdOrTaxId || defaults.promptPayNationalIdOrTaxId).trim() || defaults.promptPayNationalIdOrTaxId,
-    };
+    return normalizePaymentCollectionSettings(data);
   } catch (error) {
     logger.warn('Failed to read payment config. Falling back to defaults.', {
       message: error instanceof Error ? error.message : String(error),
@@ -649,11 +686,100 @@ async function getPaymentCollectionSettings() {
   }
 }
 
+function normalizePaymentCollectionSettings(raw = {}) {
+  const defaults = defaultPaymentCollectionSettings();
+  let promptPayPhoneNumber = String(raw.promptPayPhoneNumber || '').trim();
+  let promptPayNationalIdOrTaxId = String(
+    raw.promptPayNationalIdOrTaxId || defaults.promptPayNationalIdOrTaxId,
+  ).trim();
+
+  if (!isPromptPayPhoneDigits(promptPayPhoneNumber)) {
+    promptPayPhoneNumber = '';
+  } else {
+    promptPayPhoneNumber = normalizeDigits(promptPayPhoneNumber);
+  }
+
+  const nationalDigits = normalizeDigits(promptPayNationalIdOrTaxId);
+  if (nationalDigits.length === 13) {
+    promptPayNationalIdOrTaxId = nationalDigits;
+  } else if (isPromptPayPhoneDigits(nationalDigits) && !promptPayPhoneNumber) {
+    promptPayPhoneNumber = nationalDigits;
+    promptPayNationalIdOrTaxId = defaults.promptPayNationalIdOrTaxId;
+  } else if (nationalDigits.length !== 13) {
+    promptPayNationalIdOrTaxId = defaults.promptPayNationalIdOrTaxId;
+  }
+
+  return {
+    recipientDisplayName:
+      String(raw.recipientDisplayName || defaults.recipientDisplayName).trim()
+      || defaults.recipientDisplayName,
+    recipientDisplayNameAlt: String(raw.recipientDisplayNameAlt || '').trim(),
+    bankAccountNumber:
+      String(raw.bankAccountNumber || defaults.bankAccountNumber).trim()
+      || defaults.bankAccountNumber,
+    promptPayPhoneNumber,
+    promptPayNationalIdOrTaxId,
+  };
+}
+
 function normalizeMaskedDigits(value) {
   return String(value || '')
     .trim()
+    .replace(/\*/g, 'X')
     .replace(/[^0-9xX]/g, '')
     .toUpperCase();
+}
+
+function buildDigitMaskPattern(value) {
+  let pattern = '';
+  for (const char of String(value || '')) {
+    if (/[0-9]/.test(char)) {
+      pattern += char;
+    } else if (char === '*' || char === 'X' || char === 'x') {
+      pattern += '?';
+    }
+  }
+  return pattern;
+}
+
+function digitMaskPatternMatches(pattern, expectedDigits) {
+  if (!pattern || !expectedDigits || pattern.length !== expectedDigits.length) {
+    return false;
+  }
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const patternChar = pattern[index];
+    if (patternChar !== '?' && patternChar !== expectedDigits[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function promptPayFormattedIdMatches(actualValue, expectedValue) {
+  const expectedDigits = normalizeDigits(expectedValue);
+  if (expectedDigits.length !== 13) {
+    return false;
+  }
+
+  const pattern = buildDigitMaskPattern(actualValue);
+  if (digitMaskPatternMatches(pattern, expectedDigits)) {
+    return true;
+  }
+
+  const masked = normalizeMaskedDigits(actualValue);
+  if (masked.length === expectedDigits.length) {
+    for (let index = 0; index < expectedDigits.length; index += 1) {
+      const maskedChar = masked[index];
+      if (maskedChar !== 'X' && maskedChar !== expectedDigits[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
 }
 
 function normalizeDigits(value) {
@@ -695,18 +821,115 @@ function namePartiallyMatches(actualValue, expectedValue) {
     return false;
   }
 
-  return actual.includes(expected) || expected.includes(actual);
+  if (actual.includes(expected) || expected.includes(actual)) {
+    return true;
+  }
+
+  const minPrefix = Math.min(actual.length, expected.length, 6);
+  if (minPrefix >= 4) {
+    const actualPrefix = actual.slice(0, minPrefix);
+    const expectedPrefix = expected.slice(0, minPrefix);
+    if (actual.includes(expectedPrefix) || expected.includes(actualPrefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function extractVisibleDigits(value) {
+  return normalizeMaskedDigits(value).replace(/X/g, '');
+}
+
+function isPromptPayPhoneDigits(value) {
+  const digits = normalizeDigits(value);
+  return digits.length >= 9 && digits.length <= 10;
+}
+
+function receiverTargetMatches(actualTarget, expectedTarget) {
+  if (maskedDigitsMatch(actualTarget, expectedTarget)) {
+    return true;
+  }
+
+  if (promptPayFormattedIdMatches(actualTarget, expectedTarget)) {
+    return true;
+  }
+
+  const actualDigits = normalizeDigits(actualTarget);
+  const expectedDigits = normalizeDigits(expectedTarget);
+  if (actualDigits && expectedDigits && actualDigits === expectedDigits) {
+    return true;
+  }
+
+  const visibleDigits = extractVisibleDigits(actualTarget);
+  if (visibleDigits.length >= 4 && expectedDigits.endsWith(visibleDigits)) {
+    return true;
+  }
+
+  return false;
 }
 
 function buildExpectedReceiverTargets(settings) {
-  return [
+  const defaults = defaultPaymentCollectionSettings();
+  const targets = new Set();
+
+  for (const value of [
     settings.bankAccountNumber,
     settings.promptPayPhoneNumber,
     settings.promptPayNationalIdOrTaxId,
-  ].map((value) => normalizeDigits(value)).filter(Boolean);
+    defaults.promptPayNationalIdOrTaxId,
+  ]) {
+    const digits = normalizeDigits(value);
+    if (!digits) {
+      continue;
+    }
+    targets.add(digits);
+    if (isPromptPayPhoneDigits(digits)) {
+      const local = digits.startsWith('0') ? digits.slice(1) : digits;
+      targets.add(`66${local}`);
+      if (!digits.startsWith('0')) {
+        targets.add(`0${digits}`);
+      }
+    }
+  }
+
+  return [...targets];
 }
 
-function validateSlipReceiver(providerPayload, settings) {
+function collectReceiverMatchCandidates(receiver) {
+  const candidates = new Set();
+
+  const walk = (node) => {
+    if (node == null) {
+      return;
+    }
+    if (typeof node === 'string' || typeof node === 'number') {
+      const text = String(node).trim();
+      if (text) {
+        candidates.add(text);
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        walk(item);
+      }
+      return;
+    }
+    if (typeof node === 'object') {
+      for (const value of Object.values(node)) {
+        walk(value);
+      }
+    }
+  };
+
+  walk(receiver);
+  return [...candidates];
+}
+
+function validateSlipReceiver(providerPayload, settings, options = {}) {
+  const relaxNameFallback = options.relaxNameFallback === true;
+  const scanAllReceiverFields = options.scanAllReceiverFields === true;
   const receiver = providerPayload?.data?.receiver || {};
   const accountValue = String(receiver?.account?.value || '').trim();
   const proxyValue = String(receiver?.proxy?.value || '').trim();
@@ -714,27 +937,106 @@ function validateSlipReceiver(providerPayload, settings) {
     .map((value) => String(value || '').trim())
     .filter(Boolean);
   const expectedTargets = buildExpectedReceiverTargets(settings);
-  const actualTargets = [accountValue, proxyValue].filter(Boolean);
+  const actualTargets = scanAllReceiverFields
+    ? collectReceiverMatchCandidates(receiver)
+    : [accountValue, proxyValue].filter(Boolean);
 
   const accountMatched =
     actualTargets.length > 0 &&
     expectedTargets.some((expectedTarget) =>
-      actualTargets.some((actualTarget) => maskedDigitsMatch(actualTarget, expectedTarget)),
+      actualTargets.some((actualTarget) =>
+        receiverTargetMatches(actualTarget, expectedTarget),
+      ),
     );
 
+  const expectedNames = [
+    settings.recipientDisplayName,
+    settings.recipientDisplayNameAlt,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
   const nameMatched = actualNames.some((actualName) =>
-    namePartiallyMatches(actualName, settings.recipientDisplayName),
+    expectedNames.some((expectedName) => namePartiallyMatches(actualName, expectedName)),
   );
 
+  const matched = relaxNameFallback
+    ? accountMatched || nameMatched
+    : accountMatched || (!actualTargets.length && nameMatched);
+
   return {
-    matched: accountMatched || (!actualTargets.length && nameMatched),
+    matched,
     accountMatched,
     nameMatched,
     actualAccountValue: accountValue,
     actualProxyValue: proxyValue,
     actualNames,
+    actualTargets,
     expectedRecipientDisplayName: settings.recipientDisplayName,
     expectedTargets,
+  };
+}
+
+function normalizedNameContainsToken(name, token) {
+  const normalizedName = normalizeNameForComparison(name);
+  const normalizedToken = normalizeNameForComparison(token);
+  return Boolean(
+    normalizedName &&
+      normalizedToken &&
+      normalizedName.includes(normalizedToken),
+  );
+}
+
+function validateTopUpSlipReceiver(providerPayload, settings, expectedPromptPayId) {
+  const base = validateSlipReceiver(providerPayload, settings, {
+    relaxNameFallback: true,
+    scanAllReceiverFields: true,
+  });
+  if (base.matched) {
+    return { ...base, topUpRelaxedMatch: false };
+  }
+
+  const receiver = providerPayload?.data?.receiver || {};
+  const actualNames = [receiver?.displayName, receiver?.name]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const nationalId = normalizeDigits(
+    String(expectedPromptPayId || settings.promptPayNationalIdOrTaxId || '').trim(),
+  );
+
+  const nameHint = actualNames.some(
+    (actualName) =>
+      normalizedNameContainsToken(actualName, 'วิทยา') ||
+      normalizedNameContainsToken(actualName, settings.recipientDisplayName),
+  );
+
+  let nationalIdHint = false;
+  if (nationalId.length === 13) {
+    const suffix = nationalId.slice(-4);
+    const prefix = nationalId.slice(0, 9);
+    const candidates = collectReceiverMatchCandidates(receiver);
+    nationalIdHint = candidates.some(
+      (candidate) =>
+        promptPayFormattedIdMatches(candidate, nationalId) ||
+        receiverTargetMatches(candidate, nationalId) ||
+        normalizeDigits(candidate).endsWith(suffix),
+    );
+    if (!nationalIdHint) {
+      const receiverBlob = JSON.stringify(receiver);
+      nationalIdHint = receiverBlob.includes(suffix) || receiverBlob.includes(prefix);
+    }
+  }
+
+  const relaxedMatched = nameHint || nationalIdHint;
+
+  return {
+    ...base,
+    matched: relaxedMatched,
+    accountMatched: base.accountMatched || nationalIdHint,
+    nameMatched: base.nameMatched || nameHint,
+    nationalIdHint,
+    nameHint,
+    topUpRelaxedMatch: relaxedMatched && !base.matched,
   };
 }
 
@@ -808,6 +1110,9 @@ async function writeSlipOkFeedbackLog({
   responseCode,
   providerPayload,
   providerRawText,
+  transRef,
+  receiverValidation,
+  sourceApp,
 }) {
   const docId = String(feedbackId || paymentGroupId || '').trim();
   const feedbackRef = docId
@@ -831,6 +1136,9 @@ async function writeSlipOkFeedbackLog({
     apiEndpoint: SLIPOK_ENDPOINT,
     response: providerPayload,
     rawResponseText: providerRawText,
+    transRef: transRef || null,
+    receiverValidation: receiverValidation || null,
+    sourceApp: sourceApp || null,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
@@ -4941,6 +5249,12 @@ exports.verifyTopUpSlip = onCall(
     if (!Number.isFinite(expectedAmount) || expectedAmount <= 0) {
       throw new HttpsError('invalid-argument', 'กรุณาระบุ expectedAmount ให้ถูกต้อง');
     }
+    if (expectedAmount > TOP_UP_MAX_AMOUNT) {
+      throw new HttpsError(
+        'invalid-argument',
+        `ยอดเติมสูงสุด ${TOP_UP_MAX_AMOUNT.toLocaleString('th-TH')} บาทต่อครั้ง`,
+      );
+    }
     if (!storagePath) {
       throw new HttpsError('invalid-argument', 'กรุณาระบุ storagePath');
     }
@@ -4950,6 +5264,8 @@ exports.verifyTopUpSlip = onCall(
     if (storageBucket && !ALLOWED_TOPUP_STORAGE_BUCKETS.has(storageBucket)) {
       throw new HttpsError('invalid-argument', 'ไม่รองรับ bucket ที่ระบุ');
     }
+
+    await consumeTopUpDailyVerificationAttempt(uid);
 
     const topUpRef = db
       .collection(SHOP_TOPUP_SLIPS_COLLECTION)
@@ -4970,6 +5286,22 @@ exports.verifyTopUpSlip = onCall(
     }, { merge: true });
 
     const paymentCollectionSettings = await getPaymentCollectionSettings();
+    const expectedPromptPayId = normalizeDigits(
+      String(request.data?.expectedPromptPayId || '').trim(),
+    );
+    const slipValidationSettings =
+      expectedPromptPayId.length === 13 || isPromptPayPhoneDigits(expectedPromptPayId)
+        ? normalizePaymentCollectionSettings({
+            ...paymentCollectionSettings,
+            promptPayNationalIdOrTaxId:
+              expectedPromptPayId.length === 13
+                ? expectedPromptPayId
+                : paymentCollectionSettings.promptPayNationalIdOrTaxId,
+            promptPayPhoneNumber: isPromptPayPhoneDigits(expectedPromptPayId)
+              ? expectedPromptPayId
+              : paymentCollectionSettings.promptPayPhoneNumber,
+          })
+        : paymentCollectionSettings;
     const bucket = storageBucket ? admin.storage().bucket(storageBucket) : admin.storage().bucket();
     const file = bucket.file(storagePath);
     const [exists] = await file.exists();
@@ -4988,6 +5320,8 @@ exports.verifyTopUpSlip = onCall(
     let providerPayload = null;
     let providerRawText = '';
     let verifiedSlipAmount = null;
+    let verifiedTransRef = '';
+    let receiverValidation = null;
 
     try {
       const [buffer] = await file.download();
@@ -5023,9 +5357,27 @@ exports.verifyTopUpSlip = onCall(
       const dataSucceeded = providerPayload?.data?.success === true;
       verifiedSlipAmount = parseNumber(providerPayload?.data?.amount);
       const hasValidAmount = Number.isFinite(verifiedSlipAmount) && verifiedSlipAmount > 0;
-      const receiverValidation = validateSlipReceiver(providerPayload, paymentCollectionSettings);
+      receiverValidation = validateSlipReceiver(providerPayload, slipValidationSettings, {
+        relaxNameFallback: false,
+        scanAllReceiverFields: true,
+      });
       const hasMatchingReceiver = receiverValidation.matched;
       const hasMatchingAmount = amountsMatch(verifiedSlipAmount, expectedAmount);
+      const transRef = String(providerPayload?.data?.transRef || '').trim();
+      verifiedTransRef = transRef;
+
+      logger.info('verifyTopUpSlip evaluated slip', {
+        paymentGroupId,
+        uid,
+        rawCode,
+        requestSucceeded,
+        dataSucceeded,
+        hasValidAmount,
+        hasMatchingAmount,
+        hasMatchingReceiver,
+        transRef,
+        receiverValidation,
+      });
 
       if (rawCode === 1012) {
         verificationStatus = 'failed';
@@ -5038,20 +5390,14 @@ exports.verifyTopUpSlip = onCall(
         slipResponse.ok &&
         requestSucceeded &&
         dataSucceeded &&
+        hasValidAmount &&
+        hasMatchingAmount &&
         hasMatchingReceiver &&
-        hasValidAmount
+        transRef.length > 0
       ) {
         verificationStatus = 'verified';
-        if (hasMatchingAmount) {
-          verificationMessage = 'ตรวจสอบสลิปสำเร็จ เติมเครดิตเรียบร้อย';
-        } else if (verifiedSlipAmount < expectedAmount) {
-          const remaining = expectedAmount - verifiedSlipAmount;
-          verificationMessage = `ตรวจสอบสลิปสำเร็จ แต่ยอดจ่ายไม่ครบ (ขาด ${remaining.toFixed(2)} บาท) เติมเครดิตตามยอดที่จ่ายแล้ว`;
-        } else {
-          const overpaid = verifiedSlipAmount - expectedAmount;
-          verificationMessage = `ตรวจสอบสลิปสำเร็จ แต่ยอดจ่ายเกิน (เกิน ${overpaid.toFixed(2)} บาท) เติมเครดิตตามยอดที่จ่ายแล้ว`;
-        }
-      } else if (slipResponse.ok && requestSucceeded && dataSucceeded && !hasMatchingReceiver) {
+        verificationMessage = 'ตรวจสอบสลิปสำเร็จ เติมเครดิตเรียบร้อย';
+      } else if (slipResponse.ok && hasValidAmount && hasMatchingAmount && !hasMatchingReceiver) {
         verificationStatus = 'failed';
         providerPayload = {
           ...(providerPayload && typeof providerPayload === 'object' ? providerPayload : {}),
@@ -5059,8 +5405,8 @@ exports.verifyTopUpSlip = onCall(
           data: {
             ...(providerPayload?.data && typeof providerPayload.data === 'object' ? providerPayload.data : {}),
             receiverValidation,
-            expectedRecipientDisplayName: paymentCollectionSettings.recipientDisplayName,
-            expectedReceiverTargets: buildExpectedReceiverTargets(paymentCollectionSettings),
+            expectedRecipientDisplayName: slipValidationSettings.recipientDisplayName,
+            expectedReceiverTargets: buildExpectedReceiverTargets(slipValidationSettings),
             message: providerPayload?.data?.message || 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
           },
           message: providerPayload?.message || 'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
@@ -5069,6 +5415,22 @@ exports.verifyTopUpSlip = onCall(
           verificationStatus,
           providerPayload,
           'บัญชีผู้รับในสลิปไม่ตรงกับบัญชีร้าน',
+        );
+      } else if (
+        slipResponse.ok &&
+        hasValidAmount &&
+        hasMatchingAmount &&
+        hasMatchingReceiver &&
+        transRef.length === 0
+      ) {
+        verificationStatus = 'failed';
+        verificationMessage = 'ไม่พบเลขอ้างอิงธุรกรรมในสลิป กรุณาแนบสลิปใหม่';
+      } else if (slipResponse.ok && hasValidAmount && hasMatchingAmount && !dataSucceeded) {
+        verificationStatus = 'failed';
+        verificationMessage = buildSlipVerificationMessage(
+          verificationStatus,
+          providerPayload,
+          'สลิปไม่ผ่านการตรวจสอบจากธนาคาร',
         );
       } else {
         verificationStatus = 'failed';
@@ -5110,6 +5472,9 @@ exports.verifyTopUpSlip = onCall(
       responseCode,
       providerPayload,
       providerRawText,
+      transRef: verifiedTransRef || null,
+      receiverValidation,
+      sourceApp,
     });
 
     const creditedAmount = Number.isFinite(verifiedSlipAmount) ? verifiedSlipAmount : 0;
@@ -5146,37 +5511,102 @@ exports.verifyTopUpSlip = onCall(
 
     const creditDocId = `slipok_topup_${slipOkFeedbackId}`;
     const creditRef = db.collection('credits').doc(creditDocId);
+    const transRefForLock = String(verifiedTransRef || '').trim();
 
-    await db.runTransaction(async (tx) => {
-      const existing = await tx.get(creditRef);
-      if (!existing.exists) {
-        tx.set(creditRef, {
+    if (!transRefForLock) {
+      await topUpRef.set({
+        ...baseTopUpUpdate,
+        status: 'failed',
+        message: 'ไม่พบเลขอ้างอิงธุรกรรมในสลิป กรุณาแนบสลิปใหม่',
+      }, { merge: true });
+      return {
+        success: false,
+        status: 'failed',
+        message: 'ไม่พบเลขอ้างอิงธุรกรรมในสลิป กรุณาแนบสลิปใหม่',
+        expectedAmount,
+        verifiedAmount: creditedAmount,
+        remainingAmount,
+        overpaidAmount,
+        slipFeedbackId: slipOkFeedbackId,
+        paymentGroupId,
+      };
+    }
+
+    try {
+      await db.runTransaction(async (tx) => {
+        const transRefRef = db.collection(SLIP_TRANS_REF_COLLECTION).doc(transRefForLock);
+        const transRefSnap = await tx.get(transRefRef);
+        if (transRefSnap.exists) {
+          const duplicateError = new Error('SLIP_TRANS_REF_DUPLICATE');
+          duplicateError.code = 'SLIP_TRANS_REF_DUPLICATE';
+          throw duplicateError;
+        }
+
+        const existing = await tx.get(creditRef);
+        if (!existing.exists) {
+          tx.set(creditRef, {
+            uid,
+            amount: creditedAmount,
+            timestamp: FieldValue.serverTimestamp(),
+            provider: 'slipok',
+            providerLabel: 'Slip OK',
+            status: 'verified',
+            type: 'top_up',
+            creditedByCloudFunction: true,
+            slipFeedbackId: slipOkFeedbackId,
+            paymentGroupId,
+            storagePath,
+            expectedAmount,
+            verifiedAmount: creditedAmount,
+            remainingAmount,
+            overpaidAmount,
+            sourceApp,
+            transRef: transRefForLock,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+        tx.set(transRefRef, {
+          transRef: transRefForLock,
           uid,
-          amount: creditedAmount,
-          timestamp: FieldValue.serverTimestamp(),
-          provider: 'slipok',
-          providerLabel: 'Slip OK',
-          status: 'verified',
-          type: 'top_up',
-          creditedByCloudFunction: true,
-          slipFeedbackId: slipOkFeedbackId,
           paymentGroupId,
+          slipFeedbackId: slipOkFeedbackId,
+          expectedAmount,
+          verifiedAmount: creditedAmount,
+          sourceApp,
           storagePath,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+        tx.set(topUpRef, {
+          ...baseTopUpUpdate,
+          status: 'verified',
+          creditId: creditDocId,
+          transRef: transRefForLock,
+        }, { merge: true });
+      });
+    } catch (lockError) {
+      if (lockError?.code === 'SLIP_TRANS_REF_DUPLICATE') {
+        const duplicateMessage = 'สลิปนี้ถูกใช้ตรวจสอบไปแล้ว';
+        await topUpRef.set({
+          ...baseTopUpUpdate,
+          status: 'failed',
+          message: duplicateMessage,
+          transRef: transRefForLock,
+        }, { merge: true });
+        return {
+          success: false,
+          status: 'failed',
+          message: duplicateMessage,
           expectedAmount,
           verifiedAmount: creditedAmount,
           remainingAmount,
           overpaidAmount,
-          sourceApp,
-          createdAt: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp(),
-        }, { merge: true });
+          slipFeedbackId: slipOkFeedbackId,
+          paymentGroupId,
+        };
       }
-      tx.set(topUpRef, {
-        ...baseTopUpUpdate,
-        status: 'verified',
-        creditId: creditDocId,
-      }, { merge: true });
-    });
+      throw lockError;
+    }
 
     try {
       await merchantWallet.syncMerchantWallet(uid);

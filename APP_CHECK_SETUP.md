@@ -10,10 +10,9 @@
 
 ## ขั้นตอนสำหรับเครื่องทดสอบ/Debug
 
-1. **รันด้วย Debug Provider** – เพิ่ม `--dart-define=APP_CHECK_DEBUG=true` ตอน `flutter run` หรือ `flutter build`. ตัวแอปจะใช้ `AndroidProvider.debug` ตามโค้ดใน `lib/main.dart`.
-2. **คัดลอก Debug Token** – เมื่อแอปรัน จะเห็น log `App Check Debug Token: <token>`. (หากไม่ขึ้นให้แตะปุ่มในแอปเพื่อกระตุ้น `FirebaseAppCheck.instance.getToken(true)`.)
-3. **เพิ่ม Token ใน Firebase Console** – เข้า Firebase Console → Build → App Check → เลือกแอป Android → Debug tokens → Add token → วางค่าที่ได้จากข้อ 2.
-4. **รอ 1-2 นาที** แล้วปิด/เปิดแอปใหม่เพื่อให้ token ใหม่ถูกอนุมัติ (ดูว่า log `Could not get App Check token...` หายไป และ Firebase API ไม่ตอบ 403 แล้ว).
+1. **Debug build** – ใช้ `AndroidDebugProvider` พร้อมรหัสคงที่ใน `lib/utils/feature_flags.dart` (`kVan1AppCheckDebugToken`) ไม่เปลี่ยนทุกครั้งที่รัน
+2. **ลงทะเบียน Debug Token ครั้งเดียว** – Firebase Console → Build → App Check → แอป Android `van.merchant` → Debug tokens → Add → วางรหัสจาก log ตอนเปิดแอป (`App Check debug token (register once...)`)
+3. **รอ 1-2 นาที** แล้วปิด/เปิดแอปใหม่ (ดูว่า log `Could not get App Check token...` หายไป และ Firebase API ไม่ตอบ 403)
 
 > หากต้องการปิด App Check ชั่วคราว ให้ไปที่ App Check → Enforcement แล้วสลับเป็น “Off” สำหรับแอปนั้น ๆ (ไม่แนะนำใน production).
 
@@ -51,11 +50,7 @@ App attestation failed (403)
 
 3. **App Check debug token** (สำหรับ emulator/debug build)  
    Firebase Console → Build → App Check → แอป `van.merchant` (Android) → Debug tokens → Add  
-   ดู token จาก logcat:
-   ```
-   Enter this debug secret into the allow list ...: <token>
-   ```
-   ตัวอย่างล่าสุดจาก emulator: `ba6abe3e-c498-457c-99c7-2c6186536316`
+   ใช้รหัสคงที่จาก log: `d1a5b8e3-7f2c-4a6d-9e1b-3c4d5e6f7a82` (หรือค่าใน `kVan1AppCheckDebugToken`)
 
 ### ทด OTP บน emulator (debug build)
 
@@ -70,6 +65,6 @@ App attestation failed (403)
 
 ## สรุป
 
-- Dev/QA → ใช้ Debug provider + ลง token
+- Dev/QA → ใช้ Debug provider + ลง token **ครั้งเดียว** (รหัส pin ในโค้ด)
 - Production → ใช้ Play Integrity และเพิ่ม SHA ทุกตัว (debug, release, CI)
-- อย่าลืมอัปเดต token เมื่อเปลี่ยนอุปกรณ์ หรือ rotate keystore
+- ไม่ต้องอัปเดต token ทุกครั้งที่รัน — เปลี่ยนเมื่อ rotate keystore หรือเปลี่ยน `--dart-define=VAN1_APP_CHECK_DEBUG_TOKEN`

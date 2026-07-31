@@ -73,42 +73,40 @@ void main() {
       }
 
       // พยายามเปิดใช้ App Check แต่ถ้าล้มเหลว/ช้าเกินไป ให้ไปต่อได้
+      final useDebugAppCheck = !kReleaseMode || kAppCheckForceDebug;
       try {
         await FirebaseAppCheck.instance
             .activate(
-              // ถ้ากำหนด APP_CHECK_DEBUG=true จะบังคับใช้ Debug provider
-              androidProvider: kAppCheckForceDebug
-                  ? AndroidProvider.debug
-                  : (kReleaseMode
-                        ? AndroidProvider.playIntegrity
-                        : AndroidProvider.debug),
+              providerAndroid: useDebugAppCheck
+                  ? AndroidDebugProvider(debugToken: kVan1AppCheckDebugToken)
+                  : const AndroidPlayIntegrityProvider(),
+              providerApple: useDebugAppCheck
+                  ? const AppleDebugProvider()
+                  : const AppleDeviceCheckProvider(),
             )
             .timeout(const Duration(seconds: 5)); // กันค้าง
         await FirebaseAppCheck.instance.setTokenAutoRefreshEnabled(true);
 
-        if (kDebugMode || kAppCheckForceDebug) {
-          var loggedAppCheckToken = '';
-          FirebaseAppCheck.instance.onTokenChange.listen((token) {
-            final normalized = token?.trim() ?? '';
-            if (normalized.isEmpty || normalized == loggedAppCheckToken) {
-              return;
-            }
-            loggedAppCheckToken = normalized;
-            debugPrint('App Check Debug Token: $normalized');
-          });
+        if (useDebugAppCheck) {
+          debugPrint(
+            'App Check debug token (register once in Firebase Console): '
+            '$kVan1AppCheckDebugToken',
+          );
         }
 
-        // พยายามดึงโทเคน (ช่วยให้เห็น debug token ใน log ครั้งแรก)
+        // พยายามดึงโทเคน (ช่วยให้ App Check พร้อมก่อน Auth/OTP)
         try {
           await FirebaseAppCheck.instance
               .getToken(true)
               .timeout(const Duration(seconds: 5));
         } catch (e) {
-          debugPrint('Could not get App Check token on startup: $e');
+          if (useDebugAppCheck) {
+            debugPrint('Could not get App Check token on startup: $e');
+          }
         }
       } catch (e) {
         // กลืนทุก error ของ App Check เพื่อให้แอปรันได้ก่อน
-        if (kDebugMode || kAppCheckForceDebug) {
+        if (useDebugAppCheck) {
           debugPrint('App Check activate failed: $e');
         }
       }

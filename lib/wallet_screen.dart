@@ -7,6 +7,7 @@ import 'merchant_pricing_policy.dart';
 import 'services/merchant_wallet_service.dart';
 import 'utils/settlement_payout_support.dart';
 import 'wallet_top_up_dialog.dart';
+import 'wallet_withdraw_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key});
@@ -119,11 +120,9 @@ class _WalletScreenState extends State<WalletScreen> {
     }
   }
 
-  void _onWithdrawPressed(MerchantWalletSnapshot snapshot) {
+  Future<void> _onWithdrawPressed(MerchantWalletSnapshot snapshot) async {
     if (!snapshot.canWithdraw) {
-      _showSnack(
-        'ยอดเครดิตยังถอนไม่ได้จนกว่าจะยกเลิกสัญญาร้าน',
-      );
+      _showSnack('ยังไม่มียอด Omise ที่ถอนได้');
       return;
     }
     if (snapshot.withdrawableCredit <= 0) {
@@ -131,21 +130,22 @@ class _WalletScreenState extends State<WalletScreen> {
       return;
     }
 
-    showDialog<void>(
+    final result = await showDialog<double>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('ถอนเครดิต'),
-        content: Text(
-          'ยอดที่ถอนได้ ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท\n'
-          'กรุณาติดต่อแอดมินเพื่อดำเนินการถอนเงินหลังยกเลิกสัญญาแล้ว',
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('ตกลง'),
-          ),
-        ],
-      ),
+      barrierDismissible: false,
+      builder: (context) => const WalletWithdrawDialog(actorType: 'merchant'),
+    );
+
+    if (!mounted || result == null) {
+      return;
+    }
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      await _refreshWalletSnapshot(uid);
+    }
+    _showSnack(
+      'ส่งคำขอถอน ${result.toStringAsFixed(2)} บาท — กำลังโอนเข้าบัญชี',
     );
   }
 
@@ -233,7 +233,7 @@ class _WalletScreenState extends State<WalletScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'ถอนไม่ได้ ${snapshot.lockedCredit.toStringAsFixed(2)} บาท',
+                    'ล็อกไว้ ${snapshot.lockedCredit.toStringAsFixed(2)} บาท',
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w700,
@@ -241,7 +241,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   ),
                   const SizedBox(height: 4),
                   const Text(
-                    'เครดิตรวมทั้งค่าประกันและยอดที่เติมไว้ '
+                    'เครดิตที่เติมและยอด Omise ที่ยังไม่พร้อมถอน '
                     'จะถอนได้เมื่อยกเลิกสัญญาร้านแล้วเท่านั้น',
                     style: TextStyle(
                       color: _dashboardCream,
@@ -265,7 +265,7 @@ class _WalletScreenState extends State<WalletScreen> {
           ] else ...[
             const SizedBox(height: 12),
             Text(
-              'ถอนได้ ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท',
+              'ถอนได้ทันที (Omise) ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท',
               style: const TextStyle(
                 color: _dashboardCream,
                 fontSize: 14,
@@ -277,7 +277,9 @@ class _WalletScreenState extends State<WalletScreen> {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton(
-              onPressed: () => _onWithdrawPressed(snapshot),
+              onPressed: snapshot.canWithdraw && snapshot.withdrawableCredit > 0
+                  ? () => _onWithdrawPressed(snapshot)
+                  : null,
               style: OutlinedButton.styleFrom(
                 foregroundColor: Colors.white,
                 side: BorderSide(
@@ -287,7 +289,9 @@ class _WalletScreenState extends State<WalletScreen> {
                 ),
               ),
               child: Text(
-                snapshot.canWithdraw ? 'ถอนเงิน' : 'ถอนเงิน (รอการยกเลิกสัญญา)',
+                snapshot.canWithdraw && snapshot.withdrawableCredit > 0
+                    ? 'ถอนเงิน'
+                    : 'ถอนเงิน (ยังไม่มียอด Omise)',
               ),
             ),
           ),
