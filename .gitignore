@@ -43,4 +43,21 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase CLI local cache
+.firebase/
+
+# Release binaries (distribute via Play Console)
+/releases/
+
+# Eclipse / Buildship IDE metadata
+android/.project
+android/.settings/
+**/android/.project
+**/android/.settings/
+
+# Local Gradle build reports
+android/build/reports/
+**/android/build/reports/
+
 node_modules
