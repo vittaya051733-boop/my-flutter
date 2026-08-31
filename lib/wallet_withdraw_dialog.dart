@@ -1,6 +1,7 @@
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:van1/utils/app_check_guard.dart';
 
 class WalletWithdrawDialog extends StatefulWidget {
   const WalletWithdrawDialog({
@@ -15,26 +16,44 @@ class WalletWithdrawDialog extends StatefulWidget {
 }
 
 class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
-  static const double _minWithdrawAmount = 30;
+  static const double _defaultMinWithdrawAmount = 30;
+  static const double _defaultWithdrawFeeBaht = 10;
 
   final TextEditingController _customAmountController = TextEditingController();
 
   bool _loading = true;
   bool _submitting = false;
   double _availableBalance = 0;
+  double _minWithdrawAmount = _defaultMinWithdrawAmount;
+  double _minGrossWithdrawAmount =
+      _defaultMinWithdrawAmount + _defaultWithdrawFeeBaht;
+  double _withdrawFeeBaht = _defaultWithdrawFeeBaht;
   double? _selectedAmount;
   String? _bankLabel;
+  String? _promptPayLabel;
   String? _accountName;
   bool _hasBankProfile = false;
+  bool _hasPromptPayProfile = false;
   String? _loadError;
 
   List<double> get _presets {
     final presets = <double>[100, 500, 1000];
-    if (_availableBalance >= _minWithdrawAmount &&
+    if (_availableBalance >= _minGrossWithdrawAmount &&
         !presets.contains(_availableBalance)) {
       presets.add(_availableBalance);
     }
-    return presets.where((value) => value <= _availableBalance).toList();
+    return presets
+        .where((value) => value <= _availableBalance)
+        .where((value) => value >= _minGrossWithdrawAmount)
+        .toList();
+  }
+
+  double? get _netReceive {
+    final amount = _amount;
+    if (amount == null) {
+      return null;
+    }
+    return (amount - _withdrawFeeBaht).clamp(0, double.infinity);
   }
 
   @override
@@ -59,6 +78,7 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
     });
 
     try {
+      await AppCheckGuard.ensureFinancialReady();
       final result = await _functions
           .httpsCallable('getWithdrawableBalance')
           .call(<String, dynamic>{'actorType': widget.actorType});
@@ -73,9 +93,20 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
       setState(() {
         _availableBalance =
             (data['availableBalance'] as num?)?.toDouble() ?? 0;
+        _minWithdrawAmount =
+            (data['minWithdrawAmount'] as num?)?.toDouble() ??
+                _defaultMinWithdrawAmount;
+        _withdrawFeeBaht =
+            (data['withdrawFeeBaht'] as num?)?.toDouble() ??
+                _defaultWithdrawFeeBaht;
+        _minGrossWithdrawAmount =
+            (data['minGrossWithdrawAmount'] as num?)?.toDouble() ??
+                (_minWithdrawAmount + _withdrawFeeBaht);
         _bankLabel = data['bankLabel']?.toString();
+        _promptPayLabel = data['promptPayLabel']?.toString();
         _accountName = data['accountName']?.toString();
         _hasBankProfile = data['hasBankProfile'] == true;
+        _hasPromptPayProfile = data['hasPromptPayProfile'] == true;
         _loading = false;
       });
     } on FirebaseFunctionsException catch (error) {
@@ -105,7 +136,7 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
   }
 
   void _selectAll() {
-    if (_availableBalance < _minWithdrawAmount) {
+    if (_availableBalance < _minGrossWithdrawAmount) {
       return;
     }
     _selectPreset(_availableBalance);
@@ -131,12 +162,14 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
 
   double? get _amount => _selectedAmount;
 
+  bool get _hasPayoutProfile => _hasBankProfile || _hasPromptPayProfile;
+
   bool get _canSubmit {
     final amount = _amount;
-    if (_submitting || !_hasBankProfile) {
+    if (_submitting || !_hasPayoutProfile) {
       return false;
     }
-    if (amount == null || amount < _minWithdrawAmount) {
+    if (amount == null || amount < _minGrossWithdrawAmount) {
       return false;
     }
     return amount <= _availableBalance + 0.001;
@@ -151,7 +184,9 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
 
     setState(() => _submitting = true);
     try {
-      final result = await _functions.httpsCallable('requestOmiseWithdraw').call(
+      await AppCheckGuard.ensureFinancialReady();
+      final result =
+          await _functions.httpsCallable('requestManualWithdraw').call(
         <String, dynamic>{
           'amount': amount,
           'actorType': widget.actorType,
@@ -190,6 +225,8 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.white,
       title: const Text('ถอนเงิน'),
       content: SizedBox(
         width: double.maxFinite,
@@ -209,33 +246,67 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
                           'ถอนได้ ${_availableBalance.toStringAsFixed(2)} บาท',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
-                        const SizedBox(height: 8),
-                        if (_hasBankProfile) ...[
-                          Text(
-                            'โอนเข้า: $_bankLabel',
-                            style: const TextStyle(fontSize: 13),
+                        const SizedBox(height: 12),
+                        if (_hasPayoutProfile) ...[
+                          const Text(
+                            'ช่องทางรับเงินที่ลงทะเบียน',
+                            style: TextStyle(fontWeight: FontWeight.w600),
                           ),
-                          if (_accountName != null &&
-                              _accountName!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          if (_hasPromptPayProfile &&
+                              _promptPayLabel != null)
+                            Text(
+                              'PromptPay: $_promptPayLabel',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          if (_hasBankProfile && _bankLabel != null) ...[
                             const SizedBox(height: 4),
                             Text(
-                              _accountName!,
+                              'ธนาคาร: $_bankLabel',
                               style: const TextStyle(fontSize: 13),
+                            ),
+                            if (_accountName != null &&
+                                _accountName!.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                _accountName!,
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ],
+                          ],
+                          const SizedBox(height: 8),
+                          const Text(
+                            'แอดมินจะเลือกช่องทางโอน (PromptPay หรือบัญชีธนาคาร) และยืนยันด้วยสลิปภายใน 1–2 วันทำการ',
+                            style: TextStyle(fontSize: 12, color: Colors.black54),
+                          ),
+                          if (!_hasPromptPayProfile) ...[
+                            const SizedBox(height: 8),
+                            const Text(
+                              'ยังไม่มี PromptPay — ไป ตั้งค่า > แก้ไขข้อมูลร้าน เพื่อกรอกเบอร์ที่ผูกกับบัญชีธนาคาร',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFB45309),
+                                height: 1.4,
+                              ),
                             ),
                           ],
                         ] else ...[
                           const Text(
-                            'กรุณาอัปเดตข้อมูลธนาคารในการลงทะเบียนร้านก่อนถอนเงิน',
-                            style: TextStyle(color: Colors.red),
+                            'กรุณาเพิ่ม PromptPay หรือบัญชีธนาคารใน ตั้งค่า > แก้ไขข้อมูลร้าน',
+                            style: TextStyle(color: Colors.red, height: 1.4),
                           ),
                         ],
                         const SizedBox(height: 8),
-                        const Text(
-                          'ยอดโอนสุทธิอาจหักค่าธรรมเนียม Omise',
-                          style: TextStyle(fontSize: 12, color: Colors.black54),
+                        Text(
+                          'ค่าบริการถอน ${_withdrawFeeBaht.toStringAsFixed(0)} บาท/ครั้ง (หักจากยอดที่ขอถอน)',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.black54,
+                            height: 1.4,
+                          ),
                         ),
                         const SizedBox(height: 16),
-                        if (_availableBalance >= _minWithdrawAmount) ...[
+                        if (_availableBalance >= _minGrossWithdrawAmount) ...[
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
@@ -271,16 +342,29 @@ class _WalletWithdrawDialogState extends State<WalletWithdrawDialog> {
                               ),
                             ],
                             decoration: InputDecoration(
-                              labelText: 'ระบุจำนวนเงิน (ขั้นต่ำ $_minWithdrawAmount บาท)',
+                              labelText:
+                                  'ระบุจำนวนเงินจากกระเป๋า (ขั้นต่ำ ${_minGrossWithdrawAmount.toStringAsFixed(0)} บาท)',
                               border: const OutlineInputBorder(),
+                              filled: true,
+                              fillColor: Colors.white,
                             ),
                             onChanged: _onCustomAmountChanged,
                           ),
+                          if (_netReceive != null && _withdrawFeeBaht > 0) ...[
+                            const SizedBox(height: 10),
+                            Text(
+                              'ได้รับ ${_netReceive!.toStringAsFixed(2)} บาท (หลังหักค่าบริการ ${_withdrawFeeBaht.toStringAsFixed(0)} บาท)',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF1565C0),
+                              ),
+                            ),
+                          ],
                         ] else
                           Text(
                             _availableBalance <= 0
                                 ? 'ไม่มียอดที่ถอนได้'
-                                : 'ยอดถอนขั้นต่ำ $_minWithdrawAmount บาท',
+                                : 'ยอดถอนขั้นต่ำ ${_minWithdrawAmount.toStringAsFixed(0)} บาท (หลังหักค่าบริการ) — ต้องมีในกระเป๋าอย่างน้อย ${_minGrossWithdrawAmount.toStringAsFixed(0)} บาท',
                           ),
                       ],
                     ),

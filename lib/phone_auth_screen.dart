@@ -6,6 +6,8 @@ import 'navigation_helper.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'services/notification_service.dart';
 import 'services/phone_registration_otp_service.dart';
+import 'services/security_pin_service.dart';
+import 'services/app_unlock_session.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
 
@@ -27,6 +29,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
   bool _isOtpSent = false;
 
   String? _passwordForRegistration;
+  String? _securityPinForRegistration;
   String? _serviceTypeForRegistration;
   Map<String, dynamic>? _branchAssignmentForRegistration;
 
@@ -42,6 +45,7 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     if (args is Map) {
       phoneNumber = args['phone'] as String?;
       _passwordForRegistration = args['password'] as String?;
+      _securityPinForRegistration = args['securityPin'] as String?;
       _serviceTypeForRegistration = args['serviceType'] as String?;
       final branchAssignment = args['branchAssignment'];
       if (branchAssignment is Map) {
@@ -218,6 +222,14 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       } catch (e) {
         debugPrint('Failed to sync FCM token after phone auth: $e');
       }
+
+      final pin = _securityPinForRegistration?.trim();
+      if (pin != null &&
+          SecurityPinService.instance.isValidPinFormat(pin)) {
+        await SecurityPinService.instance.setPin(firebaseUser.uid, pin);
+        AppUnlockSession.unlock();
+      }
+      _securityPinForRegistration = null;
 
       if (_serviceTypeForRegistration != null) {
         await FirebaseFirestore.instance

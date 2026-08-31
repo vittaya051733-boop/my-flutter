@@ -21,6 +21,9 @@ class OrderItem {
   final double price;
   final String? imageUrl;
   final String? toppings;
+  final String? variantId;
+  final String? selectedSize;
+  final String? selectedColor;
 
   OrderItem({
     required this.productId,
@@ -29,6 +32,9 @@ class OrderItem {
     required this.price,
     this.imageUrl,
     this.toppings,
+    this.variantId,
+    this.selectedSize,
+    this.selectedColor,
   });
 
   Map<String, dynamic> toMap() {
@@ -53,6 +59,9 @@ class OrderItem {
       toppings: selectedToppings.isNotEmpty
           ? selectedToppings.join(', ')
           : _readToppingsText(map['toppings']),
+      variantId: (map['variantId'] as String?)?.trim(),
+      selectedSize: (map['selectedSize'] as String?)?.trim(),
+      selectedColor: (map['selectedColor'] as String?)?.trim(),
     );
   }
 

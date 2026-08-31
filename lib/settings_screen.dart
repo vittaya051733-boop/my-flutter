@@ -16,6 +16,7 @@ import 'legal_document_screen.dart';
 import 'low_stock_products_screen.dart';
 import 'merchant_reviews_screen.dart';
 import 'services/admin_support_config.dart';
+import 'services/security_pin_service.dart';
 import 'services/biometric_auth_service.dart';
 import 'services/shop_operations_service.dart';
 import 'widgets/cached_app_image.dart';
@@ -178,7 +179,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadBiometricLoginSettings() async {
     final canUseBiometrics = await _biometricAuthService.canUseBiometrics();
-    final enabled = await _biometricAuthService.isLoginEnabled();
+    final enabled = await SecurityPinService.instance.isBiometricUnlockEnabled();
     if (!mounted) return;
     setState(() {
       _biometricLoginAvailable = canUseBiometrics;
@@ -197,11 +198,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (value && uid != null) {
+      final hasPin = await SecurityPinService.instance.hasPin(uid);
+      if (!hasPin) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('กรุณาตั้งรหัส PIN 6 หลักก่อน')),
+        );
+        return;
+      }
+    }
+
     setState(() => _biometricLoginLoading = true);
     try {
       if (value) {
         final authenticated = await _biometricAuthService.authenticate(
-          reason: 'ยืนยันลายนิ้วมือเพื่อเปิดใช้การเข้าสู่ระบบ',
+          reason: 'ยืนยันลายนิ้วมือเพื่อปลดล็อกแอป',
         );
         if (!authenticated) {
           if (!mounted) return;
@@ -210,19 +222,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           );
           return;
         }
-      } else {
-        await _biometricAuthService.clearSavedLoginCredentials();
       }
 
-      await _biometricAuthService.setLoginEnabled(value);
+      await SecurityPinService.instance.setBiometricUnlockEnabled(value);
       if (!mounted) return;
       setState(() => _biometricLoginEnabled = value);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             value
-                ? 'เปิดใช้ลายนิ้วมือสำหรับเข้าสู่ระบบแล้ว'
-                : 'ปิดการเข้าสู่ระบบด้วยลายนิ้วมือแล้ว',
+                ? 'เปิดปลดล็อกด้วยลายนิ้วมือก่อนเข้าแอปแล้ว'
+                : 'ปิดปลดล็อกด้วยลายนิ้วมือแล้ว',
           ),
         ),
       );
@@ -1032,12 +1042,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onChanged: _biometricLoginLoading
                               ? null
                               : _toggleBiometricLogin,
-                          title: const Text('เข้าสู่ระบบด้วยลายนิ้วมือ'),
+                          title: const Text('ปลดล็อกด้วยลายนิ้วมือ'),
                           subtitle: Text(
                             _biometricLoginLoading
                                 ? 'กำลังตรวจสอบลายนิ้วมือของเครื่อง...'
                                 : _biometricLoginAvailable
-                                ? 'เมื่อเปิดไว้ หน้าเข้าสู่ระบบจะแสดงปุ่มสแกนลายนิ้วมือ'
+                                ? 'ใช้ก่อนเข้าแอป (หลัง login แล้ว)'
                                 : 'เครื่องนี้ยังไม่มีลายนิ้วมือ หรือยังไม่ได้ตั้งค่าในระบบ',
                           ),
                         ),

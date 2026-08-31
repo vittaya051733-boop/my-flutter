@@ -13,6 +13,8 @@ class ShopOperationsSettings {
     required this.operatingHours,
     this.pauseUntil,
     this.updatedAt,
+    this.penaltyBlocked = false,
+    this.penaltyBlockReason,
   });
 
   final bool autoAcceptOrders;
@@ -24,6 +26,8 @@ class ShopOperationsSettings {
   final OperatingHours operatingHours;
   final DateTime? pauseUntil;
   final DateTime? updatedAt;
+  final bool penaltyBlocked;
+  final String? penaltyBlockReason;
 
   static ShopOperationsSettings defaults() {
     return ShopOperationsSettings(
@@ -62,6 +66,8 @@ class ShopOperationsSettings {
       operatingHours: OperatingHours.fromMap(map['operatingHours'] as Map<String, dynamic>?),
       pauseUntil: (map['pauseUntil'] as Timestamp?)?.toDate(),
       updatedAt: (map['updatedAt'] as Timestamp?)?.toDate(),
+      penaltyBlocked: map['penaltyBlocked'] as bool? ?? false,
+      penaltyBlockReason: map['penaltyBlockReason'] as String?,
     );
   }
 
@@ -75,6 +81,8 @@ class ShopOperationsSettings {
     OperatingHours? operatingHours,
     DateTime? pauseUntil,
     DateTime? updatedAt,
+    bool? penaltyBlocked,
+    String? penaltyBlockReason,
   }) {
     return ShopOperationsSettings(
       autoAcceptOrders: autoAcceptOrders ?? this.autoAcceptOrders,
@@ -87,6 +95,8 @@ class ShopOperationsSettings {
       operatingHours: operatingHours ?? this.operatingHours,
       pauseUntil: pauseUntil ?? this.pauseUntil,
       updatedAt: updatedAt ?? this.updatedAt,
+      penaltyBlocked: penaltyBlocked ?? this.penaltyBlocked,
+      penaltyBlockReason: penaltyBlockReason ?? this.penaltyBlockReason,
     );
   }
 

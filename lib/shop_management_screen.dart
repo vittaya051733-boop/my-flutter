@@ -215,14 +215,13 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       return false;
     }
 
-    final topUpOk = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
-        fullscreenDialog: true,
-        builder: (_) => const WalletTopUpDialog(
-          initialAmount: MerchantSecurityDepositService.requiredAmountBaht,
-          minimumAmount: MerchantSecurityDepositService.requiredAmountBaht,
-          isSecurityDeposit: true,
-        ),
+    final topUpOk = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const WalletTopUpDialog(
+        initialAmount: MerchantSecurityDepositService.requiredAmountBaht,
+        minimumAmount: MerchantSecurityDepositService.requiredAmountBaht,
+        isSecurityDeposit: true,
       ),
     );
     if (topUpOk != true || !mounted) {

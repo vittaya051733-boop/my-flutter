@@ -1,13 +1,16 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'merchant_pricing_policy.dart';
 import 'services/merchant_wallet_service.dart';
+import 'utils/app_check_guard.dart';
 import 'utils/settlement_payout_support.dart';
 import 'wallet_top_up_dialog.dart';
 import 'wallet_withdraw_dialog.dart';
+import 'widgets/security_pin_verify_dialog.dart';
 
 class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key});
@@ -24,6 +27,7 @@ class _WalletScreenState extends State<WalletScreen> {
   static const Color _dashboardText = Color(0xFF2D2D2D);
 
   double _currentCredit = 0;
+  double _withdrawableBalance = 0;
   String? _uid;
   MerchantWalletSnapshot? _walletSnapshot;
 
@@ -77,6 +81,43 @@ class _WalletScreenState extends State<WalletScreen> {
     return MerchantPricingPolicy.readMerchantProductRevenue(data);
   }
 
+  Future<void> _refreshWithdrawableBalance() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return;
+    }
+
+    try {
+      await AppCheckGuard.ensureFinancialReady();
+      final result = await FirebaseFunctions.instanceFor(
+        region: 'asia-southeast1',
+      ).httpsCallable('getWithdrawableBalance').call(<String, dynamic>{
+        'actorType': 'merchant',
+      });
+      final data = result.data is Map
+          ? Map<String, dynamic>.from(result.data as Map)
+          : const <String, dynamic>{};
+      final withdrawable = (data['availableBalance'] as num?)?.toDouble() ?? 0;
+      final creditTotal =
+          (data['creditTotal'] as num?)?.toDouble() ?? withdrawable;
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _withdrawableBalance = withdrawable;
+        _currentCredit = creditTotal;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _withdrawableBalance = _currentCredit;
+      });
+    }
+  }
+
   Future<void> _fetchCurrentCredit() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -90,6 +131,7 @@ class _WalletScreenState extends State<WalletScreen> {
       _walletSnapshot = snapshot;
       _currentCredit = snapshot.totalCredit;
     });
+    await _refreshWithdrawableBalance();
   }
 
   Future<void> _refreshWalletSnapshot(String uid) async {
@@ -99,14 +141,14 @@ class _WalletScreenState extends State<WalletScreen> {
       _walletSnapshot = snapshot;
       _currentCredit = snapshot.totalCredit;
     });
+    await _refreshWithdrawableBalance();
   }
 
   Future<void> _promptTopUpAmount() async {
-    final result = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
-        fullscreenDialog: true,
-        builder: (context) => const WalletTopUpDialog(),
-      ),
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const WalletTopUpDialog(),
     );
 
     if (!mounted) return;
@@ -120,13 +162,18 @@ class _WalletScreenState extends State<WalletScreen> {
     }
   }
 
-  Future<void> _onWithdrawPressed(MerchantWalletSnapshot snapshot) async {
-    if (!snapshot.canWithdraw) {
-      _showSnack('ยังไม่มียอด Omise ที่ถอนได้');
+  Future<void> _requestWithdraw() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showSnack('กรุณาเข้าสู่ระบบก่อน');
       return;
     }
-    if (snapshot.withdrawableCredit <= 0) {
-      _showSnack('ไม่มียอดที่ถอนได้');
+
+    final verified = await verifySecurityPinForSensitiveAction(
+      context,
+      title: 'ยืนยันก่อนถอนเงิน',
+    );
+    if (!verified || !mounted) {
       return;
     }
 
@@ -140,10 +187,8 @@ class _WalletScreenState extends State<WalletScreen> {
       return;
     }
 
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid != null) {
-      await _refreshWalletSnapshot(uid);
-    }
+    final uid = user.uid;
+    await _refreshWalletSnapshot(uid);
     _showSnack(
       'ส่งคำขอถอน ${result.toStringAsFixed(2)} บาท — กำลังโอนเข้าบัญชี',
     );
@@ -220,7 +265,16 @@ class _WalletScreenState extends State<WalletScreen> {
               color: Colors.white,
             ),
           ),
-          if (!snapshot.canWithdraw) ...[
+          if (_withdrawableBalance > 0 &&
+              (_withdrawableBalance - snapshot.totalCredit).abs() > 0.01) ...[
+            const SizedBox(height: 4),
+            Text(
+              'ถอนได้ ${_withdrawableBalance.toStringAsFixed(2)} บาท',
+              style: const TextStyle(color: _dashboardCream, fontSize: 13),
+            ),
+          ],
+          if (snapshot.lockedCredit > 0 ||
+              snapshot.securityDepositAmount > 0) ...[
             const SizedBox(height: 12),
             Container(
               width: double.infinity,
@@ -232,25 +286,27 @@ class _WalletScreenState extends State<WalletScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'ล็อกไว้ ${snapshot.lockedCredit.toStringAsFixed(2)} บาท',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
+                  if (snapshot.lockedCredit > 0)
+                    Text(
+                      'ล็อกไว้ ${snapshot.lockedCredit.toStringAsFixed(2)} บาท',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    'เครดิตที่เติมและยอด Omise ที่ยังไม่พร้อมถอน '
-                    'จะถอนได้เมื่อยกเลิกสัญญาร้านแล้วเท่านั้น',
-                    style: TextStyle(
-                      color: _dashboardCream,
-                      fontSize: 12,
-                      height: 1.4,
-                    ),
-                  ),
-                  if (snapshot.securityDepositAmount > 0) ...[
+                  if (snapshot.lockedCredit > 0) ...[
                     const SizedBox(height: 4),
+                    const Text(
+                      'ยอดที่ล็อกไว้ใช้สำหรับค่าบริการและค่าประกันในระบบ',
+                      style: TextStyle(
+                        color: _dashboardCream,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  if (snapshot.securityDepositAmount > 0) ...[
+                    if (snapshot.lockedCredit > 0) const SizedBox(height: 4),
                     Text(
                       'ค่าประกัน ${snapshot.securityDepositAmount.toStringAsFixed(0)} บาท',
                       style: const TextStyle(
@@ -262,39 +318,7 @@ class _WalletScreenState extends State<WalletScreen> {
                 ],
               ),
             ),
-          ] else ...[
-            const SizedBox(height: 12),
-            Text(
-              'ถอนได้ทันที (Omise) ${snapshot.withdrawableCredit.toStringAsFixed(2)} บาท',
-              style: const TextStyle(
-                color: _dashboardCream,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
           ],
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              onPressed: snapshot.canWithdraw && snapshot.withdrawableCredit > 0
-                  ? () => _onWithdrawPressed(snapshot)
-                  : null,
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: BorderSide(
-                  color: snapshot.canWithdraw && snapshot.withdrawableCredit > 0
-                      ? Colors.white
-                      : Colors.white38,
-                ),
-              ),
-              child: Text(
-                snapshot.canWithdraw && snapshot.withdrawableCredit > 0
-                    ? 'ถอนเงิน'
-                    : 'ถอนเงิน (ยังไม่มียอด Omise)',
-              ),
-            ),
-          ),
           const SizedBox(height: 8),
           Row(
             children: [
@@ -523,22 +547,20 @@ class _WalletScreenState extends State<WalletScreen> {
               final data = doc.data();
               final status = data['status']?.toString().trim();
               if (status != 'delivered') continue;
+              if (!shouldShowShopOrderRevenueInWallet(data)) continue;
               final productRevenue = _readProductRevenue(data);
               if (productRevenue <= 0) continue;
-              final payoutInfo = readShopPayoutInfo(data);
-              final payoutStatus = payoutInfo?.displayStatus ?? 'รอชำระ';
               final orderCode = data['orderCode']?.toString().trim();
               items.add(
                 _WalletHistoryItem(
                   title: 'รายได้ค่าสินค้า',
                   subtitle: orderCode == null || orderCode.isEmpty
-                      ? 'ออเดอร์ส่งสำเร็จ • $payoutStatus'
-                      : 'ออเดอร์: $orderCode • $payoutStatus',
+                      ? 'ออเดอร์ส่งสำเร็จ'
+                      : 'ออเดอร์: $orderCode',
                   amount: productRevenue,
-                  happenedAt: _orderDeliveredAt(data),
+                  happenedAt: shopOrderRevenueWalletTimestamp(data),
                   icon: Icons.shopping_bag_outlined,
                   color: _dashboardOrangeMid,
-                  payoutStatus: payoutStatus,
                 ),
               );
             }
@@ -588,19 +610,6 @@ class _WalletScreenState extends State<WalletScreen> {
                           color: Colors.black54,
                         ),
                       ),
-                      if (item.payoutStatus != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          item.payoutStatus!,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: item.payoutStatus == 'จ่ายแล้ว'
-                                ? Colors.green.shade700
-                                : Colors.orange.shade800,
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 );
@@ -648,7 +657,23 @@ class _WalletScreenState extends State<WalletScreen> {
           ),
         ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
+            SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.money_off),
+                    label: const Text('ถอนเงิน'),
+                    style: _walletActionButtonStyle(),
+                    onPressed: _requestWithdraw,
+                  ),
+                ),
+              ),
+            ),
             Expanded(
               child: SingleChildScrollView(
                 child: Padding(
@@ -725,6 +750,16 @@ class _WalletScreenState extends State<WalletScreen> {
     );
   }
 
+  ButtonStyle _walletActionButtonStyle() {
+    return ElevatedButton.styleFrom(
+      backgroundColor: Colors.white.withValues(alpha: 0.18),
+      foregroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      elevation: 0,
+      side: BorderSide(color: Colors.white.withValues(alpha: 0.22)),
+    );
+  }
 }
 
 class _WalletHistoryItem {
@@ -735,7 +770,6 @@ class _WalletHistoryItem {
     required this.color,
     this.subtitle,
     this.happenedAt,
-    this.payoutStatus,
   });
 
   final String title;
@@ -744,5 +778,4 @@ class _WalletHistoryItem {
   final DateTime? happenedAt;
   final IconData icon;
   final Color color;
-  final String? payoutStatus;
 }

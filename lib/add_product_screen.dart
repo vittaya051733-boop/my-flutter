@@ -19,6 +19,8 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:http/http.dart' as http;
 import '../models/product_model.dart'; // Import the model
+import '../models/product_variant.dart';
+import 'product_variant_setup_screen.dart';
 import 'utils/app_colors.dart';
 import 'utils/shop_profile_resolver.dart';
 import 'storage_helper.dart';
@@ -197,6 +199,10 @@ class AddProductScreenState extends State<AddProductScreen>
   bool _isGeneratingAiDescription = false;
   bool _isAnalyzingProductWithAi = false;
   bool _isCompressingVideo = false;
+  bool _hasVariants = false;
+  List<ProductVariantDraft> _variantDrafts = <ProductVariantDraft>[];
+  List<ProductVariant> _productVariants = <ProductVariant>[];
+
   bool _hasUsedAiDescriptionForProduct = false;
   bool _hasUsedAiProductAnalysisForProduct = false;
   String? _aiTaxAnalysisReason;
@@ -437,6 +443,7 @@ class AddProductScreenState extends State<AddProductScreen>
       _existingVideoThumbnailUrl = p.videoThumbnailUrl;
       _prefetchExistingMedia();
       unawaited(_hydrateWeightFromFirestore());
+      unawaited(_loadVariantsForEdit());
     } else if (_draftPersistenceEnabled) {
       WidgetsBinding.instance.addObserver(this);
       _draftSessionFuture = _initializeDraftSession();
@@ -691,6 +698,18 @@ class AddProductScreenState extends State<AddProductScreen>
     _aiRequiresAdminReview = draft['aiRequiresAdminReview'] is bool
         ? draft['aiRequiresAdminReview'] as bool
         : null;
+    _hasVariants = draft['hasVariants'] == true;
+    final variantDraftsRaw = draft['variantDrafts'];
+    if (variantDraftsRaw is List) {
+      _variantDrafts = variantDraftsRaw
+          .whereType<Map>()
+          .map(
+            (entry) => ProductVariantDraft.fromJson(
+              Map<String, dynamic>.from(entry),
+            ),
+          )
+          .toList(growable: true);
+    }
     final reviewLabels = draft['aiReviewReasonLabels'];
     if (reviewLabels is List) {
       _aiReviewReasonLabels = reviewLabels
@@ -846,6 +865,9 @@ class AddProductScreenState extends State<AddProductScreen>
       'aiRequiresAdminReview': _aiRequiresAdminReview,
       if (_aiReviewReasonLabels.isNotEmpty)
         'aiReviewReasonLabels': _aiReviewReasonLabels,
+      'hasVariants': _hasVariants,
+      if (_variantDrafts.isNotEmpty)
+        'variantDrafts': _variantDrafts.map((d) => d.toJson()).toList(),
       'existingImageUrls': _existingImageUrls,
       'existingThumbnailUrls': _existingThumbnailUrls,
       'existingVideoUrl': _existingVideoUrl,
@@ -1266,6 +1288,147 @@ class AddProductScreenState extends State<AddProductScreen>
     } catch (error) {
       debugPrint('Failed to hydrate product weight: $error');
     }
+  }
+
+  Future<void> _loadVariantsForEdit() async {
+    final productId = widget.productToEdit?.id?.trim();
+    if (productId == null || productId.isEmpty) {
+      return;
+    }
+    try {
+      final data = await _loadExistingProductData();
+      if (!mounted) {
+        return;
+      }
+      final variants = ProductVariantSupport.parseList(data['variants']);
+      setState(() {
+        _hasVariants = ProductVariantSupport.productHasVariants(data);
+        _productVariants = variants;
+        if (_hasVariants && variants.isNotEmpty) {
+          _variantDrafts = ProductVariantSupport.draftsFromVariants(
+            variants,
+            imageUrls: _existingImageUrls,
+          );
+        }
+      });
+    } catch (error) {
+      debugPrint('Failed to load product variants: $error');
+    }
+  }
+
+  bool _validateBasicProductFields({required bool requirePriceStock}) {
+    if (_isEditingExistingProduct) {
+      if (_existingImageUrls.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('สินค้านี้ไม่มีรูปภาพ — ไม่สามารถบันทึกได้'),
+          ),
+        );
+        return false;
+      }
+    } else if (_currentImageCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')),
+      );
+      return false;
+    }
+
+    if (_nameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกชื่อสินค้า')),
+      );
+      return false;
+    }
+
+    if (_weightController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกน้ำหนักสินค้า')),
+      );
+      return false;
+    }
+
+    if (requirePriceStock) {
+      if (_priceController.text.trim().isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('กรุณากรอกราคา')),
+        );
+        return false;
+      }
+      if (_stockController.text.trim().isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')),
+        );
+        return false;
+      }
+    }
+
+    if ((_selectedProductCategory ?? '').trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('กรุณากรอกข้อมูลภาษีสินค้าและเลือกประเภทสินค้า'),
+        ),
+      );
+      return false;
+    }
+
+    final preparationTimeMinutes = int.tryParse(
+      _preparationTimeController.text.trim(),
+    );
+    if (preparationTimeMinutes == null ||
+        preparationTimeMinutes <= 0 ||
+        preparationTimeMinutes > 240) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณากรอกเวลาเตรียมสินค้า 1-240 นาที')),
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<void> _openVariantSetupFlow({required bool saveAfterReturn}) async {
+    if (!_validateBasicProductFields(requirePriceStock: false)) {
+      return;
+    }
+
+    final drafts = await Navigator.of(context).push<List<ProductVariantDraft>>(
+      MaterialPageRoute<List<ProductVariantDraft>>(
+        builder: (_) => ProductVariantSetupScreen(
+          productName: _nameController.text.trim(),
+          existingImageUrls: List<String>.from(_existingImageUrls),
+          existingThumbnailUrls: _existingThumbnailUrls.isNotEmpty
+              ? List<String>.from(_existingThumbnailUrls)
+              : List<String>.from(_existingImageUrls),
+          localImageFiles: List<XFile>.from(_newImageFiles),
+          initialDrafts: _variantDrafts.isNotEmpty
+              ? List<ProductVariantDraft>.from(_variantDrafts)
+              : <ProductVariantDraft>[ProductVariantDraft(imageIndex: 0)],
+          isEditMode: widget.productToEdit != null,
+        ),
+      ),
+    );
+
+    if (!mounted || drafts == null) {
+      return;
+    }
+
+    setState(() {
+      _hasVariants = true;
+      _variantDrafts = drafts;
+    });
+    unawaited(_persistDraftNow());
+
+    if (saveAfterReturn) {
+      await _saveProduct();
+    }
+  }
+
+  Future<void> _onPrimarySavePressed() async {
+    if (_hasVariants && widget.productToEdit == null) {
+      await _openVariantSetupFlow(saveAfterReturn: true);
+      return;
+    }
+    await _saveProduct();
   }
 
   @override
@@ -3484,34 +3647,10 @@ class AddProductScreenState extends State<AddProductScreen>
   }
 
   Future<void> _saveProduct() async {
-    // Basic validation
-    if (_isEditingExistingProduct) {
-      if (_existingImageUrls.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('สินค้านี้ไม่มีรูปภาพ — ไม่สามารถบันทึกได้')),
-        );
-        return;
-      }
-    } else if (_currentImageCount == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณาเพิ่มรูปสินค้าอย่างน้อย 1 รูป')),
-      );
+    if (!_validateBasicProductFields(requirePriceStock: !_hasVariants)) {
       return;
     }
 
-    if (_nameController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกชื่อสินค้า')));
-      return;
-    }
-
-    if (_weightController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกน้ำหนักสินค้า')));
-      return;
-    }
     final String weightValue = '${_weightController.text.trim()} $_weightUnit';
     final weightAmount = double.tryParse(_weightController.text.trim()) ?? 0;
     final parcelWeightGrams = _weightUnit == 'kg'
@@ -3521,40 +3660,19 @@ class AddProductScreenState extends State<AddProductScreen>
     final parcelWidthCm = double.tryParse(_parcelWidthController.text.trim());
     final parcelHeightCm = double.tryParse(_parcelHeightController.text.trim());
 
-    if (_priceController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกราคา')));
-      return;
-    }
-
-    if ((_selectedProductCategory ?? '').trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('กรุณากรอกข้อมูลภาษีสินค้าและเลือกประเภทสินค้า'),
-        ),
-      );
-      return;
-    }
-
-    if (_stockController.text.trim().isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('กรุณากรอกสต็อกทั้งหมด')));
-      return;
+    if (_hasVariants) {
+      final variantError = ProductVariantSupport.validateDrafts(_variantDrafts);
+      if (variantError != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(variantError)),
+        );
+        return;
+      }
     }
 
     final preparationTimeMinutes = int.tryParse(
       _preparationTimeController.text.trim(),
-    );
-    if (preparationTimeMinutes == null ||
-        preparationTimeMinutes <= 0 ||
-        preparationTimeMinutes > 240) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอกเวลาเตรียมสินค้า 1-240 นาที')),
-      );
-      return;
-    }
+    )!;
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -3644,6 +3762,18 @@ class AddProductScreenState extends State<AddProductScreen>
         thumbnailUrls.removeRange(imageUrls.length, thumbnailUrls.length);
       }
 
+      List<ProductVariant> resolvedVariants = <ProductVariant>[];
+      if (_hasVariants) {
+        resolvedVariants = ProductVariantSupport.bindDraftsToUploadedImages(
+          drafts: _variantDrafts,
+          imageUrls: imageUrls,
+          thumbnailUrls: thumbnailUrls,
+        );
+        if (resolvedVariants.isEmpty) {
+          throw Exception('ไม่พบตัวเลือกสินค้าที่ถูกต้อง');
+        }
+      }
+
       String? videoUrl = _existingVideoUrl;
       String? videoThumbnailUrl = _existingVideoThumbnailUrl;
       if (lockedExistingData != null) {
@@ -3678,16 +3808,26 @@ class AddProductScreenState extends State<AddProductScreen>
 
       final productDescription = _productDescriptionController.text.trim();
       final toppingsText = _descriptionController.text.trim();
-      final colors = _colorsController.text
-          .split(',')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
-      final sizes = _sizesController.text
-          .split(',')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
+      final List<String> colors;
+      final List<String> sizes;
+      if (_hasVariants && resolvedVariants.isNotEmpty) {
+        final derived = ProductVariantSupport.buildDerivedProductFields(
+          resolvedVariants,
+        );
+        colors = List<String>.from(derived['colors'] as List? ?? const []);
+        sizes = List<String>.from(derived['sizes'] as List? ?? const []);
+      } else {
+        colors = _colorsController.text
+            .split(',')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList();
+        sizes = _sizesController.text
+            .split(',')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList();
+      }
       final resolvedUnit = _selectedUnit == 'อื่นๆ'
           ? _otherUnitController.text.trim()
           : (_selectedUnit ?? '');
@@ -3755,6 +3895,37 @@ class AddProductScreenState extends State<AddProductScreen>
         serviceType: resolvedProductServiceType,
       );
 
+      final resolvedPrice = _hasVariants && resolvedVariants.isNotEmpty
+          ? (ProductVariantSupport.buildDerivedProductFields(resolvedVariants)['price']
+                as num?)
+              ?.toDouble() ??
+              0.0
+          : double.tryParse(_priceController.text) ?? 0.0;
+      final resolvedStock = _hasVariants && resolvedVariants.isNotEmpty
+          ? (ProductVariantSupport.buildDerivedProductFields(resolvedVariants)['stock']
+                as num?)
+              ?.toInt() ??
+              0
+          : int.tryParse(_stockController.text) ?? 0;
+      final resolvedImageUrls = _hasVariants && resolvedVariants.isNotEmpty
+          ? List<String>.from(
+              ProductVariantSupport.buildDerivedProductFields(
+                    resolvedVariants,
+                  )['imageUrls']
+                  as List? ??
+                  imageUrls,
+            )
+          : imageUrls;
+      final resolvedThumbnailUrls = _hasVariants && resolvedVariants.isNotEmpty
+          ? List<String>.from(
+              ProductVariantSupport.buildDerivedProductFields(
+                    resolvedVariants,
+                  )['thumbnailUrls']
+                  as List? ??
+                  thumbnailUrls,
+            )
+          : thumbnailUrls;
+
       final productData = <String, dynamic>{
         'name': _nameController.text,
         'description': productDescription.isNotEmpty
@@ -3765,12 +3936,12 @@ class AddProductScreenState extends State<AddProductScreen>
         'isProcessed': _isProcessed,
         'taxStatus': taxStatus,
         'taxStatusLabel': _taxStatusLabel,
-        'price': double.tryParse(_priceController.text) ?? 0.0,
-        'stock': int.tryParse(_stockController.text) ?? 0,
+        'price': resolvedPrice,
+        'stock': resolvedStock,
         'preparationTimeMinutes': preparationTimeMinutes,
         'preparingDuration': preparationTimeMinutes * 60 * 1000,
-        'imageUrls': imageUrls,
-        'thumbnailUrls': thumbnailUrls,
+        'imageUrls': resolvedImageUrls,
+        'thumbnailUrls': resolvedThumbnailUrls,
         'colors': colors,
         'sizes': sizes,
         'weight': weightValue,
@@ -3807,6 +3978,15 @@ class AddProductScreenState extends State<AddProductScreen>
         ..._aiConfidenceProductFields(),
         'updatedAt': FieldValue.serverTimestamp(),
       };
+
+      if (_hasVariants && resolvedVariants.isNotEmpty) {
+        productData.addAll(
+          ProductVariantSupport.buildDerivedProductFields(resolvedVariants),
+        );
+      } else if (widget.productToEdit != null) {
+        productData['hasVariants'] = false;
+        productData['variants'] = FieldValue.delete();
+      }
 
       if (toppingsText.isNotEmpty) {
         productData['toppings'] = toppingsText;
@@ -4191,79 +4371,136 @@ class AddProductScreenState extends State<AddProductScreen>
               ],
             ),
             const SizedBox(height: 16),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildGuidedFieldOverlay(
-                        showGuidance: _showPriceGuidance,
-                        guidanceMessage:
-                            'ระบบจะหักค่า GP 18% จากราคาที่ระบุ แนะนำให้บวกราคาเพิ่มจากราคาขายหน้าร้านปกติ ตามราคาที่เหมาะสม',
-                        footer: Text(
-                          _netPriceAfterGp == null
-                              ? 'ราคาที่จะได้รับ: ระบุราคาก่อน'
-                              : 'ราคาที่จะได้รับ: ${_formatPriceDisplay(_netPriceAfterGp!)} บาท',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w800,
-                            color: AppColors.accentDark,
-                          ),
-                        ),
-                        field: _buildTextField(
-                          label: 'ราคา',
-                          controller: _priceController,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          focusNode: _priceFocusNode,
-                          onTap: () {
-                            setState(() {
-                              _showPreparationTimeGuidance = false;
-                              _priceGuidanceDismissedWhileFocused = false;
-                              _showPriceGuidance = true;
-                            });
-                          },
-                          onChanged: (_) {
-                            if (!mounted) return;
-                            if (_showPriceGuidance) {
-                              setState(() {});
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      _buildGuidedFieldOverlay(
-                        showGuidance: _showPreparationTimeGuidance,
-                        guidanceMessage:
-                            'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
-                        field: _buildTextField(
-                          label: 'เวลาเตรียมสินค้า/ออเดอร์ (นาที)',
-                          controller: _preparationTimeController,
-                          keyboardType: TextInputType.number,
-                          hint: 'เช่น 10',
-                          onTap: () => setState(() {
-                            _showPriceGuidance = false;
-                            _priceGuidanceDismissedWhileFocused = false;
-                            _showPreparationTimeGuidance = true;
-                          }),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _buildTextField(
-                    label: 'สต็อกทั้งหมด',
-                    controller: _stockController,
-                    keyboardType: TextInputType.number,
-                  ),
-                ),
-              ],
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                'สินค้านี้มีหลายขนาด/สี/ราคา',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(
+                _hasVariants
+                    ? 'กำหนดราคาและสต็อกต่อตัวเลือกในขั้นตอนถัดไป'
+                    : 'ปิด = ใช้ราคาและสต็อกเดียวแบบเดิม',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+              ),
+              value: _hasVariants,
+              activeThumbColor: AppColors.accent,
+              onChanged: _isEditingExistingProduct && _productVariants.isNotEmpty
+                  ? null
+                  : (value) {
+                      setState(() {
+                        _hasVariants = value;
+                        if (!value) {
+                          _variantDrafts = <ProductVariantDraft>[];
+                        }
+                      });
+                      unawaited(_persistDraftNow());
+                    },
             ),
+            if (_hasVariants && _variantDrafts.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () =>
+                    _openVariantSetupFlow(saveAfterReturn: false),
+                icon: const Icon(Icons.tune),
+                label: Text(
+                  'จัดการตัวเลือก (${_variantDrafts.length})',
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            if (!_hasVariants)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildGuidedFieldOverlay(
+                          showGuidance: _showPriceGuidance,
+                          guidanceMessage:
+                              'ระบบจะหักค่า GP 18% จากราคาที่ระบุ แนะนำให้บวกราคาเพิ่มจากราคาขายหน้าร้านปกติ ตามราคาที่เหมาะสม',
+                          footer: Text(
+                            _netPriceAfterGp == null
+                                ? 'ราคาที่จะได้รับ: ระบุราคาก่อน'
+                                : 'ราคาที่จะได้รับ: ${_formatPriceDisplay(_netPriceAfterGp!)} บาท',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.accentDark,
+                            ),
+                          ),
+                          field: _buildTextField(
+                            label: 'ราคา',
+                            controller: _priceController,
+                            keyboardType:
+                                const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            focusNode: _priceFocusNode,
+                            onTap: () {
+                              setState(() {
+                                _showPreparationTimeGuidance = false;
+                                _priceGuidanceDismissedWhileFocused = false;
+                                _showPriceGuidance = true;
+                              });
+                            },
+                            onChanged: (_) {
+                              if (!mounted) return;
+                              if (_showPriceGuidance) {
+                                setState(() {});
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _buildGuidedFieldOverlay(
+                          showGuidance: _showPreparationTimeGuidance,
+                          guidanceMessage:
+                              'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
+                          field: _buildTextField(
+                            label: 'เวลาเตรียมสินค้า/ออเดอร์ (นาที)',
+                            controller: _preparationTimeController,
+                            keyboardType: TextInputType.number,
+                            hint: 'เช่น 10',
+                            onTap: () => setState(() {
+                              _showPriceGuidance = false;
+                              _priceGuidanceDismissedWhileFocused = false;
+                              _showPreparationTimeGuidance = true;
+                            }),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _buildTextField(
+                      label: 'สต็อกทั้งหมด',
+                      controller: _stockController,
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              )
+            else
+              _buildGuidedFieldOverlay(
+                showGuidance: _showPreparationTimeGuidance,
+                guidanceMessage:
+                    'เวลาที่ระบุจะแสดงต่อลูกค้า และมีผลต่อการสั่งสินค้า รวมถึงค่าปรับหากเตรียมออเดอร์ช้าเกินเวลาที่ตั้งไว้ โดยคิดช้านาทีละ 1 บาทและหักจากยอดเครดิต กรุณาระบุเวลาเตรียมที่เหมาะสม',
+                field: _buildTextField(
+                  label: 'เวลาเตรียมสินค้า/ออเดอร์ (นาที)',
+                  controller: _preparationTimeController,
+                  keyboardType: TextInputType.number,
+                  hint: 'เช่น 10',
+                  onTap: () => setState(() {
+                    _showPriceGuidance = false;
+                    _priceGuidanceDismissedWhileFocused = false;
+                    _showPreparationTimeGuidance = true;
+                  }),
+                ),
+              ),
             const SizedBox(height: 12),
             if (!_isEditingExistingProduct) _buildProductAnalysisSection(),
             if (!_isEditingExistingProduct) ...[
@@ -4329,15 +4566,17 @@ class AddProductScreenState extends State<AddProductScreen>
             ElevatedButton(
               onPressed: (_isSaving || _isGeneratingAiDescription)
                   ? null
-                  : _saveProduct, // Disable button while saving
+                  : _onPrimarySavePressed,
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size(double.infinity, 50),
               ),
               child: _isSaving
                   ? const CircularProgressIndicator(color: Colors.white)
-                  : const Text(
-                      'บันทึกสินค้า',
-                      style: TextStyle(
+                  : Text(
+                      _hasVariants && widget.productToEdit == null
+                          ? 'ถัดไป: กำหนดตัวเลือก'
+                          : 'บันทึกสินค้า',
+                      style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
@@ -5407,18 +5646,35 @@ class AddProductScreenState extends State<AddProductScreen>
               ),
             ],
             const SizedBox(height: 16),
-            _buildTextField(
-              label: 'สี (คั่นด้วยจุลภาค)',
-              controller: _colorsController,
-              hint: 'เช่น แดง, ขาว, ดำ',
-            ),
-            const SizedBox(height: 16),
-            _buildTextField(
-              label: 'ขนาด (คั่นด้วยจุลภาค)',
-              controller: _sizesController,
-              hint: 'เช่น S, M, L, XL',
-            ),
-            const SizedBox(height: 16),
+            if (!_hasVariants) ...[
+              _buildTextField(
+                label: 'สี (คั่นด้วยจุลภาค)',
+                controller: _colorsController,
+                hint: 'เช่น แดง, ขาว, ดำ',
+              ),
+              const SizedBox(height: 16),
+              _buildTextField(
+                label: 'ขนาด (คั่นด้วยจุลภาค)',
+                controller: _sizesController,
+                hint: 'เช่น S, M, L, XL',
+              ),
+              const SizedBox(height: 16),
+            ] else ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF6FF),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFBFDBFE)),
+                ),
+                child: const Text(
+                  'สี/ขนาด/ราคา/สต็อก กำหนดในหน้า "ตัวเลือกสินค้า" แทนการพิมพ์คั่นจุลภาค',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF1E3A8A)),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             const Text(
               'หน่วย',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),

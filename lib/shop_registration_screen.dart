@@ -15,6 +15,7 @@ import 'utils/app_colors.dart';
 import 'utils/shop_profile_resolver.dart';
 import 'services/shop_profile_fetcher.dart';
 import 'services/branch_assignment_service.dart';
+import 'services/promptpay_qr_payload.dart';
 import 'storage_helper.dart';
 import 'widgets/cached_app_image.dart';
 
@@ -110,6 +111,8 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
   final _bankNameController = TextEditingController();
   final _accountNumberController = TextEditingController();
   final _accountOwnerController = TextEditingController();
+  final _promptPayPhoneController = TextEditingController();
+  final _promptPayNationalIdController = TextEditingController();
 
   // รายชื่อธนาคารในประเทศไทยสำหรับตัวเลือก
   static const List<String> _thaiBanks = <String>[
@@ -393,6 +396,8 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
     _bankNameController.dispose();
     _accountNumberController.dispose();
     _accountOwnerController.dispose();
+    _promptPayPhoneController.dispose();
+    _promptPayNationalIdController.dispose();
     super.dispose();
   }
 
@@ -677,6 +682,12 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
           'bankName': _bankNameController.text.trim(),
           'accountNumber': _accountNumberController.text.trim(),
           'accountOwner': _accountOwnerController.text.trim(),
+          if (_promptPayPhoneController.text.trim().isNotEmpty)
+            'promptPayPhoneNumber':
+                _promptPayPhoneController.text.replaceAll(RegExp(r'\D'), ''),
+          if (_promptPayNationalIdController.text.trim().isNotEmpty)
+            'promptPayNationalId':
+                _promptPayNationalIdController.text.replaceAll(RegExp(r'\D'), ''),
           'status': 'pending', // รอการอนุมัติ
           'isProfileCompleted': true,
           'createdAt': FieldValue.serverTimestamp(),
@@ -839,6 +850,14 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
       errors.add('• อีเมล: รูปแบบไม่ถูกต้อง');
     }
 
+    final promptPayError = PromptPayQrPayload.validatePayoutProfile(
+      phone: _promptPayPhoneController.text,
+      nationalId: _promptPayNationalIdController.text,
+    );
+    if (promptPayError != null) {
+      errors.add('• PromptPay: $promptPayError');
+    }
+
     // หมายเหตุ: คำอธิบายร้าน ไม่บังคับ ตามที่ผู้ใช้ระบุ
     // สมุดบัญชีธนาคาร: อนุญาตให้เว้นได้ (ไม่บังคับ)
 
@@ -967,6 +986,16 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
 
     final String? accountOwner = _resolveStringField(data, _accountOwnerKeys);
     _setTextIfEmpty(_accountOwnerController, accountOwner);
+
+    _setTextIfEmpty(
+      _promptPayPhoneController,
+      data['promptPayPhoneNumber']?.toString(),
+    );
+    _setTextIfEmpty(
+      _promptPayNationalIdController,
+      data['promptPayNationalId']?.toString() ??
+          data['promptPayNationalIdOrTaxId']?.toString(),
+    );
 
     final String? shopImageUrl = ShopProfileResolver.resolveImageUrl(data);
     if (shopImageUrl != null &&
@@ -1467,6 +1496,66 @@ class _ShopRegistrationScreenState extends State<ShopRegistrationScreen> {
                       validator: (value) {
                         if (value == null || value.trim().isEmpty) {
                           return 'กรุณากรอกชื่อเจ้าของบัญชี';
+                        }
+                        return null;
+                      },
+                    ),
+
+                    const SizedBox(height: 20),
+                    const Text(
+                      'PromptPay (ถอนเงิน) *',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF2C3E50),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      PromptPayQrPayload.payoutLinkedBankNotice,
+                      style: const TextStyle(fontSize: 12, color: Color(0xFFB45309), height: 1.4),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _promptPayPhoneController,
+                      keyboardType: TextInputType.phone,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: InputDecoration(
+                        labelText: 'เบอร์ PromptPay *',
+                        hintText: 'เช่น 0812345678',
+                        prefixIcon: const Icon(Icons.phone_android),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      validator: (value) {
+                        return PromptPayQrPayload.validatePayoutProfile(
+                          phone: value,
+                          nationalId: _promptPayNationalIdController.text,
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _promptPayNationalIdController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: InputDecoration(
+                        labelText: 'เลขบัตรประชาชน/นิติบุคคล PromptPay (ถ้ามี)',
+                        hintText: '13 หลัก — กรอกแทนเบอร์ได้',
+                        prefixIcon: const Icon(Icons.badge_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onChanged: (_) => _formKey.currentState?.validate(),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return null;
+                        }
+                        final digits = value.replaceAll(RegExp(r'\D'), '');
+                        if (digits.length != 13) {
+                          return 'เลขบัตร/นิติบุคคลต้องมี 13 หลัก';
                         }
                         return null;
                       },

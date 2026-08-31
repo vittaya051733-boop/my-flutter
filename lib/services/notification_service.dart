@@ -10,6 +10,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../utils/app_check_guard.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/order_model.dart';
@@ -18,7 +19,6 @@ import '../order_management_screen_new.dart';
 import '../models/user_profile.dart';
 import '../services/shop_operations_service.dart';
 import '../call_screen.dart';
-import '../add_product_screen.dart';
 import '../firebase_options.dart';
 import '../main.dart';
 import '../widgets/chat_message_popup.dart';
@@ -243,6 +243,7 @@ class NotificationService {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _shopDecisionNotificationSubscription;
   final Set<String> _handledShopDecisionNotificationIds = <String>{};
+  final Set<String> _shownProductAiNotificationIds = <String>{};
   final Set<String> _cancelledChannelIds = <String>{};
   String? _backgroundReturnChannelId;
   bool _shouldReturnAppToBackground = false;
@@ -331,6 +332,7 @@ class NotificationService {
           _shopDecisionNotificationSubscription?.cancel();
           _shopDecisionNotificationSubscription = null;
           _handledShopDecisionNotificationIds.clear();
+          _shownProductAiNotificationIds.clear();
 
           final uid = user?.uid.trim();
           if (uid == null || uid.isEmpty) {
@@ -624,12 +626,14 @@ class NotificationService {
     final notification = message.notification;
     final data = message.data;
 
-    await _persistVan1RemoteMessageToInbox(
-      data,
-      messageId: message.messageId,
-      title: notification?.title,
-      body: notification?.body,
-    );
+    if (!_isProductAiReadyNotification(data)) {
+      await _persistVan1RemoteMessageToInbox(
+        data,
+        messageId: message.messageId,
+        title: notification?.title,
+        body: notification?.body,
+      );
+    }
 
     if (data['type'] == 'call_cancel') {
       _handleCallCancelFromNative(data['channelId'] as String?);
@@ -809,7 +813,10 @@ class NotificationService {
           return;
         }
         if (_isProductAiReadyNotification(decoded)) {
-          _openAddProductWithDraft(decoded['draftId'] as String?);
+          final notificationId = _resolveProductAiNotificationId(decoded);
+          if (notificationId != null) {
+            unawaited(markAppNotificationRead(notificationId));
+          }
           return;
         }
         if (decoded['type'] == 'app_notification') {
@@ -827,21 +834,26 @@ class NotificationService {
   /// จัดการเมื่อกด notification จาก background
   void _handleNotificationTap(RemoteMessage message) {
     debugPrint('Notification tapped from background: ${message.messageId}');
-    unawaited(
-      _persistVan1RemoteMessageToInbox(
-        message.data,
-        messageId: message.messageId,
-        title: message.notification?.title,
-        body: message.notification?.body,
-      ),
-    );
+    if (!_isProductAiReadyNotification(message.data)) {
+      unawaited(
+        _persistVan1RemoteMessageToInbox(
+          message.data,
+          messageId: message.messageId,
+          title: message.notification?.title,
+          body: message.notification?.body,
+        ),
+      );
+    }
     if (_isIncomingShopDecisionNotification(message.data)) {
       unawaited(_showIncomingOrderDecisionPrompt(message.data));
       return;
     }
 
     if (_isProductAiReadyNotification(message.data)) {
-      _openAddProductWithDraft(message.data['draftId'] as String?);
+      final notificationId = _resolveProductAiNotificationId(message.data);
+      if (notificationId != null) {
+        unawaited(markAppNotificationRead(notificationId));
+      }
       return;
     }
 
@@ -895,22 +907,31 @@ class NotificationService {
         (data['type'] as String?)?.trim() == 'product_ai_ready';
   }
 
-  void _openAddProductWithDraft(String? draftId) {
-    final normalized = draftId?.trim();
-    if (normalized == null || normalized.isEmpty) {
-      return;
+  String? _resolveProductAiNotificationId(Map<String, dynamic> data) {
+    final fromPayload = (data['notificationId'] as String?)?.trim();
+    if (fromPayload != null && fromPayload.isNotEmpty) {
+      return fromPayload;
     }
-    final navigator = MyApp.navigatorKey.currentState;
-    if (navigator == null) {
-      return;
+    final jobId = (data['jobId'] as String?)?.trim();
+    if (jobId != null && jobId.isNotEmpty) {
+      return 'product_ai_$jobId';
     }
-    unawaited(
-      navigator.push(
-        MaterialPageRoute<void>(
-          builder: (_) => AddProductScreen(draftId: normalized),
-        ),
-      ),
-    );
+    return null;
+  }
+
+  String _productAiNotificationBody(Map<String, dynamic> data) {
+    const prefix = 'พร้อมเติมข้อมูล: ';
+    final rawBody = (data['body'] as String?)?.trim() ?? '';
+    if (rawBody.startsWith(prefix)) {
+      final productName = rawBody.substring(prefix.length).trim();
+      if (productName.isNotEmpty) {
+        return productName;
+      }
+    }
+    if (rawBody.isNotEmpty && rawBody != 'แตะเพื่อดูผลและเติมข้อมูลสินค้า') {
+      return rawBody;
+    }
+    return 'พร้อมเติมข้อมูล';
   }
 
   Future<void> markAppNotificationRead(String id) async {
@@ -1010,38 +1031,23 @@ class NotificationService {
   Future<void> _showProductAiReadyNotification(
     Map<String, dynamic> data,
   ) async {
-    final draftId = (data['draftId'] as String?)?.trim() ?? '';
-    if (draftId.isEmpty) {
+    final notificationId = _resolveProductAiNotificationId(data);
+    if (notificationId == null ||
+        !_shownProductAiNotificationIds.add(notificationId)) {
       return;
     }
 
-    final title =
-        (data['title'] as String?)?.trim() ?? 'AI วิเคราะห์สินค้าเสร็จแล้ว';
-    final body = (data['body'] as String?)?.trim() ??
-        'แตะเพื่อดูผลและเติมข้อมูลสินค้า';
-
     await _showLocalNotification(
-      title: title,
-      body: body,
+      title: 'AI วิเคราะห์เสร็จแล้ว',
+      body: _productAiNotificationBody(data),
       payload: jsonEncode(<String, dynamic>{
         'type': 'product_ai_ready',
         'action': 'product_ai_ready',
-        'draftId': draftId,
+        'notificationId': notificationId,
       }),
     );
 
-    final context = MyApp.navigatorKey.currentState?.context;
-    if (context != null && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(body),
-          action: SnackBarAction(
-            label: 'เปิด',
-            onPressed: () => _openAddProductWithDraft(draftId),
-          ),
-        ),
-      );
-    }
+    unawaited(markAppNotificationRead(notificationId));
   }
 
   Future<void> _showIncomingOrderDecisionPrompt(
@@ -1167,6 +1173,15 @@ class NotificationService {
   }
 
   Future<void> _acceptShopOrder(DetailedOrder order) async {
+    final shopId = order.shopId.trim();
+    if (shopId.isNotEmpty) {
+      final settings = await ShopOperationsService.fetchSettings(shopId);
+      final blockMessage = ShopOperationsService.penaltyBlockMessage(settings);
+      if (blockMessage != null) {
+        throw Exception(blockMessage);
+      }
+    }
+
     final now = DateTime.now();
     final preparationMinutes = (order.preparingDuration / 60000)
         .ceil()
@@ -1623,6 +1638,7 @@ class NotificationService {
     required String calleeFCMToken,
     required String callType, // 'voice' หรือ 'video'
   }) async {
+    await AppCheckGuard.ensureFinancialReady();
     final callable = FirebaseFunctions.instanceFor(
       region: 'asia-southeast1',
     ).httpsCallable('callUser');
@@ -1642,6 +1658,7 @@ class NotificationService {
     required String calleeId,
   }) async {
     try {
+      await AppCheckGuard.ensureFinancialReady();
       final callable = FirebaseFunctions.instanceFor(
         region: 'asia-southeast1',
       ).httpsCallable('cancelCallInvite');
@@ -1661,6 +1678,7 @@ class NotificationService {
     required UserProfile callee,
     required bool isVideo,
   }) async {
+    await AppCheckGuard.ensureFinancialReady();
     const List<String> preferredRegions = <String>[
       'asia-southeast1',
       'us-central1',

@@ -1,0 +1,11 @@
+# Copy from van2/android (shared upload keystore for van1 + van2 Play Store builds).
+# Do NOT commit key.properties or *.jks (already in .gitignore).
+#
+# Quick setup (same machine as van2):
+#   copy ..\..\..\van2\android\key.properties .
+#   copy ..\..\..\van2\android\van2-upload-keystore.jks .
+
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=van2-upload
+storeFile=van2-upload-keystore.jks

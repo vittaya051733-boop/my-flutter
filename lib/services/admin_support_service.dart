@@ -189,6 +189,7 @@ class AdminSupportService {
     required String topicLabel,
     required String message,
     List<File> imageFiles = const <File>[],
+    String? orderId,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -233,6 +234,7 @@ class AdminSupportService {
       'unreadForAdmin': true,
       'lastMessagePreview': preview,
       'lastMessageRole': 'requester',
+      if ((orderId ?? '').trim().isNotEmpty) 'orderId': orderId!.trim(),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
       'lastMessageAt': FieldValue.serverTimestamp(),

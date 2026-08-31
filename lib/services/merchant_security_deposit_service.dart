@@ -34,25 +34,6 @@ class MerchantSecurityDepositService {
     return true;
   }
 
-  Future<void> markPaid({
-    required String uid,
-    required double amount,
-  }) async {
-    final trimmedUid = uid.trim();
-    if (trimmedUid.isEmpty) {
-      return;
-    }
-
-    await FirebaseFirestore.instance.collection('users').doc(trimmedUid).set(
-      <String, dynamic>{
-        'merchantSecurityDepositPaid': true,
-        'merchantSecurityDepositPaidAt': FieldValue.serverTimestamp(),
-        'merchantSecurityDepositAmount': amount,
-      },
-      SetOptions(merge: true),
-    );
-  }
-
   Future<bool> _hasAnyProducts(String uid) async {
     final products = await FirebaseFirestore.instance
         .collection('products')

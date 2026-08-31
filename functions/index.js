@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const Redis = require('ioredis');
 const sharp = require('sharp');
+const catalogTaxonomy = require('./catalog_taxonomy');
 const DEFAULT_REGION = 'asia-southeast1';
 const CALL_TTL_MS = 30 * 1000; // 30 seconds
 const ACTIVE_CALL_INVITES_COLLECTION = 'active_call_invites';
@@ -584,6 +585,7 @@ const SLIP_TRANS_REF_COLLECTION = 'slip_trans_refs';
 const TOPUP_SLIP_DAILY_ATTEMPTS_COLLECTION = 'topup_slip_daily_attempts';
 const TOP_UP_MAX_AMOUNT = 5000;
 const TOP_UP_MAX_DAILY_VERIFICATION_ATTEMPTS = 3;
+const MERCHANT_SECURITY_DEPOSIT_AMOUNT = 1000;
 const ALLOWED_TOPUP_STORAGE_BUCKETS = new Set([
   'van-merchant-van1-storage-802503541368',
   'van-merchant-van2-storage-802503541368',
@@ -606,6 +608,22 @@ function amountsMatch(actualAmount, expectedAmount) {
     return false;
   }
   return Math.abs(actualAmount - expectedAmount) < 0.01;
+}
+
+function assertTopUpStoragePathForActor(uid, storagePath, sourceApp) {
+  const path = String(storagePath || '').trim();
+  const normalizedSource = String(sourceApp || '').trim().toLowerCase();
+  if (normalizedSource === 'van3_rider' || normalizedSource.startsWith('van3')) {
+    const riderPrefix = `riders/${uid}/topups/`;
+    if (!path.startsWith(riderPrefix)) {
+      throw new HttpsError('permission-denied', 'เส้นทางสลิปไม่ถูกต้องสำหรับไรเดอร์');
+    }
+    return;
+  }
+  const merchantPrefix = `shops/${uid}/topups/`;
+  if (!path.startsWith(merchantPrefix)) {
+    throw new HttpsError('permission-denied', 'เส้นทางสลิปไม่ถูกต้องสำหรับร้านค้า');
+  }
 }
 
 function getBangkokDateKey(date = new Date()) {
@@ -1619,7 +1637,7 @@ const GEMINI_PREFERRED_MODELS = [
   'gemini-2.0-flash',
   'gemini-1.5-flash',
 ];
-const AI_CATALOG_CLASSIFIER_VERSION = 'v6';
+const AI_CATALOG_CLASSIFIER_VERSION = 'v7';
 const CATALOG_AI_CACHE_COLLECTION = 'catalog_ai_cache';
 const PRODUCT_AI_CACHE_COLLECTION = 'product_ai_cache';
 const AI_CONFIDENCE_THRESHOLD = 80;
@@ -1638,6 +1656,14 @@ const AI_CATALOG_IGNORED_DIFF_KEYS = new Set([
   'catalogHeading',
   'catalogHeadingSlug',
   'catalogHeadingSort',
+  'catalogTypeConfidence',
+  'catalogHeadingConfidence',
+  'catalogReviewStatus',
+  'catalogReviewReasons',
+  'catalogReviewReasonLabels',
+  'catalogReviewedAt',
+  'catalogReviewedBy',
+  'catalogAdminLocked',
   'aiCatalogClassifiedAt',
   'aiCatalogClassifierVersion',
   'aiCatalogInputHash',
@@ -1832,10 +1858,8 @@ async function fetchImageAsInlineData(imageUrl) {
 }
 
 function resolveCatalogTypeFromProduct(product) {
-  const category = String(product?.productCategory || '').trim();
   const type = String(product?.aiProductType || product?.productType || '').trim();
   const source = [
-    category,
     type,
     String(product?.name || '').trim(),
     String(product?.description || '').trim(),
@@ -1858,6 +1882,7 @@ function resolveCatalogTypeFromProduct(product) {
   if (/อาหาร|ข้าว|แกง|ผัด|ทอด|ต้ม|ยำ|พร้อมทาน|prepared|cooked/.test(source)) return 'อาหารพร้อมทาน';
   if (/ยา|เวชภัณฑ์|pharmacy|medicine|drug/.test(source)) return 'ยาและเวชภัณฑ์';
 
+  const category = String(product?.productCategory || '').trim();
   return type || category || 'อื่นๆ';
 }
 
@@ -2001,26 +2026,43 @@ function resolvePharmacyCatalogHeadingFromSource(source) {
   return 'ยาและเวชภัณฑ์';
 }
 
-function resolveRuleBasedCatalogClassification(product) {
-  const category = String(product?.productCategory || '').trim();
+function resolveRuleBasedCatalogClassification(product, serviceType = '') {
   const type = String(product?.aiProductType || product?.productType || '').trim();
   const source = [
-    category,
     type,
     String(product?.name || '').trim(),
     String(product?.description || '').trim(),
   ].join(' ').toLowerCase();
-  const pharmacyHeading = resolvePharmacyCatalogHeadingFromSource(source);
-  if (pharmacyHeading) {
-    return {
-      catalogType: 'ยาและเวชภัณฑ์',
-      catalogTypeSlug: normalizeCatalogHeadingSlug(null, 'ยาและเวชภัณฑ์'),
-      catalogHeading: pharmacyHeading,
-      catalogHeadingSlug: normalizeCatalogHeadingSlug(null, pharmacyHeading),
-      model: 'keyword-rule',
-    };
+  const normalizedService = catalogTaxonomy.normalizeShopServiceType(serviceType);
+
+  if (normalizedService === 'ร้านขายยา') {
+    const pharmacyHeading = resolvePharmacyCatalogHeadingFromSource(source);
+    if (pharmacyHeading) {
+      return {
+        catalogType: 'ยาและเวชภัณฑ์',
+        catalogTypeSlug: normalizeCatalogHeadingSlug(null, 'ยาและเวชภัณฑ์'),
+        catalogHeading: pharmacyHeading,
+        catalogHeadingSlug: normalizeCatalogHeadingSlug(null, pharmacyHeading),
+        catalogTypeConfidence: 100,
+        catalogHeadingConfidence: 100,
+        model: 'keyword-rule',
+      };
+    }
+    return null;
   }
-  return resolveMarketCatalogClassification(source);
+
+  if (normalizedService === 'ตลาด' || !normalizedService) {
+    const marketResult = resolveMarketCatalogClassification(source);
+    if (marketResult) {
+      return {
+        ...marketResult,
+        catalogTypeConfidence: 100,
+        catalogHeadingConfidence: 100,
+      };
+    }
+  }
+
+  return null;
 }
 
 function computeAiCatalogInputHash(product) {
@@ -2082,6 +2124,10 @@ function shouldSkipProductCatalogClassify({ before, after, productId }) {
 
   if (after.aiRequiresAdminReview === true) {
     return 'low_confidence_review';
+  }
+
+  if (after.catalogAdminLocked === true) {
+    return 'admin_locked';
   }
 
   const productName = String(after.name || '').trim();
@@ -2162,6 +2208,21 @@ async function saveCatalogAiCache(inputHash, classification, sourceProductId) {
   }, { merge: true });
 }
 
+async function loadShopServiceType(shopId) {
+  const normalizedShopId = String(shopId || '').trim();
+  if (!normalizedShopId) {
+    return '';
+  }
+  const snap = await db.collection('public_shops').doc(normalizedShopId).get();
+  if (!snap.exists) {
+    return '';
+  }
+  const data = snap.data() || {};
+  return catalogTaxonomy.normalizeShopServiceType(
+    data.serviceType || data.service_type || data.businessType || '',
+  );
+}
+
 async function finalizeCatalogClassification(product, shopId, headingResult) {
   const catalogType =
     String(headingResult.catalogType || '').trim() ||
@@ -2183,6 +2244,14 @@ async function finalizeCatalogClassification(product, shopId, headingResult) {
     catalogHeading: headingResult.catalogHeading,
     catalogHeadingSlug: headingResult.catalogHeadingSlug,
     catalogHeadingSort,
+    catalogTypeConfidence: catalogTaxonomy.normalizeConfidence(
+      headingResult.catalogTypeConfidence,
+      headingResult.model === 'keyword-rule' ? 100 : 0,
+    ),
+    catalogHeadingConfidence: catalogTaxonomy.normalizeConfidence(
+      headingResult.catalogHeadingConfidence,
+      headingResult.model === 'keyword-rule' ? 100 : 0,
+    ),
     aiCatalogInputHash: computeAiCatalogInputHash(product),
     aiCatalogClassifierVersion: AI_CATALOG_CLASSIFIER_VERSION,
     model: headingResult.model || null,
@@ -2248,14 +2317,16 @@ async function resolveProductCatalogClassification({
   apiKey,
 }) {
   const inputHash = computeAiCatalogInputHash(product);
+  const serviceType = await loadShopServiceType(shopId);
 
-  const ruleBased = resolveRuleBasedCatalogClassification(product);
+  const ruleBased = resolveRuleBasedCatalogClassification(product, serviceType);
   if (ruleBased) {
     const classification = await finalizeCatalogClassification(product, shopId, ruleBased);
     await saveCatalogAiCache(inputHash, classification, productId);
     return {
       ...classification,
       fromCache: 'keyword_rule',
+      serviceType,
     };
   }
 
@@ -2269,6 +2340,7 @@ async function resolveProductCatalogClassification({
     return {
       ...classification,
       fromCache: 'catalog_ai_cache',
+      serviceType,
     };
   }
 
@@ -2279,6 +2351,7 @@ async function resolveProductCatalogClassification({
     return {
       ...classification,
       fromCache: 'prior_product',
+      serviceType,
     };
   }
 
@@ -2287,12 +2360,14 @@ async function resolveProductCatalogClassification({
     shopId,
     productId,
     apiKey,
+    serviceType,
   });
   const classification = await finalizeCatalogClassification(product, shopId, headingResult);
   await saveCatalogAiCache(inputHash, classification, productId);
   return {
     ...classification,
     fromCache: false,
+    serviceType,
   };
 }
 
@@ -2655,9 +2730,15 @@ async function classifyProductCatalogHeading({
   shopId,
   productId,
   apiKey,
+  serviceType = '',
 }) {
   const existingHeadings = await loadShopCatalogHeadings(shopId);
   const existingTypes = await loadShopCatalogTypes(shopId);
+  const normalizedService = catalogTaxonomy.normalizeShopServiceType(serviceType);
+  const allowedTypes = normalizedService === 'ร้านขายยา'
+    ? [catalogTaxonomy.pharmacyTypeLabel()]
+    : catalogTaxonomy.marketTypeLabels();
+  const allowedTypeSummary = allowedTypes.join(', ');
   const existingTypeSummary = existingTypes.length > 0
     ? existingTypes.map((entry) => `${entry.slug}:${entry.label}`).join(', ')
     : '(none yet)';
@@ -2674,33 +2755,24 @@ async function classifyProductCatalogHeading({
     'You classify one active Thai merchant product into a customer-facing catalog type (ประเภท) and heading (หัวข้อ) for a Thai shopping app.',
     'Return JSON only.',
     'Do NOT use the raw product name as catalogType. catalogType is a broad shelf button. catalogHeading is the narrower group inside that type.',
+    `Shop service type: ${normalizedService || 'unknown'}.`,
+    `You MUST choose catalogType from this allowed list only: ${allowedTypeSummary}.`,
+    'If nothing fits well, choose อื่นๆ and set both confidences below 80.',
     'Important Thai market taxonomy rules:',
-    '- The ตลาด button is a broad market/marketplace catalog. Use a broad catalogType and a narrower catalogHeading.',
-    '- Use these preferred market catalogType labels when applicable: ผักสด, ผลไม้, เนื้อสัตว์, อาหารทะเลสด, อาหารทะเลแปรรูป, ไข่ / เต้าหู้, อาหารพร้อมทาน, ของแห้ง / วัตถุดิบ, เครื่องปรุง / ซอส, ขนม / เบเกอรี่, เครื่องดื่ม, เสื้อผ้า, ชุดนักเรียน / เครื่องแบบ, รองเท้า / กระเป๋า, ของใช้ในบ้าน, ของใช้ส่วนตัว, เครื่องเขียน / อุปกรณ์เรียน.',
+    '- ผลไม้ is for fruit such as mango, dragon fruit, orange, banana, durian, apple.',
+    '- ผักสด is for fresh vegetables and herbs.',
     '- เนื้อสัตว์ is for raw pork, chicken, beef, duck, and similar meat items.',
     '- อาหารทะเลสด is for fresh fish, shrimp, crab, squid, shellfish, and similar fresh seafood.',
-    '- อาหารทะเลแปรรูป is for dried/processed seafood such as ปลาหมึกแห้ง, กุ้งแห้ง, ปลาแห้ง, ปลาแดดเดียว. These must not be catalogType ของสด.',
-    '- ผลไม้ is for fruit such as mango, orange, banana, durian, apple.',
-    '- ผักสด is for fresh vegetables and herbs.',
-    '- อาหารพร้อมทาน is for cooked/ready-to-eat food.',
-    '- เครื่องดื่ม is for beverages.',
-    '- ของแห้ง / วัตถุดิบ is for dry/shelf-stable grocery ingredients such as rice, flour, noodles, beans, and pantry staples.',
-    '- เครื่องปรุง / ซอส is for fish sauce, soy sauce, seasoning, salt, sugar, shrimp paste, and cooking sauces.',
-    '- เสื้อผ้า is for clothing. ชุดนักเรียน / เครื่องแบบ is specifically for school uniforms and uniforms. รองเท้า / กระเป๋า is for shoes and bags, including school shoes.',
-    '- เครื่องเขียน / อุปกรณ์เรียน is for notebooks, paper, pens, pencils, erasers, rulers, and school supplies.',
-    '- ของใช้ในบ้าน is for household supplies. ของใช้ส่วนตัว is for personal care products.',
-    '- ยาและเวชภัณฑ์ is for pharmacy/medical items. For this catalogType, catalogHeading must be one of these user-facing pharmacy subgroups when applicable: ยาแก้ปวด / ลดไข้, ยาแก้แพ้ / หวัด / ไอ, ยาทางเดินอาหาร, ยาภายนอก, เวชภัณฑ์, อุปกรณ์การแพทย์, วิตามิน / อาหารเสริม, แม่และเด็ก, สุขภาพช่องปาก, ดูแลผิว / ของใช้ส่วนตัว.',
-    'Examples: product mango => catalogType ผลไม้, catalogHeading มะม่วง. product chicken breast => catalogType เนื้อสัตว์, catalogHeading ไก่สด. product fish => catalogType อาหารทะเลสด, catalogHeading ปลาสด. product dried squid => catalogType อาหารทะเลแปรรูป, catalogHeading ปลาหมึกแห้ง. product fish sauce => catalogType เครื่องปรุง / ซอส, catalogHeading น้ำปลา. product school uniform => catalogType ชุดนักเรียน / เครื่องแบบ, catalogHeading ชุดนักเรียน. product school shoes => catalogType รองเท้า / กระเป๋า, catalogHeading รองเท้านักเรียน. product notebook => catalogType เครื่องเขียน / อุปกรณ์เรียน, catalogHeading สมุด / กระดาษ. product paracetamol => catalogType ยาและเวชภัณฑ์, catalogHeading ยาแก้ปวด / ลดไข้. product saline solution => catalogType ยาและเวชภัณฑ์, catalogHeading เวชภัณฑ์.',
+    '- อาหารทะเลแปรรูป is for dried/processed seafood such as ปลาหมึกแห้ง, กุ้งแห้ง, ปลาแห้ง, ปลาแดดเดียว.',
+    '- ยาและเวชภัณฑ์ is only for pharmacy/medical items when shop service type is ร้านขายยา.',
     'Prefer reusing an existing heading label/slug when the product clearly fits.',
-    'Prefer reusing an existing type label/slug when the broad type clearly fits.',
-    'Create a new concise Thai type or heading only when nothing existing fits.',
+    'Return confidence as integer 0-100 for both catalogType and catalogHeading.',
     'JSON schema only:',
-    '{"catalogType":"Thai broad type label","catalogTypeSlug":"stable type slug","catalogHeading":"Thai heading label","catalogHeadingSlug":"stable heading slug","reuseExistingType":true/false,"reuseExistingHeading":true/false}',
+    '{"catalogType":"allowed Thai broad type label","catalogTypeSlug":"stable type slug","catalogHeading":"Thai heading label","catalogHeadingSlug":"stable heading slug","catalogTypeConfidence":0-100,"catalogHeadingConfidence":0-100,"reuseExistingType":true/false,"reuseExistingHeading":true/false}',
     `Existing types: ${existingTypeSummary}.`,
     `Existing headings by type: ${existingHeadingSummary}.`,
     `Product name: ${String(product.name || '-').trim()}.`,
     `Description: ${String(product.description || '-').trim()}.`,
-    `Product category: ${String(product.productCategory || '-').trim()}.`,
     `Raw AI product type (reference only, may be too narrow): ${String(product.aiProductType || product.productType || '-').trim()}.`,
   ].join(' ');
 
@@ -2711,15 +2783,20 @@ async function classifyProductCatalogHeading({
     logContext: { productId, shopId, trigger: 'onProductCatalogClassify' },
   });
 
-  const catalogType =
+  let catalogType =
     String(analysis.catalogType || '').trim() ||
     resolveCatalogTypeFromProduct(product);
+  if (!catalogTaxonomy.isKnownCatalogType(normalizedService, catalogType)) {
+    catalogType = normalizedService === 'ร้านขายยา'
+      ? catalogTaxonomy.pharmacyTypeLabel()
+      : 'อื่นๆ';
+  }
   if (!catalogType) {
     throw new Error('Gemini returned empty catalogType');
   }
-  const catalogHeading = String(analysis.catalogHeading || '').trim();
-  if (!catalogHeading) {
-    throw new Error('Gemini returned empty catalogHeading');
+  let catalogHeading = String(analysis.catalogHeading || '').trim();
+  if (!catalogHeading || !catalogTaxonomy.isKnownCatalogHeading(normalizedService, catalogType, catalogHeading)) {
+    catalogHeading = catalogTaxonomy.defaultHeadingForType(normalizedService, catalogType);
   }
 
   let catalogTypeSlug = normalizeCatalogHeadingSlug(
@@ -2754,6 +2831,8 @@ async function classifyProductCatalogHeading({
     catalogTypeSlug,
     catalogHeading,
     catalogHeadingSlug,
+    catalogTypeConfidence: catalogTaxonomy.normalizeConfidence(analysis.catalogTypeConfidence, 0),
+    catalogHeadingConfidence: catalogTaxonomy.normalizeConfidence(analysis.catalogHeadingConfidence, 0),
     model,
   };
 }
@@ -2820,17 +2899,38 @@ exports.onProductCatalogClassify = onDocumentWritten(
         apiKey,
       });
 
-      await db.collection('products').doc(productId).set({
+      const reviewEval = catalogTaxonomy.evaluateCatalogReviewRequired({
+        serviceType: classification.serviceType || '',
+        catalogType: classification.catalogType,
+        catalogHeading: classification.catalogHeading,
+        catalogTypeConfidence: classification.catalogTypeConfidence,
+        catalogHeadingConfidence: classification.catalogHeadingConfidence,
+        product: after,
+        fromRule: classification.fromCache === 'keyword_rule',
+      });
+
+      const catalogUpdate = {
         catalogType: classification.catalogType,
         catalogTypeSlug: classification.catalogTypeSlug,
         catalogTypeSort: classification.catalogTypeSort,
         catalogHeading: classification.catalogHeading,
         catalogHeadingSlug: classification.catalogHeadingSlug,
         catalogHeadingSort: classification.catalogHeadingSort,
+        catalogTypeConfidence: classification.catalogTypeConfidence,
+        catalogHeadingConfidence: classification.catalogHeadingConfidence,
+        catalogReviewStatus: reviewEval.required ? 'pending' : 'approved',
+        catalogReviewReasons: reviewEval.reasons,
+        catalogReviewReasonLabels: reviewEval.reasonLabels,
         aiCatalogInputHash: classification.aiCatalogInputHash,
         aiCatalogClassifierVersion: classification.aiCatalogClassifierVersion,
         aiCatalogClassifiedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
+      };
+
+      if (!reviewEval.required) {
+        catalogUpdate.catalogAdminLocked = false;
+      }
+
+      await db.collection('products').doc(productId).set(catalogUpdate, { merge: true });
 
       logger.info('onProductCatalogClassify completed', {
         productId,
@@ -2839,6 +2939,7 @@ exports.onProductCatalogClassify = onDocumentWritten(
         catalogTypeSlug: classification.catalogTypeSlug,
         catalogHeading: classification.catalogHeading,
         catalogHeadingSlug: classification.catalogHeadingSlug,
+        catalogReviewStatus: reviewEval.required ? 'pending' : 'approved',
         model: classification.model,
         fromCache: classification.fromCache,
       });
@@ -3345,10 +3446,10 @@ async function runGeminiProductAnalysis({
 
 async function notifyProductAiReady({ uid, draftId, jobId, productName }) {
   const notificationId = `product_ai_${jobId}`;
-  const title = 'AI วิเคราะห์สินค้าเสร็จแล้ว';
+  const title = 'AI วิเคราะห์เสร็จแล้ว';
   const body = productName
     ? `พร้อมเติมข้อมูล: ${productName}`
-    : 'แตะเพื่อดูผลและเติมข้อมูลสินค้า';
+    : 'พร้อมเติมข้อมูล';
 
   await db.collection('app_notifications').doc(notificationId).set({
     targetApp: 'van1',
@@ -3375,6 +3476,7 @@ async function notifyProductAiReady({ uid, draftId, jobId, productName }) {
       data: {
         type: 'product_ai_ready',
         action: 'product_ai_ready',
+        notificationId: String(notificationId),
         draftId: String(draftId || ''),
         jobId: String(jobId || ''),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
@@ -4089,114 +4191,8 @@ exports.verifyEmailOtp = onCall(
   },
 );
 
-/**
- * Cloud Function สำหรับตรวจสอบเวลาเตรียมออเดอร์และส่งการแจ้งเตือน
- * ทำงานทุก 1 นาที
- */
-exports.checkPreparingOrders = functions.region(DEFAULT_REGION).pubsub
-  .schedule('every 1 minutes')
-  .onRun(async (context) => {
-    const now = admin.firestore.Timestamp.now();
-    
-    try {
-      // ดึงออเดอร์ที่อยู่ในสถานะ preparing
-      const ordersSnapshot = await db.collection('orders')
-        .where('status', '==', 'preparing')
-        .get();
-
-      const promises = [];
-
-      for (const doc of ordersSnapshot.docs) {
-        const order = doc.data();
-        const orderId = doc.id;
-
-        if (!order.preparingStartTime) continue;
-
-        const preparingStart = order.preparingStartTime.toDate();
-        const elapsed = now.toDate() - preparingStart;
-        const elapsedMinutes = elapsed / 1000 / 60;
-        const preparingDurationMs = Number(order.preparingDuration || 600000);
-        const preparingDurationMinutes = Math.max(1, preparingDurationMs / 1000 / 60);
-        const firstWarningMinutes = Number(order.notifications?.firstWarning?.timeInMinutes || (preparingDurationMinutes * 0.5));
-        const secondWarningMinutes = Number(order.notifications?.secondWarning?.timeInMinutes || (preparingDurationMinutes * 0.75));
-        const finalWarningMinutes = Number(order.notifications?.finalWarning?.timeInMinutes || preparingDurationMinutes);
-
-        if (elapsedMinutes >= firstWarningMinutes && !order.notifications?.firstWarning?.sent) {
-          const remainingMinutes = Math.max(0, preparingDurationMinutes - elapsedMinutes);
-          promises.push(
-            sendNotification(
-              order.shopFCMToken,
-              'แจ้งเตือนเวลาเตรียมออเดอร์',
-              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป ${elapsedMinutes.toFixed(1)} นาทีแล้ว เหลืออีก ${remainingMinutes.toFixed(1)} นาที`,
-              orderId
-            ),
-            doc.ref.update({
-              'notifications.firstWarning.sent': true,
-              'notifications.firstWarning.sentAt': now,
-            })
-          );
-        }
-
-        if (elapsedMinutes >= secondWarningMinutes && !order.notifications?.secondWarning?.sent) {
-          const remainingMinutes = Math.max(0, preparingDurationMinutes - elapsedMinutes);
-          promises.push(
-            sendNotification(
-              order.shopFCMToken,
-              'แจ้งเตือนเวลาเตรียมออเดอร์ (เร่งด่วน)',
-              `ออเดอร์ #${orderId.substring(0, 8)} ใช้เวลาไป ${elapsedMinutes.toFixed(1)} นาทีแล้ว เหลืออีก ${remainingMinutes.toFixed(1)} นาที`,
-              orderId
-            ),
-            doc.ref.update({
-              'notifications.secondWarning.sent': true,
-              'notifications.secondWarning.sentAt': now,
-            })
-          );
-        }
-
-        if (elapsedMinutes >= finalWarningMinutes && !order.notifications?.finalWarning?.sent) {
-          const overtimeMinutes = elapsedMinutes - preparingDurationMinutes;
-          const penalty = calculatePenalty(overtimeMinutes);
-
-          promises.push(
-            sendNotification(
-              order.shopFCMToken,
-              'เกินเวลาเตรียมออเดอร์!',
-              `ออเดอร์ #${orderId.substring(0, 8)} เกินเวลา ${overtimeMinutes.toFixed(1)} นาที มีค่าปรับ ${penalty} บาท`,
-              orderId
-            ),
-            doc.ref.update({
-              'notifications.finalWarning.sent': true,
-              'notifications.finalWarning.sentAt': now,
-              'penalty': penalty,
-            })
-          );
-        }
-
-        if (elapsedMinutes > preparingDurationMinutes) {
-          const overtimeMinutes = elapsedMinutes - preparingDurationMinutes;
-          const penalty = calculatePenalty(overtimeMinutes);
-          
-          promises.push(
-            doc.ref.update({ 'penalty': penalty })
-          );
-        }
-      }
-
-      await Promise.allSettled(promises);
-      console.log(`Processed ${ordersSnapshot.docs.length} preparing orders`);
-      
-    } catch (error) {
-      console.error('Error checking preparing orders:', error);
-    }
-  });
-
-/**
- * คำนวณค่าปรับ
- * - เกินเวลาเตรียมที่ร้านระบุ: นาทีละ 1 บาท
- */
-function calculatePenalty(overtimeMinutes) {
-  return Math.max(0, Math.ceil(Number(overtimeMinutes || 0)));
-}
+// checkPreparingOrders ย้ายไป van2/functions/merchant_preparation_penalties.js
+// (แจ้งเตือน + หักเครดิต/เงินประกันจริง) — deploy จาก van2 เท่านั้น
 
 /**
  * ส่ง notification ผ่าน FCM
@@ -5226,6 +5222,7 @@ exports.signInWithPhonePassword = onCall(
 exports.verifyTopUpSlip = onCall(
   {
     region: DEFAULT_REGION,
+    enforceAppCheck: true,
     secrets: [SLIPOK_API_KEY_SECRET],
   },
   async (request) => {
@@ -5242,6 +5239,7 @@ exports.verifyTopUpSlip = onCall(
     const fileName = String(request.data?.fileName || 'slip.jpg').trim() || 'slip.jpg';
     const contentType = String(request.data?.contentType || 'image/jpeg').trim() || 'image/jpeg';
     const sourceApp = String(request.data?.sourceApp || 'van1_merchant').trim() || 'van1_merchant';
+    const topUpPurpose = String(request.data?.purpose || 'top_up').trim() || 'top_up';
 
     if (requestedUid && requestedUid !== uid) {
       throw new HttpsError('permission-denied', 'ไม่สามารถส่งสลิปแทนผู้ใช้อื่นได้');
@@ -5261,9 +5259,16 @@ exports.verifyTopUpSlip = onCall(
     if (!paymentGroupId) {
       throw new HttpsError('invalid-argument', 'กรุณาระบุ paymentGroupId');
     }
+    if (topUpPurpose === 'security_deposit' && expectedAmount < MERCHANT_SECURITY_DEPOSIT_AMOUNT) {
+      throw new HttpsError(
+        'invalid-argument',
+        `ค่าประกันเปิดร้านขั้นต่ำ ${MERCHANT_SECURITY_DEPOSIT_AMOUNT.toLocaleString('th-TH')} บาท`,
+      );
+    }
     if (storageBucket && !ALLOWED_TOPUP_STORAGE_BUCKETS.has(storageBucket)) {
       throw new HttpsError('invalid-argument', 'ไม่รองรับ bucket ที่ระบุ');
     }
+    assertTopUpStoragePathForActor(uid, storagePath, sourceApp);
 
     await consumeTopUpDailyVerificationAttempt(uid);
 
@@ -5281,27 +5286,13 @@ exports.verifyTopUpSlip = onCall(
       fileName,
       contentType,
       sourceApp,
+      purpose: topUpPurpose,
       status: 'checking',
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
     const paymentCollectionSettings = await getPaymentCollectionSettings();
-    const expectedPromptPayId = normalizeDigits(
-      String(request.data?.expectedPromptPayId || '').trim(),
-    );
-    const slipValidationSettings =
-      expectedPromptPayId.length === 13 || isPromptPayPhoneDigits(expectedPromptPayId)
-        ? normalizePaymentCollectionSettings({
-            ...paymentCollectionSettings,
-            promptPayNationalIdOrTaxId:
-              expectedPromptPayId.length === 13
-                ? expectedPromptPayId
-                : paymentCollectionSettings.promptPayNationalIdOrTaxId,
-            promptPayPhoneNumber: isPromptPayPhoneDigits(expectedPromptPayId)
-              ? expectedPromptPayId
-              : paymentCollectionSettings.promptPayPhoneNumber,
-          })
-        : paymentCollectionSettings;
+    const slipValidationSettings = paymentCollectionSettings;
     const bucket = storageBucket ? admin.storage().bucket(storageBucket) : admin.storage().bucket();
     const file = bucket.file(storagePath);
     const [exists] = await file.exists();
@@ -5617,6 +5608,22 @@ exports.verifyTopUpSlip = onCall(
       });
     }
 
+    let securityDepositPaid = false;
+    if (
+      topUpPurpose === 'security_deposit'
+      && creditedAmount >= MERCHANT_SECURITY_DEPOSIT_AMOUNT
+    ) {
+      await db.collection('users').doc(uid).set(
+        {
+          merchantSecurityDepositPaid: true,
+          merchantSecurityDepositPaidAt: FieldValue.serverTimestamp(),
+          merchantSecurityDepositAmount: creditedAmount,
+        },
+        { merge: true },
+      );
+      securityDepositPaid = true;
+    }
+
     return {
       success: true,
       status: verificationStatus,
@@ -5626,10 +5633,12 @@ exports.verifyTopUpSlip = onCall(
       remainingAmount,
       overpaidAmount,
       slipFeedbackId: slipOkFeedbackId,
+      securityDepositPaid,
       paymentGroupId,
       creditId: creditDocId,
     };
   },
 );
 
-Object.assign(exports, merchantWallet.registerHandlers());
+// getMerchantWallet / sync triggers ย้ายไป van2/functions/merchant_wallet.js
+// คง syncMerchantWallet ใน verifyTopUpSlip เพื่ออัปเดตกระเป๋าทันทีหลังเติมเงิน

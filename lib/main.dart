@@ -24,6 +24,7 @@ import 'navigation_helper.dart';
 import 'utils/app_colors.dart';
 import 'services/notification_service.dart';
 import 'widgets/app_update_gate.dart';
+import 'widgets/app_unlock_gate.dart';
 import 'utils/feature_flags.dart';
 import 'utils/phone_auth_config.dart';
 
@@ -289,7 +290,9 @@ class MyApp extends StatelessWidget {
             body: Center(child: CircularProgressIndicator()),
           );
         }
-        return snapshot.hasData ? const AuthWrapper() : const WelcomeScreen();
+        return snapshot.hasData
+            ? const AppUnlockGate(child: AuthWrapper())
+            : const WelcomeScreen();
       },
     );
   }

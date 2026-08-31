@@ -1,0 +1,39 @@
+---
+description: ก่อนแก้ Firebase — จำแนก SHARED/SELF/CROSS-WRITE (van1–4)
+alwaysApply: true
+---
+
+# Van Ecosystem — Change Gate (บังคับก่อนแก้ Firebase)
+
+อ่าน: `..\..\..\van2\scripts\DEPLOY_RISK_MATRIX.md` + `..\..\..\van2\scripts\VAN_ECOSYSTEM_CROSS_WRITE.md`
+
+## 3 คำถาม (ตอบในใจหรือสรุปให้ user ก่อนแก้)
+
+1. **SHARED / SELF / CROSS-WRITE?**
+   - **SHARED** — rules, Auth, App Check, schema collection ร่วม → deploy **van2** + smoke **van3**
+   - **SELF** — storage/hosting/functions แอปเดียว
+   - **CROSS-WRITE** — van4 เขียน → van2/van1/van3 อ่าน → แก้ **ทั้ง writer + consumer**
+
+2. **แอปไหนต้องเทสหลัง deploy?**
+
+   | แก้อะไร | เทส |
+   |---------|-----|
+   | `firestore.rules` | van3 online → van2 order → van1 orders → van4 admin |
+   | `coupons` / `promotions` / `pricing_config` | **van2** หน้าแรก + ตะกร้า |
+   | `products` / catalog | **van2** catalog + **van1** ร้าน |
+   | `orders` / settlement | **van1** + **van3** wallet |
+   | boot / `firebase_options` / App Check | **แอปที่แก้เท่านั้น** — อย่า copy config ข้ามแอป |
+
+3. **Deploy อะไรบ้าง?** rules / function ชื่อ / APK van ไหน — ถ้าไม่ครบคู่จะพัง
+
+## ห้าม (van1)
+
+- Deploy Firestore default (ใช้ van2)
+- `firebase deploy` แบบ raw
+- เปลี่ยน field CROSS-WRITE โดยไม่เช็ค van2 consumer
+
+## Deploy ที่ถูก (van1)
+
+```powershell
+..\..\..\van2\scripts\deploy-self.ps1 -App van1 -Target storage -ConfirmDeploy "APPROVE:van1:van-merchant" -FinalAcknowledge "YES I UNDERSTAND"
+```

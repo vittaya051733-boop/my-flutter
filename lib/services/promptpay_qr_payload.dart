@@ -99,6 +99,64 @@ class PromptPayQrPayload {
     return 'PromptPay ••••$suffix';
   }
 
+  static const String payoutLinkedBankNotice =
+      'ต้องเป็นเบอร์หรือเลข PromptPay ที่ผูกกับบัญชีธนาคารที่ลงทะเบียนไว้ (ใช้รับเงินถอน)';
+
+  static String normalizeId(String promptPayId) {
+    var digits = _digitsOnly(promptPayId);
+    if (digits.length == 13) {
+      return digits;
+    }
+    if (digits.startsWith('66') && digits.length >= 11 && digits.length <= 12) {
+      digits = '0${digits.substring(2)}';
+    }
+    if (digits.length == 9) {
+      digits = '0$digits';
+    }
+    return digits;
+  }
+
+  static bool isValidId(String promptPayId) {
+    final digits = normalizeId(promptPayId);
+    return digits.length == 13 ||
+        (digits.length >= 9 && digits.length <= 10);
+  }
+
+  static String? resolveProfileId({String? phone, String? nationalId}) {
+    final nationalDigits = _digitsOnly(nationalId ?? '');
+    if (nationalDigits.length == 13) {
+      return nationalDigits;
+    }
+    final phoneDigits = normalizeId(phone ?? '');
+    if (phoneDigits.length >= 9 && phoneDigits.length <= 10) {
+      return phoneDigits;
+    }
+    return null;
+  }
+
+  static bool hasValidPayoutProfile({String? phone, String? nationalId}) {
+    return resolveProfileId(phone: phone, nationalId: nationalId) != null;
+  }
+
+  static String? validatePayoutProfile({String? phone, String? nationalId}) {
+    final phoneRaw = phone?.trim() ?? '';
+    final nationalRaw = nationalId?.trim() ?? '';
+    if (phoneRaw.isEmpty && nationalRaw.isEmpty) {
+      return 'กรุณากรอกเบอร์ PromptPay หรือเลขบัตร/นิติบุคคล';
+    }
+    final nationalDigits = _digitsOnly(nationalRaw);
+    if (nationalRaw.isNotEmpty && nationalDigits.length != 13) {
+      return 'เลขบัตร/นิติบุคคล PromptPay ต้องมี 13 หลัก';
+    }
+    if (phoneRaw.isNotEmpty && !isValidId(phoneRaw)) {
+      return 'เบอร์ PromptPay ไม่ถูกต้อง (เช่น 0812345678)';
+    }
+    if (hasValidPayoutProfile(phone: phoneRaw, nationalId: nationalRaw)) {
+      return null;
+    }
+    return 'เบอร์หรือเลข PromptPay ไม่ถูกต้อง';
+  }
+
   static String _crc16CcittFalse(String value) {
     var crc = 0xFFFF;
     for (final codeUnit in value.codeUnits) {

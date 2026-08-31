@@ -1,0 +1,10 @@
+---
+description: Expand-only CROSS-WRITE; no raw firebase deploy
+alwaysApply: true
+---
+
+# Expand-only + ห้าม firebase ดิบ
+
+- Schema ข้ามแอป: เพิ่ม field ก่อน → migrate → ค่อยลบ (ดู `..\..\van2\scripts\VAN_ECOSYSTEM_SCHEMA_REGISTRY.md`)
+- Deploy ผ่าน `..\..\van2\scripts\deploy.ps1` เท่านั้น
+- ห้าม `firebase deploy` / `--only firestore,functions`

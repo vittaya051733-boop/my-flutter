@@ -17,6 +17,20 @@ import 'chat_room_screen.dart';
 import 'services/chat_warmup.dart';
 import 'services/notification_service.dart';
 import 'services/shop_operations_service.dart';
+import 'utils/product_variant_color.dart';
+
+String _orderItemVariantLabel(OrderItem item) {
+  final parts = <String>[
+    if (item.selectedColor?.trim().isNotEmpty == true)
+      ProductVariantColorSupport.displayLabel(item.selectedColor),
+    if (item.selectedSize?.trim().isNotEmpty == true)
+      item.selectedSize!.trim(),
+  ];
+  if (parts.isEmpty) {
+    return '';
+  }
+  return 'ตัวเลือก: ${parts.join(' · ')}';
+}
 
 class OrderManagementScreen extends StatefulWidget {
   const OrderManagementScreen({super.key, this.focusOrderId});
@@ -1393,6 +1407,16 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
                           ),
                         ),
                       ],
+                      if (_orderItemVariantLabel(item).isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          _orderItemVariantLabel(item),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 3),
                       Text(
                         'ราคาต่อชิ้น ฿${item.price.toStringAsFixed(2)}',
@@ -2081,6 +2105,16 @@ extension on _OrderManagementScreenState {
   }
 
   Future<void> _acceptOrder(DetailedOrder order, {bool silent = false}) async {
+    final blockMessage = ShopOperationsService.penaltyBlockMessage(_operationsSettings);
+    if (blockMessage != null) {
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(blockMessage), backgroundColor: Colors.orange),
+        );
+      }
+      return;
+    }
+
     try {
       final now = DateTime.now();
       final preparationMinutes = (order.preparingDuration / 60000)

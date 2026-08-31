@@ -21,9 +21,135 @@ import 'services/shop_profile_cache_service.dart';
 import 'services/shop_operations_service.dart';
 import 'services/video_prefetch_service.dart';
 import 'services/friend_warmup_service.dart';
+import 'services/ecosystem_heartbeat_service.dart';
 import 'models/shop_operations_settings.dart';
 import 'merchant_pricing_policy.dart';
+import 'models/product_variant.dart';
+import 'utils/product_variant_color.dart';
 import 'utils/shop_profile_resolver.dart';
+
+class _HomeProductVariantDisplay {
+  const _HomeProductVariantDisplay({
+    required this.priceLabel,
+    required this.discountedPriceLabel,
+    required this.stockLabel,
+    required this.colors,
+    required this.sizes,
+    required this.discountPercent,
+  });
+
+  final String priceLabel;
+  final String discountedPriceLabel;
+  final String stockLabel;
+  final List<String> colors;
+  final List<String> sizes;
+  final double discountPercent;
+
+  bool get hasOptions => colors.isNotEmpty || sizes.isNotEmpty;
+}
+
+Widget _buildHomeVariantOptionsDisplay(
+  _HomeProductVariantDisplay display, {
+  required bool onDarkBackground,
+}) {
+  if (!display.hasOptions) {
+    return const SizedBox.shrink();
+  }
+
+  final sizeStyle = TextStyle(
+    fontSize: 11,
+    color: onDarkBackground ? Colors.white70 : Colors.black87,
+  );
+
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
+    children: [
+      if (display.colors.isNotEmpty)
+        ProductVariantColorSwatchRow(
+          colors: display.colors,
+          size: onDarkBackground ? 16 : 22,
+          spacing: 5,
+          lightBorder: onDarkBackground,
+        ),
+      if (display.colors.isNotEmpty && display.sizes.isNotEmpty)
+        SizedBox(width: onDarkBackground ? 6 : 8),
+      if (display.sizes.isNotEmpty)
+        Expanded(
+          child: Text(
+            display.sizes.join(' · '),
+            style: sizeStyle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+    ],
+  );
+}
+
+_HomeProductVariantDisplay _resolveHomeProductDisplay(
+  Map<String, dynamic> data, {
+  int imageIndex = 0,
+}) {
+  final fallbackPrice = MerchantPricingPolicy.parseNumber(data['price']);
+  final fallbackStock = (data['stock'] as num?)?.toInt() ?? 0;
+  final discountPercent = MerchantPricingPolicy.parseDiscountPercent(
+    data['discountPercent'],
+  );
+  final hasVariants = ProductVariantSupport.productHasVariants(data);
+  final variants = ProductVariantSupport.parseList(data['variants']);
+  final scopedVariants = hasVariants
+      ? ProductVariantSupport.variantsForImageIndex(
+          variants,
+          data,
+          imageIndex,
+        )
+      : const <ProductVariant>[];
+
+  if (!hasVariants || scopedVariants.isEmpty) {
+    final priceLabel = MerchantPricingPolicy.formatPrice(fallbackPrice);
+    final discountedPriceLabel = MerchantPricingPolicy.formatPrice(
+      MerchantPricingPolicy.applyDiscount(fallbackPrice, discountPercent),
+    );
+    return _HomeProductVariantDisplay(
+      priceLabel: priceLabel,
+      discountedPriceLabel: discountedPriceLabel,
+      stockLabel: fallbackStock.toString(),
+      colors: const <String>[],
+      sizes: const <String>[],
+      discountPercent: discountPercent,
+    );
+  }
+
+  final basePrices = scopedVariants.map((variant) => variant.price);
+  final priceLabel = ProductVariantSupport.formatPriceRange(basePrices);
+  final discountedPriceLabel = ProductVariantSupport.formatPriceRange(
+    scopedVariants.map(
+      (variant) => MerchantPricingPolicy.applyDiscount(
+        variant.price,
+        discountPercent,
+      ),
+    ),
+  );
+  final stockLabel =
+      ProductVariantSupport.sumStock(scopedVariants).toString();
+  final colors = ProductVariantSupport.uniqueOptionValues(
+    scopedVariants,
+    colors: true,
+  );
+  final sizes = ProductVariantSupport.uniqueOptionValues(
+    scopedVariants,
+    colors: false,
+  );
+
+  return _HomeProductVariantDisplay(
+    priceLabel: priceLabel,
+    discountedPriceLabel: discountedPriceLabel,
+    stockLabel: stockLabel,
+    colors: colors,
+    sizes: sizes,
+    discountPercent: discountPercent,
+  );
+}
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -33,7 +159,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static const String _shopOperationsCollection = 'shop_operations';
   static const String _notificationTargetApp = 'van1';
   static const Duration _firestoreReadTimeout = Duration(seconds: 8);
@@ -79,12 +205,14 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: _tabCount, vsync: this);
     _pages[0] = _buildPage(0);
     _tabController.addListener(_handleTabChange);
     _loadShopDetails();
     _startChatWarmup();
     _startBackgroundListeners();
+    EcosystemHeartbeatService.instance.start();
 
     // บังคับให้ System Navigation Bar เป็นสีขาวเมื่อเข้า Home
     SystemChrome.setSystemUIOverlayStyle(
@@ -95,6 +223,17 @@ class _HomeScreenState extends State<HomeScreen>
         systemNavigationBarContrastEnforced: false,
       ),
     );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Keep heartbeat while backgrounded so van4 health stays green when
+    // switching apps on the same device. Stop only when process is gone.
+    if (state == AppLifecycleState.resumed) {
+      EcosystemHeartbeatService.instance.start();
+    } else if (state == AppLifecycleState.detached) {
+      EcosystemHeartbeatService.instance.stop();
+    }
   }
 
   void _startBackgroundListeners() {
@@ -141,6 +280,11 @@ class _HomeScreenState extends State<HomeScreen>
     final action = (data['action'] as String?)?.trim();
     return (type == null || type.isEmpty || type == 'app_notification') &&
         action == 'order_accepted';
+  }
+
+  bool _isProductAiReadyNotification(Map<String, dynamic> data) {
+    return (data['action'] as String?)?.trim() == 'product_ai_ready' ||
+        (data['type'] as String?)?.trim() == 'product_ai_ready';
   }
 
   Future<void> _loadShopDetails() async {
@@ -346,15 +490,22 @@ class _HomeScreenState extends State<HomeScreen>
             }
 
             if (newDocs.isNotEmpty) {
-              final latest = newDocs.first.data();
-              final title = (latest['title'] as String?)?.trim();
-              final body = (latest['body'] as String?)?.trim();
-              final overlayMessage = [
-                if (title != null && title.isNotEmpty) title,
-                if (body != null && body.isNotEmpty) body,
-              ].join(' - ');
-              if (overlayMessage.isNotEmpty) {
-                showOverlayNotification(overlayMessage);
+              final overlayDocs = newDocs
+                  .where(
+                    (doc) => !_isProductAiReadyNotification(doc.data()),
+                  )
+                  .toList(growable: false);
+              if (overlayDocs.isNotEmpty) {
+                final latest = overlayDocs.first.data();
+                final title = (latest['title'] as String?)?.trim();
+                final body = (latest['body'] as String?)?.trim();
+                final overlayMessage = [
+                  if (title != null && title.isNotEmpty) title,
+                  if (body != null && body.isNotEmpty) body,
+                ].join(' - ');
+                if (overlayMessage.isNotEmpty) {
+                  showOverlayNotification(overlayMessage);
+                }
               }
             }
 
@@ -740,6 +891,8 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   void dispose() {
+    EcosystemHeartbeatService.instance.stop();
+    WidgetsBinding.instance.removeObserver(this);
     _notificationSubscription?.cancel();
     _shopOperationsSubscription?.cancel();
     _tabController.removeListener(_handleTabChange);
@@ -1077,13 +1230,15 @@ class _HomeDashboard extends StatelessWidget {
     );
     final videoUrl = data['videoUrl'] as String?;
     final name = (data['name'] ?? '').toString();
-    final price = (data['price'] ?? '').toString();
-    final stock = data['stock']?.toString() ?? '0';
     final description = (data['description'] ?? '').toString();
     final productId = (data['documentId'] ?? data['id'] ?? '').toString();
     final videoThumbnailUrl = (data['videoThumbnailUrl'] ?? '')
         .toString()
         .trim();
+    final discountPercent = MerchantPricingPolicy.parseDiscountPercent(
+      data['discountPercent'],
+    );
+    final variants = ProductVariantSupport.parseList(data['variants']);
 
     showDialog(
       context: context,
@@ -1099,10 +1254,11 @@ class _HomeDashboard extends StatelessWidget {
               ? videoThumbnailUrl
               : null,
           name: name,
-          price: price,
-          stock: stock,
           description: description,
           productId: productId,
+          productData: data,
+          variants: variants,
+          discountPercent: discountPercent,
         ),
       ),
     );
@@ -1447,21 +1603,14 @@ class _HomeDashboard extends StatelessWidget {
                                   ? thumbnailImages.first
                                   : null;
                               final name = (data['name'] ?? '').toString();
-                              final price = (data['price'] ?? '').toString();
                               final discountPercent =
                                   MerchantPricingPolicy.parseDiscountPercent(
                                     data['discountPercent'],
                                   );
-                              final basePrice =
-                                  MerchantPricingPolicy.parseNumber(
-                                    data['price'] ?? price,
-                                  );
-                              final discountedPrice =
-                                  MerchantPricingPolicy.applyDiscount(
-                                    basePrice,
-                                    discountPercent,
-                                  );
-                              final stock = data['stock']?.toString() ?? '0';
+                              final display = _resolveHomeProductDisplay(
+                                data,
+                                imageIndex: 0,
+                              );
                               final description = (data['description'] ?? '')
                                   .toString();
 
@@ -1605,9 +1754,16 @@ class _HomeDashboard extends StatelessWidget {
                                                       TextOverflow.ellipsis,
                                                 ),
                                                 const SizedBox(height: 2),
+                                                if (display.hasOptions) ...[
+                                                  _buildHomeVariantOptionsDisplay(
+                                                    display,
+                                                    onDarkBackground: true,
+                                                  ),
+                                                  const SizedBox(height: 2),
+                                                ],
                                                 if (discountPercent > 0) ...[
                                                   Text(
-                                                    'ราคาเต็ม: ${MerchantPricingPolicy.formatPrice(basePrice)} บาท',
+                                                    'ราคาเต็ม: ${display.priceLabel} บาท',
                                                     style: const TextStyle(
                                                       fontSize: 12,
                                                       color: Colors.white60,
@@ -1620,7 +1776,7 @@ class _HomeDashboard extends StatelessWidget {
                                                   ),
                                                   const SizedBox(height: 2),
                                                   Text(
-                                                    'หลังลด: ${MerchantPricingPolicy.formatPrice(discountedPrice)} บาท',
+                                                    'หลังลด: ${display.discountedPriceLabel} บาท',
                                                     style: const TextStyle(
                                                       fontSize: 13,
                                                       fontWeight:
@@ -1633,7 +1789,7 @@ class _HomeDashboard extends StatelessWidget {
                                                   ),
                                                 ] else
                                                   Text(
-                                                    'ราคา: $price บาท',
+                                                    'ราคา: ${display.priceLabel} บาท',
                                                     style: const TextStyle(
                                                       fontSize: 13,
                                                       color: Colors.white70,
@@ -1643,7 +1799,7 @@ class _HomeDashboard extends StatelessWidget {
                                                         TextOverflow.ellipsis,
                                                   ),
                                                 Text(
-                                                  'สต๊อก: $stock',
+                                                  'สต๊อก: ${display.stockLabel}',
                                                   style: const TextStyle(
                                                     fontSize: 13,
                                                     color: Colors.white70,
@@ -2344,10 +2500,11 @@ class _ProductGalleryContent extends StatefulWidget {
   const _ProductGalleryContent({
     required this.images,
     required this.name,
-    required this.price,
-    required this.stock,
     required this.description,
     required this.productId,
+    required this.productData,
+    required this.variants,
+    required this.discountPercent,
     this.videoUrl,
     this.videoThumbnailUrl,
     Key? key,
@@ -2357,10 +2514,11 @@ class _ProductGalleryContent extends StatefulWidget {
   final String? videoUrl;
   final String? videoThumbnailUrl;
   final String name;
-  final String price;
-  final String stock;
   final String description;
   final String productId;
+  final Map<String, dynamic> productData;
+  final List<ProductVariant> variants;
+  final double discountPercent;
 
   @override
   State<_ProductGalleryContent> createState() => _ProductGalleryContentState();
@@ -2394,6 +2552,16 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
         ? widget.images.length + (hasVideo ? 1 : 0)
         : (hasVideo ? 1 : 0);
     final canSwipe = totalPages > 1;
+    final onVideoPage = hasVideo && _currentIndex == totalPages - 1;
+    final imageIndex = hasImages && !onVideoPage && _currentIndex < widget.images.length
+        ? _currentIndex
+        : 0;
+    final display = onVideoPage
+        ? _resolveHomeProductDisplay(widget.productData, imageIndex: 0)
+        : _resolveHomeProductDisplay(widget.productData, imageIndex: imageIndex);
+    final priceLine = display.discountPercent > 0
+        ? 'ราคาเต็ม: ${display.priceLabel} บาท · หลังลด: ${display.discountedPriceLabel} บาท'
+        : 'ราคา: ${display.priceLabel} บาท';
 
     return SizedBox(
       width: MediaQuery.of(context).size.width * 0.85,
@@ -2457,17 +2625,51 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'ราคา: ${widget.price} บาท',
+                    priceLine,
                     style: const TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  if (display.hasOptions) ...[
+                    const SizedBox(height: 6),
+                    if (display.colors.isNotEmpty) ...[
+                      Text(
+                        'สี',
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      ProductVariantColorSwatchRow(
+                        colors: display.colors,
+                        size: 28,
+                        spacing: 8,
+                      ),
+                    ],
+                    if (display.sizes.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'ขนาด',
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        display.sizes.join(' · '),
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ],
                   _MerchantProductRatingSummary(productId: widget.productId),
                   _MerchantProductRecentReviews(productId: widget.productId),
                   const SizedBox(height: 4),
                   Text(
-                    'สต๊อก: ${widget.stock}',
+                    'สต๊อก: ${display.stockLabel}',
                     style: const TextStyle(fontSize: 14, color: Colors.black87),
                   ),
                   if (widget.description.isNotEmpty) ...[

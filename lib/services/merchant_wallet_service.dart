@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:van1/utils/app_check_guard.dart';
 
 class MerchantWalletSnapshot {
   const MerchantWalletSnapshot({
@@ -12,6 +13,8 @@ class MerchantWalletSnapshot {
     required this.securityDepositAmount,
     this.contractStatus = 'active',
     this.syncedByCloudFunction = false,
+    this.omisePendingCredit = 0,
+    this.omiseWithdrawableCredit = 0,
   });
 
   final double totalCredit;
@@ -23,6 +26,12 @@ class MerchantWalletSnapshot {
   final String contractStatus;
   final bool syncedByCloudFunction;
 
+  /// รายได้จากออเดอร์ที่แอดมินตั้งเวลาพักไว้ — ยังถอนไม่ได้
+  final double omisePendingCredit;
+
+  /// รายได้ที่ปล่อยให้ถอนได้แล้ว
+  final double omiseWithdrawableCredit;
+
   factory MerchantWalletSnapshot.fromMap(Map<String, dynamic> data) {
     return MerchantWalletSnapshot(
       totalCredit: _parseMoney(data['totalCredit']),
@@ -33,6 +42,8 @@ class MerchantWalletSnapshot {
       securityDepositAmount: _parseMoney(data['securityDepositAmount']),
       contractStatus: data['contractStatus']?.toString() ?? 'active',
       syncedByCloudFunction: data['syncedBy'] == 'cloud_function',
+      omisePendingCredit: _parseMoney(data['omisePendingCredit']),
+      omiseWithdrawableCredit: _parseMoney(data['omiseWithdrawableCredit']),
     );
   }
 
@@ -53,6 +64,8 @@ class MerchantWalletSnapshot {
     canWithdraw: false,
     isContractCancelled: false,
     securityDepositAmount: 0,
+    omisePendingCredit: 0,
+    omiseWithdrawableCredit: 0,
   );
 }
 
@@ -73,6 +86,7 @@ class MerchantWalletService {
     }
 
     try {
+      await AppCheckGuard.ensureFinancialReady();
       final result = await _functions.httpsCallable('getMerchantWallet').call(
         <String, dynamic>{'merchantUid': trimmedUid},
       );

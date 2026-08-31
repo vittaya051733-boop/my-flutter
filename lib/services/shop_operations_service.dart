@@ -64,6 +64,17 @@ class ShopOperationsService {
       SetOptions(merge: true),
     );
   }
+
+  static String? penaltyBlockMessage(ShopOperationsSettings settings) {
+    if (!settings.penaltyBlocked) {
+      return null;
+    }
+    final reason = settings.penaltyBlockReason?.trim();
+    if (reason != null && reason.isNotEmpty) {
+      return reason;
+    }
+    return 'มีค่าปรับค้างชำระ — กรุณาเติมเงินในกระเป๋า';
+  }
 }
 
 class _ShopOperationsPermissionFallback implements Exception {}

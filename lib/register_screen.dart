@@ -11,6 +11,8 @@ import 'contract_screen.dart';
 import 'services/branch_assignment_service.dart';
 import 'services/email_otp_service.dart';
 import 'services/notification_service.dart';
+import 'services/security_pin_service.dart';
+import 'services/app_unlock_session.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
 import 'web_google_auth.dart';
@@ -55,6 +57,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _confirmController = TextEditingController();
+  final TextEditingController _pinController = TextEditingController();
+  final TextEditingController _confirmPinController = TextEditingController();
   bool _loading = false;
   bool _isTypingPhoneNumber = false;
   bool _isSocialLoading = false;
@@ -222,6 +226,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
       return;
     }
 
+    final pin = _pinController.text.trim();
+    final confirmPin = _confirmPinController.text.trim();
+    if (!SecurityPinService.instance.isValidPinFormat(pin)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาตั้งรหัส PIN 6 หลัก')),
+      );
+      return;
+    }
+    if (pin != confirmPin) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('รหัส PIN ไม่ตรงกัน')),
+      );
+      return;
+    }
+
     setState(() => _loading = true);
     try {
       debugPrint('🔄 เริ่มสร้างบัญชี: $contactInput'); // Debug log
@@ -233,6 +252,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         final args = {
           'phone': _formatPhoneNumber(contactInput),
           'password': password,
+          'securityPin': pin,
           'serviceType': _serviceTypeNormalized,
           'branchAssignment': _pendingBranchAssignment?.toFirestoreFields(),
         };
@@ -250,6 +270,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
       debugPrint('✅ สร้างบัญชีสำเร็จ: ${user?.uid}'); // Debug log
 
       if (user != null) {
+        await SecurityPinService.instance.setPin(user.uid, pin);
+        AppUnlockSession.unlock();
+
         // *** แก้ไข: บันทึก serviceType ลงใน contracts collection ทันทีหลังสร้าง user ***
         if (_serviceTypeNormalized != null) {
           await FirebaseFirestore.instance
@@ -607,6 +630,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   void dispose() {
     _debouncer.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmController.dispose();
+    _pinController.dispose();
+    _confirmPinController.dispose();
     super.dispose();
   }
 
@@ -844,6 +872,72 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ),
                           labelStyle: TextStyle(color: Colors.black54),
                         ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade300),
+                        color: Colors.grey.shade50,
+                      ),
+                      child: TextField(
+                        controller: _pinController,
+                        obscureText: true,
+                        keyboardType: TextInputType.number,
+                        maxLength: 6,
+                        decoration: const InputDecoration(
+                          labelText: 'รหัส PIN 6 หลัก',
+                          prefixIcon: Icon(
+                            Icons.pin_outlined,
+                            color: AppColors.accentDark,
+                            size: 20,
+                          ),
+                          border: InputBorder.none,
+                          counterText: '',
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
+                          labelStyle: TextStyle(color: Colors.black54),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey.shade300),
+                        color: Colors.grey.shade50,
+                      ),
+                      child: TextField(
+                        controller: _confirmPinController,
+                        obscureText: true,
+                        keyboardType: TextInputType.number,
+                        maxLength: 6,
+                        decoration: const InputDecoration(
+                          labelText: 'ยืนยันรหัส PIN 6 หลัก',
+                          prefixIcon: Icon(
+                            Icons.pin_outlined,
+                            color: AppColors.accentDark,
+                            size: 20,
+                          ),
+                          border: InputBorder.none,
+                          counterText: '',
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
+                          labelStyle: TextStyle(color: Colors.black54),
+                        ),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        'ใช้ปลดล็อกแอป และยืนยันก่อนถอนเงิน',
+                        style: TextStyle(fontSize: 12, color: Colors.black54),
                       ),
                     ),
                     const SizedBox(height: 16),
