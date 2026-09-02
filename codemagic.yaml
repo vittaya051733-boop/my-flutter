@@ -1,12 +1,37 @@
 workflows:
-  build_ios:
-    name: Build iOS IPA
-    max_build_duration: 60
+  van1-ios-testflight:
+    name: VanTalad Merchant iOS TestFlight
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    integrations:
+      # สร้างใน Codemagic: Team settings → Integrations → App Store Connect
+      app_store_connect: van_apple_connect
     environment:
       flutter: stable
       xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.vantalad.merchant
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
     scripts:
-      - flutter pub get
-      - flutter build ipa --release
+      - name: Install dependencies
+        script: flutter pub get
+      - name: Install CocoaPods
+        script: |
+          cd ios
+          pod install
+          cd ..
+      - name: Build IPA
+        script: flutter build ipa --release
     artifacts:
       - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false
