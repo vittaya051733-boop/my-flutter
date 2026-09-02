@@ -4,7 +4,6 @@ workflows:
     max_build_duration: 120
     instance_type: mac_mini_m2
     integrations:
-      # สร้างใน Codemagic: Team settings → Integrations → App Store Connect
       app_store_connect: van_apple_connect
     environment:
       flutter: stable
@@ -21,6 +20,14 @@ workflows:
     scripts:
       - name: Install dependencies
         script: flutter pub get
+      - name: Fetch iOS code signing files
+        script: |
+          app-store-connect fetch-signing-files "com.vantalad.merchant" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+      - name: Set up Xcode signing
+        script: xcode-project use-profiles
       - name: Install CocoaPods
         script: |
           cd ios
