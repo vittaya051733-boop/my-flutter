@@ -957,14 +957,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.5.4"
-  image_gallery_saver2_fixed:
+  image_gallery_saver_plus:
     dependency: "direct main"
     description:
-      name: image_gallery_saver2_fixed
-      sha256: dd81246250d8cac5eb11ed7362b676feae6694ea3de31329bc4b471587d1ae38
+      name: image_gallery_saver_plus
+      sha256: "199b9e24f8d85e98f11e3d35571ab68ae50626ad40e2bb85c84383f69a6950ad"
       url: "https://pub.dev"
     source: hosted
-    version: "2.0.9"
+    version: "4.0.1"
   image_picker:
     dependency: "direct main"
     description:
