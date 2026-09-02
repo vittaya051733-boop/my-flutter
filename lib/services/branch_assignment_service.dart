@@ -24,6 +24,7 @@ class BranchAssignment {
   Map<String, dynamic> toFirestoreFields() {
     return <String, dynamic>{
       'branchId': branchId,
+      'branchLabel': branchId,
       if (branchName != null && branchName!.trim().isNotEmpty)
         'branchName': branchName!.trim(),
       if (distanceKm != null) 'branchDistanceKm': distanceKm,
@@ -34,6 +35,7 @@ class BranchAssignment {
         },
       'branchAssignmentSource': source,
       'branchAssignedAt': FieldValue.serverTimestamp(),
+      'marketId': branchId,
     };
   }
 }
@@ -42,7 +44,7 @@ class BranchAssignmentService {
   BranchAssignmentService._();
 
   static const String defaultBranchId = 'central';
-  static const String defaultBranchName = 'แว๊นตลาด สาขากลาง (HQ)';
+  static const String defaultBranchName = 'ตลาดโนนสูง';
 
   static BranchAssignment central({
     double? latitude,

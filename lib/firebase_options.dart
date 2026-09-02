@@ -59,11 +59,11 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyCuGZF0-EUBTuARrToDWQM5pNBMNDg2yYU',
-    appId: '1:802503541368:ios:ea92f5b881a6c472f6a38d',
+    apiKey: 'AIzaSyCZGWHYh4FvLeAHT_gLTJPk6i1-VdDkFUE',
+    appId: '1:802503541368:ios:60fa52f30ee44789f6a38d',
     messagingSenderId: '802503541368',
     projectId: 'van-merchant',
     storageBucket: 'van-merchant-van1-storage-802503541368',
-    iosBundleId: 'van-merchan',
+    iosBundleId: 'com.vantalad.merchant',
   );
 }

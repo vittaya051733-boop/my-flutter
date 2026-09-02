@@ -66,6 +66,12 @@
 					<string>fb4362533627406092</string>
 				</array>
 			</dict>
+			<dict>
+				<key>CFBundleURLSchemes</key>
+				<array>
+					<string>com.googleusercontent.apps.802503541368-p2okrn2l0ic0rm26j7f7va6pgmdisutk</string>
+				</array>
+			</dict>
 		</array>
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>แอปนี้ต้องการเข้าถึงคลังรูปภาพและวิดีโอของคุณเพื่อเลือกสื่อสำหรับสินค้า ร้านค้า และสมุดบัญชี</string>

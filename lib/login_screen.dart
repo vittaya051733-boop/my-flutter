@@ -9,6 +9,8 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'navigation_helper.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
+import 'apple_auth.dart';
+import 'web_apple_auth.dart';
 import 'web_google_auth.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -29,7 +31,7 @@ class _LoginScreenState extends State<LoginScreen> {
   static const String _iosClientId = String.fromEnvironment(
     'GOOGLE_IOS_CLIENT_ID',
     defaultValue:
-        '802503541368-l0arn6sf8bsfgeitv0lk7oddu3f3b9kt.apps.googleusercontent.com',
+        '802503541368-p2okrn2l0ic0rm26j7f7va6pgmdisutk.apps.googleusercontent.com',
   );
 
   final TextEditingController _emailController = TextEditingController();
@@ -43,13 +45,13 @@ class _LoginScreenState extends State<LoginScreen> {
   void initState() {
     super.initState();
     if (kIsWeb) {
-      unawaited(_handleWebGoogleRedirectResult());
+      unawaited(_handleWebOAuthRedirectResult());
     }
   }
 
-  Future<void> _handleWebGoogleRedirectResult() async {
+  Future<void> _handleWebOAuthRedirectResult() async {
     try {
-      final result = await handleWebGoogleRedirectResult();
+      final result = await handleWebOAuthRedirectResult();
       if (result?.user == null || !mounted) {
         return;
       }
@@ -58,8 +60,9 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) {
         return;
       }
-      if (error.code != 'auth/redirect-initiated') {
-        _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้ (${error.code})');
+      if (error.code != 'auth/redirect-initiated' &&
+          error.code != 'redirect-initiated') {
+        _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Apple/Google ได้ (${error.code})');
       }
     } catch (_) {}
   }
@@ -222,6 +225,44 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (e) {
       debugPrint('Unexpected Google sign-in error: $e');
       _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Google ได้');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSocialLoading = false;
+          _socialLoadingKey = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _signInWithApple() async {
+    setState(() {
+      _isSocialLoading = true;
+      _socialLoadingKey = 'apple';
+    });
+
+    try {
+      await signInWithApple();
+      if (!mounted) {
+        return;
+      }
+      await _handlePostLogin();
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'popup-closed-by-user' ||
+          e.code == 'redirect-initiated' ||
+          e.code == 'auth/redirect-initiated') {
+        return;
+      }
+      if (e.code == 'account-exists-with-different-credential' ||
+          e.code == 'auth/account-exists-with-different-credential') {
+        _showSnack('อีเมลนี้ใช้วิธีเข้าสู่ระบบอื่นอยู่แล้ว กรุณาเข้าสู่ระบบด้วยวิธีเดิม');
+        return;
+      }
+      debugPrint('Apple sign-in failed: ${e.code}');
+      _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Apple ได้ (${e.code})');
+    } catch (e) {
+      debugPrint('Unexpected Apple sign-in error: $e');
+      _showSnack('ไม่สามารถเข้าสู่ระบบด้วย Apple ได้');
     } finally {
       if (mounted) {
         setState(() {
@@ -455,6 +496,20 @@ class _LoginScreenState extends State<LoginScreen> {
                 buttonKey: 'google',
               ),
             ),
+            if (isAppleSignInSupported) ...[
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: _socialButton(
+                  onPressed: _isSocialLoading ? null : _signInWithApple,
+                  label: 'เข้าสู่ระบบด้วย Apple',
+                  backgroundColor: Colors.black,
+                  foregroundColor: Colors.white,
+                  buttonKey: 'apple',
+                  icon: Icons.apple,
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
             Center(
               child: GestureDetector(
