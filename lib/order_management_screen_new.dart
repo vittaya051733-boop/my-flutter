@@ -834,8 +834,9 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
         },
       ),
       _VoiceCommandAction(
-        label: 'เตรียมสินค้าเสร็จสิ้น',
+        label: 'พร้อมส่ง',
         phrases: const <String>[
+          'พร้อมส่ง',
           'เตรียมสินค้าเสร็จสิ้น',
           'เตรียมเสร็จ',
           'สินค้าพร้อมแล้ว',
@@ -844,9 +845,7 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
           final order = _currentVoiceTargetOrder();
           if (order == null ||
               !<String>{'accepted', 'preparing'}.contains(order.status)) {
-            _setVoiceMessage(
-              'ไม่พบปุ่ม เตรียมสินค้าเสร็จสิ้น ในการ์ดที่อยู่บนจอ',
-            );
+            _setVoiceMessage('ไม่พบปุ่ม พร้อมส่ง ในการ์ดที่อยู่บนจอ');
             return;
           }
           await _markAsReady(order);
@@ -2078,7 +2077,7 @@ extension on _OrderManagementScreenState {
         return ElevatedButton.icon(
           onPressed: () => _markAsReady(order),
           icon: const Icon(Icons.done_all),
-          label: const Text('เตรียมสินค้าเสร็จสิ้น'),
+          label: const Text('พร้อมส่ง'),
           style: ElevatedButton.styleFrom(
             backgroundColor: AppColors.accent,
             foregroundColor: Colors.white,
@@ -2086,14 +2085,32 @@ extension on _OrderManagementScreenState {
           ),
         );
       case 'ready':
-        return const Text(
-          'รอพนักงานขนส่งมารับสินค้า',
-          style: TextStyle(
-            fontSize: 14,
-            color: Colors.grey,
-            fontStyle: FontStyle.italic,
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.green.shade50,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.green.shade200),
           ),
-          textAlign: TextAlign.center,
+          child: const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.check_circle, color: Colors.green, size: 20),
+              SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  'พร้อมส่งแล้ว · รอไรเดอร์สแกน QR รับสินค้า',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.green,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
         );
       case 'delivering':
         return const Text(

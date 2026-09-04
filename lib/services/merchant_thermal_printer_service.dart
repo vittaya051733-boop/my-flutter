@@ -1,7 +1,7 @@
 import 'dart:io' show Platform;
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:thermal_printer_flutter/thermal_printer_flutter.dart';
 
@@ -19,6 +19,9 @@ class MerchantThermalPrinterService {
   static const String _savedPrinterKey = 'merchant_saved_thermal_printer';
 
   final ThermalPrinterFlutter _plugin = ThermalPrinterFlutter();
+  static const MethodChannel _thermalChannel = MethodChannel(
+    'thermal_printer_flutter',
+  );
 
   Future<void> printViaWifi(BuildContext context, Uint8List receiptPng) async {
     final printer = await _resolveNetworkPrinter(context);
@@ -30,7 +33,7 @@ class MerchantThermalPrinterService {
   Future<void> printViaBle(BuildContext context, Uint8List receiptPng) async {
     await _ensureBleReady();
     final printer = await _resolveBlePrinter(context);
-    await _printEscPos(receiptPng, printer);
+    await _printBleEscPos(receiptPng, printer);
     await _rememberPrinter(printer);
     _showSuccess(context, 'พิมพ์ผ่าน Bluetooth แล้ว');
   }
@@ -59,8 +62,51 @@ class MerchantThermalPrinterService {
     }
   }
 
+  Future<void> _printBleEscPos(Uint8List receiptPng, Printer printer) async {
+    final bytes = Uint8List.fromList(await buildEscPosReceiptBytes(receiptPng));
+    final connected = await _plugin.connect(printer: printer);
+    if (!connected) {
+      throw const PrinterUserException('เชื่อมต่อเครื่องพิมพ์ไม่สำเร็จ');
+    }
+
+    try {
+      // On iOS, connect completes before CoreBluetooth finishes discovering
+      // the printer's writable characteristic. Retry the native write until
+      // that characteristic is ready, and check its boolean result.
+      for (var attempt = 0; attempt < 6; attempt++) {
+        if (attempt > 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+        final printed = await _thermalChannel.invokeMethod<bool>(
+          'writebytes',
+          bytes,
+        );
+        if (printed == true) {
+          return;
+        }
+      }
+      throw const PrinterUserException(
+        'เชื่อมต่อแล้วแต่เครื่องพิมพ์ยังไม่พร้อมรับข้อมูล กรุณาลองใหม่',
+      );
+    } on PlatformException catch (error) {
+      throw PrinterUserException(
+        'ส่งงานพิมพ์ผ่าน Bluetooth ไม่สำเร็จ: ${error.message ?? error.code}',
+      );
+    } finally {
+      await _plugin.disconnect(printer: printer);
+    }
+  }
+
   Future<void> _ensureBleReady() async {
-    final granted = await _plugin.checkBluetoothPermissions();
+    var granted = await _plugin.checkBluetoothPermissions();
+    if (Platform.isIOS && !granted) {
+      // CBCentralManager initially reports "unknown" while iOS initializes
+      // Bluetooth. Give it a moment before treating that as a denial.
+      for (var attempt = 0; attempt < 4 && !granted; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        granted = await _plugin.checkBluetoothPermissions();
+      }
+    }
     if (!granted) {
       throw const PrinterUserException(
         'กรุณาอนุญาต Bluetooth เพื่อเชื่อมต่อเครื่องพิมพ์',
@@ -68,6 +114,11 @@ class MerchantThermalPrinterService {
     }
     final enabled = await _plugin.isBluetoothEnabled();
     if (!enabled) {
+      if (Platform.isIOS) {
+        throw const PrinterUserException(
+          'กรุณาเปิด Bluetooth ในการตั้งค่า iPhone ก่อนพิมพ์',
+        );
+      }
       final turnedOn = await _plugin.enableBluetooth();
       if (!turnedOn) {
         throw const PrinterUserException('กรุณาเปิด Bluetooth ก่อนพิมพ์');
@@ -77,7 +128,7 @@ class MerchantThermalPrinterService {
 
   Future<Printer> _resolveNetworkPrinter(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
-    final savedHost = prefs.getString(_wifiHostKey)?.trim() ?? '';
+    var savedHost = prefs.getString(_wifiHostKey)?.trim() ?? '';
     final savedPort = prefs.getString(_wifiPortKey)?.trim().isNotEmpty == true
         ? prefs.getString(_wifiPortKey)!.trim()
         : '9100';
@@ -86,7 +137,7 @@ class MerchantThermalPrinterService {
     if (savedThermal != null &&
         savedThermal.type == PrinterType.network &&
         savedThermal.ip.trim().isNotEmpty) {
-      return savedThermal;
+      savedHost = savedThermal.ip.trim();
     }
 
     if (!context.mounted) {
@@ -128,22 +179,25 @@ class MerchantThermalPrinterService {
 
   Future<Printer> _resolveBlePrinter(BuildContext context) async {
     final saved = await _loadSavedPrinter();
-    if (saved != null &&
-        saved.type == PrinterType.bluetooth &&
-        saved.bleAddress.trim().isNotEmpty) {
-      return saved;
-    }
-
-    final devices = await _plugin.getPrinters(printerType: PrinterType.bluetooth);
+    final devices = await _plugin.getPrinters(
+      printerType: PrinterType.bluetooth,
+    );
     if (devices.isEmpty) {
       throw const PrinterUserException(
         'ไม่พบเครื่องพิมพ์ Bluetooth — เปิดเครื่องพิมพ์แล้วลองใหม่ (iOS รองรับ BLE)',
       );
     }
 
-    if (devices.length == 1) {
-      return devices.first;
-    }
+    devices.sort((a, b) {
+      final aSaved =
+          saved?.type == PrinterType.bluetooth &&
+          saved?.bleAddress == a.bleAddress;
+      final bSaved =
+          saved?.type == PrinterType.bluetooth &&
+          saved?.bleAddress == b.bleAddress;
+      if (aSaved == bSaved) return 0;
+      return aSaved ? -1 : 1;
+    });
 
     if (!context.mounted) {
       throw const PrinterUserException('ไม่สามารถเลือกเครื่องพิมพ์ได้');
@@ -165,10 +219,16 @@ class MerchantThermalPrinterService {
                 final label = device.name.trim().isNotEmpty
                     ? device.name
                     : device.bleAddress;
+                final isSaved =
+                    saved?.type == PrinterType.bluetooth &&
+                    saved?.bleAddress == device.bleAddress;
                 return ListTile(
                   title: Text(label),
                   subtitle: device.bleAddress.trim().isNotEmpty
                       ? Text(device.bleAddress)
+                      : null,
+                  trailing: isSaved
+                      ? const Chip(label: Text('ล่าสุด'))
                       : null,
                   onTap: () => Navigator.of(dialogContext).pop(device),
                 );
@@ -193,12 +253,6 @@ class MerchantThermalPrinterService {
 
   Future<Printer> _resolveUsbPrinter(BuildContext context) async {
     final saved = await _loadSavedPrinter();
-    if (saved != null &&
-        saved.type == PrinterType.usb &&
-        saved.usbAddress.trim().isNotEmpty) {
-      return saved;
-    }
-
     final devices = await _plugin.getPrinters(printerType: PrinterType.usb);
     if (devices.isEmpty) {
       throw const PrinterUserException(
@@ -206,9 +260,16 @@ class MerchantThermalPrinterService {
       );
     }
 
-    if (devices.length == 1) {
-      return devices.first;
-    }
+    devices.sort((a, b) {
+      final aSaved =
+          saved?.type == PrinterType.usb &&
+          saved?.usbAddress == a.usbAddress;
+      final bSaved =
+          saved?.type == PrinterType.usb &&
+          saved?.usbAddress == b.usbAddress;
+      if (aSaved == bSaved) return 0;
+      return aSaved ? -1 : 1;
+    });
 
     if (!context.mounted) {
       throw const PrinterUserException('ไม่สามารถเลือกเครื่องพิมพ์ได้');
@@ -233,6 +294,11 @@ class MerchantThermalPrinterService {
                         ? device.name
                         : device.usbAddress,
                   ),
+                  trailing:
+                      saved?.type == PrinterType.usb &&
+                          saved?.usbAddress == device.usbAddress
+                      ? const Chip(label: Text('ล่าสุด'))
+                      : null,
                   onTap: () => Navigator.of(dialogContext).pop(device),
                 );
               },

@@ -715,32 +715,43 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
               ),
             ),
             child: Stack(
-              fit: StackFit.expand,
               children: [
-                GestureDetector(
-                  onTap: isBusy
-                      ? null
-                      : () {
-                          if (isPendingReview) {
-                            _showPendingReviewInfo(product);
-                          } else {
-                            _navigateToAddProduct(context, product: product);
-                          }
-                        },
+                Positioned.fill(
                   child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: previewCandidates.isNotEmpty
-                      ? ProductNetworkImage(
-                          urls: previewCandidates,
-                          fit: BoxFit.cover,
-                          memCacheWidth: 400,
-                        )
-                      : Container(
-                          color: Colors.grey[200],
-                          alignment: Alignment.center,
-                          child: const Icon(Icons.image, size: 40, color: Colors.grey),
-                        ),
+                    borderRadius: BorderRadius.circular(12),
+                    child: previewCandidates.isNotEmpty
+                        ? ProductNetworkImage(
+                            key: ValueKey<String>(
+                              'shop-product-image-${product.id ?? index}',
+                            ),
+                            urls: previewCandidates,
+                            fit: BoxFit.cover,
+                            memCacheWidth: 400,
+                          )
+                        : Container(
+                            color: Colors.grey[200],
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              Icons.image,
+                              size: 40,
+                              color: Colors.grey,
+                            ),
+                          ),
+                  ),
                 ),
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: isBusy
+                        ? null
+                        : () {
+                            if (isPendingReview) {
+                              _showPendingReviewInfo(product);
+                            } else {
+                              _navigateToAddProduct(context, product: product);
+                            }
+                          },
+                  ),
                 ),
                 Positioned(
                   left: 0,

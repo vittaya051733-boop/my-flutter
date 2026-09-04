@@ -25,6 +25,7 @@ String orderQrCodeText(DetailedOrder order) {
 Future<void> printOrderQr(BuildContext context, DetailedOrder order) async {
   final universalQr = orderQrCodeText(order);
   final receiptLayout = buildOrderQrReceiptLayout(order);
+  ScaffoldMessengerState? progressMessenger;
 
   try {
     final receiptPng = await buildOrderQrReceiptPngBytes(
@@ -36,6 +37,27 @@ Future<void> printOrderQr(BuildContext context, DetailedOrder order) async {
     if (!context.mounted) return;
     final channel = await showMerchantPrintOptionsSheet(context);
     if (channel == null || !context.mounted) return;
+
+    progressMessenger = ScaffoldMessenger.of(context);
+    progressMessenger.showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 30),
+        content: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            ),
+            SizedBox(width: 12),
+            Text('กำลังค้นหาและเชื่อมต่อเครื่องพิมพ์...'),
+          ],
+        ),
+      ),
+    );
 
     switch (channel) {
       case MerchantPrintChannel.bluetoothClassic:
@@ -69,6 +91,10 @@ Future<void> printOrderQr(BuildContext context, DetailedOrder order) async {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('เกิดข้อผิดพลาด: $e')),
       );
+    }
+  } finally {
+    if (progressMessenger?.mounted ?? false) {
+      progressMessenger!.hideCurrentSnackBar();
     }
   }
 }

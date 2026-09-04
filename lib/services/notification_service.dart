@@ -1678,7 +1678,6 @@ class NotificationService {
     required UserProfile callee,
     required bool isVideo,
   }) async {
-    await AppCheckGuard.ensureFinancialReady();
     const List<String> preferredRegions = <String>[
       'asia-southeast1',
       'us-central1',

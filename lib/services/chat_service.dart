@@ -368,8 +368,8 @@ class ChatService {
         .collection('friends')
         .doc(sender.uid);
 
-    final batch = _firestore.batch();
-    batch.set(
+    final senderBatch = _firestore.batch();
+    senderBatch.set(
       chatDoc,
       {
         'lastMessage': lastMessage,
@@ -384,7 +384,7 @@ class ChatService {
       },
       SetOptions(merge: true),
     );
-    batch.set(
+    senderBatch.set(
       senderFriendRef,
       {
         'uid': target.uid,
@@ -395,18 +395,25 @@ class ChatService {
       },
       SetOptions(merge: true),
     );
-    batch.set(
-      targetFriendRef,
-      {
-        'uid': sender.uid,
-        ...sender.toFirestore(),
-        'lastMessage': lastMessage,
-        'lastActivity': FieldValue.serverTimestamp(),
-        'unreadCount': FieldValue.increment(1),
-      },
-      SetOptions(merge: true),
-    );
-    await batch.commit();
+    await senderBatch.commit();
+
+    // The recipient preview is supplementary. A cross-user preview write can
+    // be rejected by stricter rules or an older deployed ruleset; that must
+    // not make an already-sent message look like it failed.
+    try {
+      await targetFriendRef.set(
+        {
+          'uid': sender.uid,
+          ...sender.toFirestore(),
+          'lastMessage': lastMessage,
+          'lastActivity': FieldValue.serverTimestamp(),
+          'unreadCount': FieldValue.increment(1),
+        },
+        SetOptions(merge: true),
+      );
+    } on FirebaseException {
+      // The chat document still carries the recipient unread count.
+    }
   }
 
   String _guessMimeType(String fileName) {
