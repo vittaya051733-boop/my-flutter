@@ -27,6 +27,8 @@ import 'merchant_pricing_policy.dart';
 import 'models/product_variant.dart';
 import 'utils/product_variant_color.dart';
 import 'utils/shop_profile_resolver.dart';
+import 'utils/product_image_url.dart';
+import 'widgets/product_network_image.dart';
 
 class _HomeProductVariantDisplay {
   const _HomeProductVariantDisplay({
@@ -1264,29 +1266,6 @@ class _HomeDashboard extends StatelessWidget {
     );
   }
 
-  List<String> _extractImages(
-    Map<String, dynamic> data, {
-    bool preferThumbnails = false,
-  }) {
-    List<String> readList(String key) =>
-        (data[key] as List?)
-            ?.whereType<String>()
-            .where((url) => url.trim().isNotEmpty)
-            .toList() ??
-        const [];
-
-    final thumbnails = readList('thumbnailUrls');
-    final originals = readList('imageUrls');
-
-    if (preferThumbnails && thumbnails.isNotEmpty) {
-      return thumbnails;
-    }
-    if (!preferThumbnails && originals.isNotEmpty) {
-      return originals;
-    }
-    return thumbnails.isNotEmpty ? thumbnails : originals;
-  }
-
   /// One URL per logical product image (original preferred, else thumbnail).
   /// Avoids counting thumbnail + original as two separate gallery pages.
   List<String> _extractGalleryImages(
@@ -1596,11 +1575,10 @@ class _HomeDashboard extends StatelessWidget {
                             itemBuilder: (context, index) {
                               final doc = visibleDocs[index];
                               final data = doc.data;
-                              final List<String> thumbnailImages =
-                                  _extractImages(data, preferThumbnails: true);
-                              final String? imageUrl =
-                                  thumbnailImages.isNotEmpty
-                                  ? thumbnailImages.first
+                              final imageCandidates =
+                                  readProductImageUrlCandidates(data);
+                              final String? imageUrl = imageCandidates.isNotEmpty
+                                  ? imageCandidates.first
                                   : null;
                               final name = (data['name'] ?? '').toString();
                               final discountPercent =
@@ -1644,59 +1622,12 @@ class _HomeDashboard extends StatelessWidget {
                                     child: Stack(
                                       children: [
                                         Positioned.fill(
-                                          child: imageUrl != null
-                                              ? Stack(
-                                                  children: [
-                                                    Positioned.fill(
-                                                      child: CachedNetworkImage(
-                                                        imageUrl: imageUrl,
-                                                        fit: BoxFit.cover,
-                                                        memCacheWidth:
-                                                            500, // Optimize memory usage
-                                                        maxWidthDiskCache:
-                                                            800, // Optimize disk storage
-                                                        placeholder:
-                                                            (
-                                                              context,
-                                                              url,
-                                                            ) => Container(
-                                                              color: Colors
-                                                                  .grey[100],
-                                                              alignment:
-                                                                  Alignment
-                                                                      .center,
-                                                              child: const SizedBox(
-                                                                width: 24,
-                                                                height: 24,
-                                                                child:
-                                                                    CircularProgressIndicator(
-                                                                      strokeWidth:
-                                                                          2,
-                                                                    ),
-                                                              ),
-                                                            ),
-                                                        errorWidget:
-                                                            (
-                                                              context,
-                                                              url,
-                                                              error,
-                                                            ) => Container(
-                                                              color: Colors
-                                                                  .grey[200],
-                                                              alignment:
-                                                                  Alignment
-                                                                      .center,
-                                                              child: const Icon(
-                                                                Icons
-                                                                    .broken_image,
-                                                                size: 36,
-                                                                color:
-                                                                    Colors.grey,
-                                                              ),
-                                                            ),
-                                                      ),
-                                                    ),
-                                                  ],
+                                          child: imageCandidates.isNotEmpty
+                                              ? ProductNetworkImage(
+                                                  urls: imageCandidates,
+                                                  fit: BoxFit.cover,
+                                                  memCacheWidth: 500,
+                                                  maxWidthDiskCache: 800,
                                                 )
                                               : Container(
                                                   color: Colors.grey[200],

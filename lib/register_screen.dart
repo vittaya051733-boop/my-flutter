@@ -15,6 +15,8 @@ import 'services/security_pin_service.dart';
 import 'services/app_unlock_session.dart';
 import 'utils/app_colors.dart';
 import 'utils/phone_login_helper.dart';
+import 'apple_auth.dart';
+import 'web_apple_auth.dart';
 import 'web_google_auth.dart';
 
 class Debouncer {
@@ -119,6 +121,27 @@ class _RegisterScreenState extends State<RegisterScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _ensureServiceType());
+    if (kIsWeb) {
+      unawaited(_handleWebOAuthRedirectResult());
+    }
+  }
+
+  Future<void> _handleWebOAuthRedirectResult() async {
+    try {
+      final result = await handleWebOAuthRedirectResult();
+      if (result?.user == null || !mounted) {
+        return;
+      }
+      await _handleSocialSignIn();
+    } on FirebaseAuthException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      if (error.code != 'auth/redirect-initiated' &&
+          error.code != 'redirect-initiated') {
+        _showSnack('ไม่สามารถสมัครด้วย Apple/Google ได้ (${error.code})');
+      }
+    } catch (_) {}
   }
 
   Future<void> _ensureServiceType() async {
@@ -571,6 +594,44 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
+  Future<void> _signInWithApple() async {
+    setState(() {
+      _isSocialLoading = true;
+      _socialLoadingKey = 'apple';
+    });
+
+    try {
+      await signInWithApple();
+      if (!mounted) {
+        return;
+      }
+      await _handleSocialSignIn();
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'popup-closed-by-user' ||
+          e.code == 'redirect-initiated' ||
+          e.code == 'auth/redirect-initiated') {
+        return;
+      }
+      if (e.code == 'account-exists-with-different-credential' ||
+          e.code == 'auth/account-exists-with-different-credential') {
+        _showSnack('อีเมลนี้ใช้วิธีเข้าสู่ระบบอื่นอยู่แล้ว กรุณาเข้าสู่ระบบด้วยวิธีเดิม');
+        return;
+      }
+      debugPrint('Apple sign-in failed: ${e.code}');
+      _showSnack('ไม่สามารถสมัครด้วย Apple ได้ (${e.code})');
+    } catch (e) {
+      debugPrint('Unexpected Apple sign-in error: $e');
+      _showSnack('ไม่สามารถสมัครด้วย Apple ได้');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSocialLoading = false;
+          _socialLoadingKey = null;
+        });
+      }
+    }
+  }
+
   Widget _socialButton({
     required VoidCallback? onPressed,
     required String label,
@@ -945,11 +1006,22 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       onPressed: _isSocialLoading ? null : _signInWithGoogle,
                       assetImage:
                           'assets/file_0000000075b0720680f74d4375d75c25.png',
-                      label: 'เข้าสู่ระบบด้วย Google',
+                      label: 'สมัครด้วย Google',
                       backgroundColor: Colors.white,
                       foregroundColor: Colors.black87,
                       buttonKey: 'google',
                     ),
+                    if (isAppleSignInSupported) ...[
+                      const SizedBox(height: 14),
+                      _socialButton(
+                        onPressed: _isSocialLoading ? null : _signInWithApple,
+                        label: 'สมัครด้วย Apple',
+                        backgroundColor: Colors.black,
+                        foregroundColor: Colors.white,
+                        buttonKey: 'apple',
+                        icon: Icons.apple,
+                      ),
+                    ],
                     const SizedBox(height: 24),
 
                     // Register button

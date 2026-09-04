@@ -9,9 +9,9 @@ import 'services/merchant_security_deposit_service.dart';
 import 'services/product_cache_service.dart';
 import 'storage_helper.dart';
 import 'utils/app_colors.dart';
+import 'utils/product_image_url.dart';
+import 'widgets/product_network_image.dart';
 import 'wallet_top_up_dialog.dart';
-import 'package:cached_network_image/cached_network_image.dart';
-
 class ShopManagementScreen extends StatefulWidget {
   final Set<String>? initialHomeProductIds;
   final Function(Set<String>)? onHomeProductIdsChanged;
@@ -692,9 +692,10 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         final isHome = !isPendingReview &&
             product.id != null &&
             _homeProductIds.contains(product.id!);
-        final previewUrl = product.thumbnailUrls.isNotEmpty
-          ? product.thumbnailUrls.first
-          : (product.imageUrls.isNotEmpty ? product.imageUrls.first : null);
+        final previewCandidates = readProductImageUrlCandidates({
+          'imageUrls': product.imageUrls,
+          'thumbnailUrls': product.thumbnailUrls,
+        });
         return Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -727,28 +728,12 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                         },
                   child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
-                  child: previewUrl != null
-                      ? CachedNetworkImage(
-                          imageUrl: previewUrl,
+                  child: previewCandidates.isNotEmpty
+                      ? ProductNetworkImage(
+                          urls: previewCandidates,
                           fit: BoxFit.cover,
-                          width: double.infinity,
-                          height: double.infinity,
-                          memCacheWidth: 500, // Optimize memory usage
-                          maxWidthDiskCache: 800, // Optimize disk storage
-                          placeholder: (context, url) => Container(
-                            color: Colors.grey[100],
-                            alignment: Alignment.center,
-                            child: const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          ),
-                          errorWidget: (context, url, error) => Container(
-                            color: Colors.grey[200],
-                            alignment: Alignment.center,
-                            child: const Icon(Icons.broken_image, size: 32, color: Colors.grey),
-                          ),
+                          memCacheWidth: 500,
+                          maxWidthDiskCache: 800,
                         )
                       : Container(
                           color: Colors.grey[200],
