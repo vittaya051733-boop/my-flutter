@@ -26,6 +26,14 @@ abstract final class ShopOrderVoiceCommands {
     'รับ',
   ];
 
+  static const List<String> backPhrases = <String>[
+    'ย้อนกลับ',
+    'ถอยกลับ',
+    'กลับหน้าก่อน',
+    'กลับ',
+    'back',
+  ];
+
   static String normalize(String input) {
     return input
         .toLowerCase()
@@ -72,9 +80,25 @@ abstract final class ShopOrderVoiceCommands {
   static String? describeMatch(String words) {
     final normalized = normalize(words);
     if (normalized.isEmpty) return null;
+    if (matchBackNavigation(words)) return 'ย้อนกลับ';
     final decision = matchAcceptReject(words);
     if (decision == null) return null;
     return decision ? 'รับออเดอร์' : 'ปฏิเสธออเดอร์';
+  }
+
+  static bool matchBackNavigation(String words) {
+    final normalized = normalize(words);
+    if (normalized.isEmpty) return false;
+
+    _VoicePhraseMatch? bestMatch;
+    for (final phrase in backPhrases) {
+      final match = _matchPhrase(normalized, phrase);
+      if (match == null) continue;
+      if (bestMatch == null || match.confidence > bestMatch.confidence) {
+        bestMatch = match;
+      }
+    }
+    return bestMatch?.shouldTrigger ?? false;
   }
 
   static _VoicePhraseMatch? _matchPhrase(

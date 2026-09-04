@@ -34,6 +34,7 @@ import shared_preferences_foundation
 import sign_in_with_apple
 import speech_to_text
 import sqflite_darwin
+import thermal_printer_flutter
 import url_launcher_macos
 import video_compress
 import wakelock_plus
@@ -68,6 +69,7 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   SignInWithApplePlugin.register(with: registry.registrar(forPlugin: "SignInWithApplePlugin"))
   SpeechToTextPlugin.register(with: registry.registrar(forPlugin: "SpeechToTextPlugin"))
   SqflitePlugin.register(with: registry.registrar(forPlugin: "SqflitePlugin"))
+  ThermalPrinterFlutterPlugin.register(with: registry.registrar(forPlugin: "ThermalPrinterFlutterPlugin"))
   UrlLauncherPlugin.register(with: registry.registrar(forPlugin: "UrlLauncherPlugin"))
   VideoCompressPlugin.register(with: registry.registrar(forPlugin: "VideoCompressPlugin"))
   WakelockPlusMacosPlugin.register(with: registry.registrar(forPlugin: "WakelockPlusMacosPlugin"))

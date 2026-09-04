@@ -569,6 +569,73 @@ class FriendService {
     await batch.commit();
   }
 
+  Future<void> removeFriend({
+    required String ownerId,
+    required String friendId,
+  }) async {
+    if (ownerId.isEmpty || friendId.isEmpty || ownerId == friendId) {
+      return;
+    }
+    await _firestore
+        .collection('users')
+        .doc(ownerId)
+        .collection('friends')
+        .doc(friendId)
+        .delete();
+  }
+
+  Future<void> blockUser({
+    required String ownerId,
+    required UserProfile target,
+  }) async {
+    if (ownerId.isEmpty || ownerId == target.uid) {
+      throw const FriendException('ไม่สามารถบล็อกได้');
+    }
+
+    final blockedRef = _firestore
+        .collection('users')
+        .doc(ownerId)
+        .collection('blocked')
+        .doc(target.uid);
+    final friendRef = _firestore
+        .collection('users')
+        .doc(ownerId)
+        .collection('friends')
+        .doc(target.uid);
+
+    final batch = _firestore.batch();
+    batch.delete(friendRef);
+    batch.set(blockedRef, <String, dynamic>{
+      'uid': target.uid,
+      'displayName': target.displayName,
+      if (target.photoUrl != null && target.photoUrl!.isNotEmpty)
+        'photoUrl': target.photoUrl,
+      if (target.phoneNumber != null && target.phoneNumber!.isNotEmpty)
+        'phoneNumber': target.phoneNumber,
+      if (target.serviceType != null && target.serviceType!.isNotEmpty)
+        'serviceType': target.serviceType,
+      'blockedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+  }
+
+  Future<bool> isBlocked({
+    required String ownerId,
+    required String targetId,
+  }) async {
+    if (ownerId.isEmpty || targetId.isEmpty) {
+      return false;
+    }
+    final snapshot = await _getDocument(
+      _firestore
+          .collection('users')
+          .doc(ownerId)
+          .collection('blocked')
+          .doc(targetId),
+    );
+    return snapshot.exists;
+  }
+
   Future<Map<String, dynamic>?> _loadShopData(String uid) async {
     for (final collection in _shopCollections) {
       try {

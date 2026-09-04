@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../utils/network_image_url.dart';
 import '../utils/shop_profile_resolver.dart';
 
 /// Minimal profile information stored in the top-level `users` collection
@@ -36,8 +37,8 @@ class UserProfile {
       displayName:
           (resolvedName ?? map['displayName'] ?? map['name'] ?? 'ผู้ใช้ใหม่').toString(),
       phoneNumber: (map['phoneNumber'] ?? map['phone']) as String?,
-      photoUrl: (resolvedImageUrl ?? map['photoUrl'] ?? map['imageUrl'] ?? map['shopImageUrl'])
-          as String?,
+      photoUrl: resolvedImageUrl ??
+          firstLoadableImageUrl(readProfilePhotoCandidates(map)),
       serviceType: (map['serviceType'] ?? map['type']) as String?,
       isOfficial: (map['isOfficial'] as bool?) ?? false,
       profileCompleted: (map['profileCompleted'] as bool?) ?? false,

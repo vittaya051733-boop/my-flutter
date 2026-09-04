@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../utils/network_image_url.dart';
 import 'cached_app_image.dart';
 
 /// Circular profile avatar with disk/memory image cache.
@@ -7,12 +8,14 @@ class CachedAppAvatar extends StatelessWidget {
   const CachedAppAvatar({
     super.key,
     this.imageUrl,
+    this.fallbackUrls = const <String>[],
     this.radius = 20,
     this.backgroundColor = const Color(0xFFE0E0E0),
     this.fallback,
   });
 
   final String? imageUrl;
+  final List<String> fallbackUrls;
   final double radius;
   final Color backgroundColor;
   final Widget? fallback;
@@ -20,8 +23,12 @@ class CachedAppAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final size = radius * 2;
-    final url = imageUrl?.trim();
-    if (url == null || url.isEmpty) {
+    final candidates = normalizeImageUrlCandidates(<String?>[
+      imageUrl,
+      ...fallbackUrls,
+    ]);
+
+    if (candidates.isEmpty) {
       return CircleAvatar(
         radius: radius,
         backgroundColor: backgroundColor,
@@ -37,7 +44,10 @@ class CachedAppAvatar extends StatelessWidget {
           width: size,
           height: size,
           child: CachedAppImage(
-            imageUrl: url,
+            imageUrl: candidates.first,
+            fallbackUrls: candidates.length > 1
+                ? candidates.sublist(1)
+                : const <String>[],
             width: size,
             height: size,
             fit: BoxFit.cover,

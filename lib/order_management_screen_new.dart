@@ -603,10 +603,13 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   Future<void> _openOrderQr(DetailedOrder order) async {
-    unawaited(
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (context) => OrderQRScreen(order: order)),
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute<void>(
+        builder: (context) => OrderQRScreen(
+          order: order,
+          autoStartVoiceListening: _voiceSessionEnabled,
+        ),
       ),
     );
   }
@@ -637,14 +640,14 @@ class _OrderManagementScreenState extends State<OrderManagementScreen> {
   }
 
   Future<void> _handleVoiceBackNavigation() async {
-    final rootNavigator = Navigator.of(context, rootNavigator: true);
-    final didPopRoot = await rootNavigator.maybePop();
-    if (didPopRoot) return;
+    final navigator = Navigator.of(context);
+    if (await navigator.maybePop()) {
+      return;
+    }
 
-    final localNavigator = Navigator.of(context);
-    if (localNavigator != rootNavigator) {
-      final didPopLocal = await localNavigator.maybePop();
-      if (didPopLocal) return;
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    if (!identical(rootNavigator, navigator) && await rootNavigator.maybePop()) {
+      return;
     }
 
     if (!mounted) return;
@@ -1886,10 +1889,13 @@ extension on _OrderManagementScreenState {
         Expanded(
           child: OutlinedButton.icon(
             onPressed: () {
-              Navigator.push(
+              Navigator.push<void>(
                 context,
-                MaterialPageRoute(
-                  builder: (context) => OrderQRScreen(order: order),
+                MaterialPageRoute<void>(
+                  builder: (context) => OrderQRScreen(
+                    order: order,
+                    autoStartVoiceListening: _voiceSessionEnabled,
+                  ),
                 ),
               );
             },

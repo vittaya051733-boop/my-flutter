@@ -10,6 +10,7 @@ import 'services/friend_service.dart';
 import 'services/friend_warmup_service.dart';
 import 'services/chat_warmup.dart';
 import 'utils/app_colors.dart';
+import 'utils/network_image_url.dart';
 import 'widgets/cached_app_avatar.dart';
 
 /// Conversation list with friend management similar to LINE.
@@ -150,17 +151,120 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildFriendsListView(List<FriendPreview> friends) {
+    final user = FirebaseAuth.instance.currentUser;
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 12),
       itemBuilder: (context, index) => _ChatTile(
         friend: friends[index],
         accent: _lineOrange,
         onTap: () => _openChat(friends[index]),
+        onLongPress: user == null
+            ? null
+            : () => _showFriendActions(user.uid, friends[index]),
       ),
       separatorBuilder: (context, index) =>
           const Divider(height: 1, indent: 88),
       itemCount: friends.length,
     );
+  }
+
+  Future<void> _showFriendActions(String ownerId, FriendPreview friend) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.person_remove_outlined),
+              title: const Text('ลบเพื่อน'),
+              onTap: () => Navigator.pop(context, 'delete'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.block, color: Colors.red),
+              title: const Text('บล็อก'),
+              onTap: () => Navigator.pop(context, 'block'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+
+    if (action == 'delete') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('ลบเพื่อน'),
+          content: Text('ลบ ${friend.profile.displayName} ออกจากรายชื่อเพื่อน?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('ยกเลิก'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('ลบเพื่อน'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      try {
+        await _friendService.removeFriend(
+          ownerId: ownerId,
+          friendId: friend.profile.uid,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ลบเพื่อนแล้ว')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ลบเพื่อนไม่สำเร็จ: $e')),
+        );
+      }
+      return;
+    }
+
+    if (action == 'block') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('บล็อก'),
+          content: Text(
+            'บล็อก ${friend.profile.displayName}?\nจะลบออกจากรายชื่อเพื่อนและไม่สามารถส่งข้อความได้',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('ยกเลิก'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('บล็อก'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      try {
+        await _friendService.blockUser(
+          ownerId: ownerId,
+          target: friend.profile,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('บล็อกแล้ว')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('บล็อกไม่สำเร็จ: $e')),
+        );
+      }
+    }
   }
 
   void _openChat(FriendPreview friend) {
@@ -271,11 +375,17 @@ class _SearchField extends StatelessWidget {
 }
 
 class _ChatTile extends StatelessWidget {
-  const _ChatTile({required this.friend, required this.accent, this.onTap});
+  const _ChatTile({
+    required this.friend,
+    required this.accent,
+    this.onTap,
+    this.onLongPress,
+  });
 
   final FriendPreview friend;
   final Color accent;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -287,6 +397,7 @@ class _ChatTile extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Container(
         color: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -390,6 +501,9 @@ class _Avatar extends StatelessWidget {
 
     return CachedAppAvatar(
       imageUrl: profile.photoUrl,
+      fallbackUrls: readProfilePhotoCandidates(<String, dynamic>{
+        'photoUrl': profile.photoUrl,
+      }),
       radius: 30,
       fallback: Text(
         initial,

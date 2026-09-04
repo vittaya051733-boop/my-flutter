@@ -1,16 +1,11 @@
-/// Resolves product image URLs for merchant UI (van1).
-///
-/// Prefer full [imageUrls] over [thumbnailUrls] — thumbnails may be missing or
-/// stale while originals remain valid (same approach as van2 catalog).
-const int kProductMaxImages = 10;
+// Resolves product image URLs for merchant UI (van1).
+//
+// Prefer full [imageUrls] over [thumbnailUrls] — thumbnails may be missing or
+// stale while originals remain valid (same approach as van2 catalog).
+import 'network_image_url.dart';
+export 'network_image_url.dart' show isLoadableNetworkImageUrl;
 
-bool isLoadableNetworkImageUrl(String? raw) {
-  final url = raw?.trim();
-  if (url == null || url.isEmpty) {
-    return false;
-  }
-  return url.startsWith('http://') || url.startsWith('https://');
-}
+const int kProductMaxImages = 10;
 
 List<String> _readUrlList(Object? raw) {
   if (raw is! List) {
@@ -57,6 +52,17 @@ List<String> readProductImageUrls(
     addUrl(data[key]?.toString());
   }
 
+  final variants = data['variants'];
+  if (variants is List) {
+    for (final entry in variants) {
+      if (entry is! Map) {
+        continue;
+      }
+      addUrl(entry['imageUrl']?.toString());
+      addUrl(entry['thumbnailUrl']?.toString());
+    }
+  }
+
   return urls;
 }
 
@@ -75,7 +81,7 @@ String? readProductThumbnailUrl(Map<String, dynamic> data) {
   return readProductImageUrl(data);
 }
 
-/// Ordered candidates for [ProductNetworkImage] (thumbnail → original).
+/// Ordered candidates for [ProductNetworkImage] (original → thumbnail → legacy).
 List<String> readProductImageUrlCandidates(Map<String, dynamic> data) {
   final seen = <String>{};
   final candidates = <String>[];
@@ -88,9 +94,15 @@ List<String> readProductImageUrlCandidates(Map<String, dynamic> data) {
     candidates.add(url);
   }
 
-  add(readProductThumbnailUrl(data));
   for (final url in readProductImageUrls(data)) {
     add(url);
   }
+  for (final url in _readUrlList(data['thumbnailUrls'])) {
+    add(url);
+  }
+  for (final key in <String>['imageUrl', 'photoUrl', 'productImage']) {
+    add(data[key]?.toString());
+  }
+
   return candidates;
 }

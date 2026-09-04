@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,7 @@ import 'services/notification_service.dart';
 import 'services/chat_warmup.dart';
 import 'services/chat_warmup_cache.dart';
 import 'call_screen.dart';
+import 'utils/network_image_url.dart';
 import 'widgets/cached_app_image.dart';
 
 class ChatRoomScreen extends StatefulWidget {
@@ -164,14 +166,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               child: SizedBox(
                 width: 40,
                 height: 40,
-                child: friendProfile.photoUrl != null
-                    ? CachedAppImage(
-                        imageUrl: friendProfile.photoUrl!,
-                        width: 40,
-                        height: 40,
-                        errorWidget: _AvatarFallback(initial: friendInitial),
-                      )
-                    : _AvatarFallback(initial: friendInitial),
+                child: _buildFriendAvatar(friendProfile, friendInitial),
               ),
             ),
             const SizedBox(width: 12),
@@ -185,6 +180,19 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           ],
         ),
         actions: [
+          PopupMenuButton<String>(
+            onSelected: _handleFriendMenuAction,
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'delete',
+                child: Text('ลบเพื่อน'),
+              ),
+              PopupMenuItem(
+                value: 'block',
+                child: Text('บล็อก'),
+              ),
+            ],
+          ),
           IconButton(
             tooltip: 'โทรด้วยเสียง',
             icon: const Icon(Icons.call_outlined),
@@ -365,31 +373,122 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   Future<void> _pickImage(ImageSource source, UserProfile profile) async {
-    final file = await _imagePicker.pickImage(source: source, imageQuality: 85);
-    if (file == null) return;
-    await _uploadFile(File(file.path), profile,
-        type: 'image', contentType: null, fileName: file.name);
+    final picked = await _imagePicker.pickImage(source: source, imageQuality: 85);
+    if (picked == null) return;
+    final path = picked.path;
+    if (path.isNotEmpty) {
+      final file = File(path);
+      if (await file.exists()) {
+        await _uploadFile(
+          file,
+          profile,
+          type: 'image',
+          contentType: null,
+          fileName: picked.name,
+        );
+        return;
+      }
+    }
+    final bytes = await picked.readAsBytes();
+    await _uploadBytes(
+      bytes,
+      profile,
+      type: 'image',
+      contentType: null,
+      fileName: picked.name.isNotEmpty ? picked.name : 'photo.jpg',
+    );
   }
 
   Future<void> _pickVideo(UserProfile profile) async {
-    final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
-    if (file == null) return;
-    await _uploadFile(File(file.path), profile,
-        type: 'video', contentType: null, fileName: file.name);
+    final picked = await _imagePicker.pickVideo(source: ImageSource.gallery);
+    if (picked == null) return;
+    final path = picked.path;
+    if (path.isNotEmpty) {
+      final file = File(path);
+      if (await file.exists()) {
+        await _uploadFile(
+          file,
+          profile,
+          type: 'video',
+          contentType: null,
+          fileName: picked.name,
+        );
+        return;
+      }
+    }
+    final bytes = await picked.readAsBytes();
+    await _uploadBytes(
+      bytes,
+      profile,
+      type: 'video',
+      contentType: null,
+      fileName: picked.name.isNotEmpty ? picked.name : 'video.mp4',
+    );
   }
 
   Future<void> _pickFile(UserProfile profile) async {
-    final result = await FilePicker.platform.pickFiles(withData: false, allowMultiple: false);
+    final result = await FilePicker.platform.pickFiles(
+      withData: true,
+      allowMultiple: false,
+    );
     if (result == null) return;
     final picked = result.files.single;
-    if (picked.path == null) return;
-    await _uploadFile(
-      File(picked.path!),
-      profile,
-      type: 'file',
-      contentType: null,
-      fileName: picked.name,
+    final fileName = picked.name.isNotEmpty ? picked.name : 'attachment';
+    if (picked.path != null && picked.path!.isNotEmpty) {
+      final file = File(picked.path!);
+      if (await file.exists()) {
+        await _uploadFile(
+          file,
+          profile,
+          type: 'file',
+          contentType: null,
+          fileName: fileName,
+        );
+        return;
+      }
+    }
+    if (picked.bytes != null && picked.bytes!.isNotEmpty) {
+      await _uploadBytes(
+        picked.bytes!,
+        profile,
+        type: 'file',
+        contentType: null,
+        fileName: fileName,
+      );
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('ไม่สามารถอ่านไฟล์ที่เลือกได้')),
     );
+  }
+
+  Future<void> _uploadBytes(
+    Uint8List bytes,
+    UserProfile profile, {
+    required String type,
+    String? contentType,
+    required String fileName,
+  }) async {
+    setState(() => _uploading = true);
+    try {
+      await _chatService.sendMediaMessage(
+        sender: profile,
+        target: _friendProfile,
+        fileBytes: bytes,
+        messageType: type,
+        fileName: fileName,
+        contentType: contentType,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('อัปโหลดไฟล์ไม่สำเร็จ: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
   }
 
   Future<void> _uploadFile(
@@ -416,6 +515,100 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       }
     } finally {
       if (mounted) setState(() => _uploading = false);
+    }
+  }
+
+  Future<void> _handleFriendMenuAction(String action) async {
+    if (action == 'delete') {
+      await _confirmDeleteFriend();
+      return;
+    }
+    if (action == 'block') {
+      await _confirmBlockFriend();
+    }
+  }
+
+  Future<void> _confirmDeleteFriend() async {
+    final ownerId = _currentProfile?.uid ?? FirebaseAuth.instance.currentUser?.uid;
+    if (ownerId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ลบเพื่อน'),
+        content: Text('ลบ ${_friendProfile.displayName} ออกจากรายชื่อเพื่อน?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('ยกเลิก'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('ลบเพื่อน'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _friendService.removeFriend(
+        ownerId: ownerId,
+        friendId: _friendProfile.uid,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ลบเพื่อนแล้ว')),
+      );
+      Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ลบเพื่อนไม่สำเร็จ: $e')),
+      );
+    }
+  }
+
+  Future<void> _confirmBlockFriend() async {
+    final ownerId = _currentProfile?.uid ?? FirebaseAuth.instance.currentUser?.uid;
+    if (ownerId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('บล็อก'),
+        content: Text(
+          'บล็อก ${_friendProfile.displayName}?\nจะลบออกจากรายชื่อเพื่อนและไม่สามารถส่งข้อความได้',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('ยกเลิก'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('บล็อก'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _friendService.blockUser(
+        ownerId: ownerId,
+        target: _friendProfile,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('บล็อกแล้ว')),
+      );
+      Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('บล็อกไม่สำเร็จ: $e')),
+      );
     }
   }
 
@@ -490,6 +683,24 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         setState(() => _startingCall = false);
       }
     }
+  }
+
+  Widget _buildFriendAvatar(UserProfile friendProfile, String initial) {
+    final candidates = normalizeImageUrlCandidates(<String?>[
+      friendProfile.photoUrl,
+      widget.friendProfile.photoUrl,
+    ]);
+    if (candidates.isEmpty) {
+      return _AvatarFallback(initial: initial);
+    }
+    return CachedAppImage(
+      imageUrl: candidates.first,
+      fallbackUrls:
+          candidates.length > 1 ? candidates.sublist(1) : const <String>[],
+      width: 40,
+      height: 40,
+      errorWidget: _AvatarFallback(initial: initial),
+    );
   }
 }
 

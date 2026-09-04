@@ -729,11 +729,16 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                   child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: previewCandidates.isNotEmpty
-                      ? ProductNetworkImage(
-                          urls: previewCandidates,
-                          fit: BoxFit.cover,
-                          memCacheWidth: 500,
-                          maxWidthDiskCache: 800,
+                      ? LayoutBuilder(
+                          builder: (context, constraints) {
+                            return ProductNetworkImage(
+                              urls: previewCandidates,
+                              fit: BoxFit.cover,
+                              width: constraints.maxWidth,
+                              height: constraints.maxHeight,
+                              memCacheWidth: 500,
+                            );
+                          },
                         )
                       : Container(
                           color: Colors.grey[200],

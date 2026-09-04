@@ -1622,22 +1622,17 @@ class _HomeDashboard extends StatelessWidget {
                                     child: Stack(
                                       children: [
                                         Positioned.fill(
-                                          child: imageCandidates.isNotEmpty
-                                              ? ProductNetworkImage(
-                                                  urls: imageCandidates,
-                                                  fit: BoxFit.cover,
-                                                  memCacheWidth: 500,
-                                                  maxWidthDiskCache: 800,
-                                                )
-                                              : Container(
-                                                  color: Colors.grey[200],
-                                                  alignment: Alignment.center,
-                                                  child: const Icon(
-                                                    Icons.image,
-                                                    size: 40,
-                                                    color: Colors.grey,
-                                                  ),
-                                                ),
+                                          child: LayoutBuilder(
+                                            builder: (context, constraints) {
+                                              return ProductNetworkImage(
+                                                urls: imageCandidates,
+                                                fit: BoxFit.cover,
+                                                width: constraints.maxWidth,
+                                                height: constraints.maxHeight,
+                                                memCacheWidth: 500,
+                                              );
+                                            },
+                                          ),
                                         ),
                                         Positioned(
                                           left: 0,

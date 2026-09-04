@@ -1,5 +1,7 @@
 import 'dart:collection';
 
+import 'network_image_url.dart';
+
 /// Helper methods for resolving shop profile fields that may use
 /// different key names or be nested in various structures.
 class ShopProfileResolver {
@@ -34,7 +36,13 @@ class ShopProfileResolver {
   ];
 
   static String? resolveImageUrl(Map<String, dynamic>? data) {
-    return _resolveValueByKeys(data, _imageKeys);
+    final direct = firstLoadableImageUrl(readProfilePhotoCandidates(data));
+    if (direct != null) {
+      return direct;
+    }
+    return firstLoadableImageUrl(<String?>[
+      _resolveValueByKeys(data, _imageKeys),
+    ]);
   }
 
   static String? resolveName(Map<String, dynamic>? data) {

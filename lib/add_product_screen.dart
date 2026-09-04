@@ -22,7 +22,9 @@ import '../models/product_model.dart'; // Import the model
 import '../models/product_variant.dart';
 import 'product_variant_setup_screen.dart';
 import 'utils/app_colors.dart';
+import 'utils/network_image_url.dart';
 import 'utils/shop_profile_resolver.dart';
+import 'widgets/product_network_image.dart';
 import 'storage_helper.dart';
 import 'services/product_cache_service.dart';
 import 'services/media_cache_service.dart';
@@ -4715,14 +4717,25 @@ class AddProductScreenState extends State<AddProductScreen>
 
     for (int i = 0; i < _existingImageUrls.length; i++) {
       final imageUrl = _existingImageUrls[i];
-      final displayUrl = i < _existingThumbnailUrls.length
+      final thumbnailUrl = i < _existingThumbnailUrls.length
           ? _existingThumbnailUrls[i]
           : imageUrl;
+      final previewCandidates = normalizeImageUrlCandidates(<String?>[
+        thumbnailUrl,
+        imageUrl,
+      ]);
       tiles.add(
         _buildImageTile(
           image: ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: _buildCachedImage(displayUrl),
+            child: previewCandidates.isNotEmpty
+                ? ProductNetworkImage(
+                    urls: previewCandidates,
+                    width: 110,
+                    height: 110,
+                    fit: BoxFit.cover,
+                  )
+                : _buildCachedImage(''),
           ),
           onRemove: _isEditingExistingProduct
               ? null

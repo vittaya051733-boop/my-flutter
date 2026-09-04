@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -103,6 +104,8 @@ class ChatService {
     required UserProfile target,
     required String text,
   }) async {
+    await _assertMessagingAllowed(sender.uid, target.uid);
+
     final chatId = chatIdFor(sender.uid, target.uid);
     final chatDoc = _firestore.collection('chats').doc(chatId);
     await _ensureChatDocument(chatDoc, sender: sender, target: target);
@@ -133,36 +136,54 @@ class ChatService {
   Future<void> sendMediaMessage({
     required UserProfile sender,
     required UserProfile target,
-    required File file,
+    File? file,
+    Uint8List? fileBytes,
     required String messageType,
     required String fileName,
     String? contentType,
   }) async {
+    await _assertMessagingAllowed(sender.uid, target.uid);
+
     final chatId = chatIdFor(sender.uid, target.uid);
     final chatDoc = _firestore.collection('chats').doc(chatId);
     await _ensureChatDocument(chatDoc, sender: sender, target: target);
 
-    var uploadFile = file;
-    var uploadFileName = p.basename(fileName);
-    var uploadContentType = contentType ?? _guessMimeType(fileName);
-    if (messageType == 'image') {
-      final compressed = await UploadImageCompressor.compressForUpload(file);
-      uploadFile = compressed.file;
-      uploadFileName = compressed.fileName;
-      uploadContentType = compressed.contentType;
+    var uploadBytes = await _resolveUploadBytes(file: file, fileBytes: fileBytes);
+    if (uploadBytes.isEmpty) {
+      throw const ChatServiceException('ไม่พบไฟล์สำหรับอัปโหลด');
     }
 
-    final storageRef = _storage
-        .ref()
-        .child('chat_uploads/$chatId/${DateTime.now().millisecondsSinceEpoch}_$uploadFileName');
+    var uploadFileName = p.basename(fileName);
+    var uploadContentType = contentType ?? _guessMimeType(fileName);
+
+    if (messageType == 'image') {
+      final tempDir = Directory.systemTemp;
+      final tempFile = File(
+        '${tempDir.path}/chat_img_${DateTime.now().microsecondsSinceEpoch}',
+      );
+      await tempFile.writeAsBytes(uploadBytes, flush: true);
+      try {
+        final compressed = await UploadImageCompressor.compressForUpload(tempFile);
+        uploadBytes = await compressed.file.readAsBytes();
+        uploadFileName = compressed.fileName;
+        uploadContentType = compressed.contentType;
+      } finally {
+        if (await tempFile.exists()) {
+          await tempFile.delete();
+        }
+      }
+    }
+
+    final storageRef = _storage.ref().child(
+      'chat_uploads/$chatId/${DateTime.now().millisecondsSinceEpoch}_$uploadFileName',
+    );
     final metadata = SettableMetadata(contentType: uploadContentType);
-    await storageRef.putFile(uploadFile, metadata);
+    await storageRef.putData(uploadBytes, metadata);
     final downloadUrl = await storageRef.getDownloadURL();
 
     final summaryText = _summaryForType(messageType, uploadFileName);
     final expiresAt = Timestamp.fromDate(DateTime.now().add(const Duration(days: 30)));
     final messageRef = chatDoc.collection('messages').doc();
-    final fileSize = await uploadFile.length();
     await messageRef.set({
       'senderId': sender.uid,
       'senderName': sender.displayName,
@@ -171,7 +192,7 @@ class ChatService {
       'text': summaryText,
       'mediaUrl': downloadUrl,
       'fileName': uploadFileName,
-      'fileSize': fileSize,
+      'fileSize': uploadBytes.length,
       'mediaContentType': metadata.contentType,
       'createdAt': FieldValue.serverTimestamp(),
       'expiresAt': expiresAt,
@@ -184,6 +205,31 @@ class ChatService {
       sender: sender,
       target: target,
     );
+  }
+
+  Future<Uint8List> _resolveUploadBytes({
+    File? file,
+    Uint8List? fileBytes,
+  }) async {
+    if (file != null && await file.exists()) {
+      return file.readAsBytes();
+    }
+    if (fileBytes != null && fileBytes.isNotEmpty) {
+      return fileBytes;
+    }
+    return Uint8List(0);
+  }
+
+  Future<void> _assertMessagingAllowed(String senderId, String targetId) async {
+    final blocked = await _firestore
+        .collection(_userCollection)
+        .doc(senderId)
+        .collection('blocked')
+        .doc(targetId)
+        .get();
+    if (blocked.exists) {
+      throw const ChatServiceException('คุณบล็อกผู้ใช้นี้แล้ว ไม่สามารถส่งข้อความได้');
+    }
   }
 
   Future<void> logCallEvent({
@@ -402,4 +448,12 @@ class ChatService {
     final seconds = duration.inSeconds % 60;
     return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
+}
+
+class ChatServiceException implements Exception {
+  const ChatServiceException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
 }

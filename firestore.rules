@@ -1015,6 +1015,11 @@ service cloud.firestore {
         allow delete: if isSelf(userId);
       }
 
+      match /blocked/{blockedId} {
+        allow get, list: if isSelf(userId);
+        allow create, update, delete: if isSelf(userId);
+      }
+
       match /saved_payment_methods/{cardId} {
         allow get, list: if isSelf(userId);
         allow write: if false;
@@ -1040,6 +1045,11 @@ service cloud.firestore {
         allow get, list: if isSelf(userId);
         allow create, update: if canWriteFriendPreview(userId, friendId);
         allow delete: if isSelf(userId);
+      }
+
+      match /blocked/{blockedId} {
+        allow get, list: if isSelf(userId);
+        allow create, update, delete: if isSelf(userId);
       }
     }
 
@@ -1608,6 +1618,33 @@ service cloud.firestore {
     // บัญชีโปรเจกต / ROI (van4 — admin เท่านั้น)
     match /project_finance/{docId} {
       allow read, write: if isPrivilegedAdmin();
+    }
+
+    // บัญชีภาษีแพลตฟอร์ม (van4 + CF)
+    match /tax_ledger_entries/{entryId} {
+      allow get, list: if isPrivilegedAdmin();
+      allow create: if isPrivilegedAdmin()
+          && request.resource.data.source in ['manual', 'adjustment', 'expense_import']
+          && request.resource.data.status == 'active';
+      allow update: if isPrivilegedAdmin()
+          && resource.data.source == 'expense_import'
+          && request.resource.data.source == 'expense_import';
+      allow delete: if isPrivilegedAdmin()
+          && resource.data.source == 'expense_import';
+    }
+
+    match /tax_vat_periods/{periodId} {
+      allow get, list: if isPrivilegedAdmin();
+      allow create: if isPrivilegedAdmin();
+      allow update: if isPrivilegedAdmin()
+          && resource.data.status != 'closed';
+      allow delete: if false;
+    }
+
+    match /tax_income_periods/{periodId} {
+      allow get, list: if isPrivilegedAdmin();
+      allow create, update: if isPrivilegedAdmin();
+      allow delete: if false;
     }
 
     // แชทภายในแอดมิน van4

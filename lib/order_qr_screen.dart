@@ -1,81 +1,231 @@
-import 'package:blue_thermal_printer/blue_thermal_printer.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'models/order_model.dart';
-import 'services/merchant_bluetooth_printer_service.dart';
-import 'services/order_qr_receipt_bitmap.dart';
+import 'services/order_qr_printer_service.dart';
 import 'services/order_qr_receipt_layout.dart';
+import 'services/shop_order_voice_commands.dart';
 import 'utils/app_colors.dart';
 
-const String orderQrReceiptTitle = 'แว๊นตลาด ORDER QR';
-
-String orderQrCodeText(DetailedOrder order) {
-  final code = order.orderCode?.trim();
-  final orderCode = code != null && code.isNotEmpty ? code : '';
-  return 'VAN_ORDER:${order.orderId}|$orderCode|${order.totalAmount.toStringAsFixed(2)}';
-}
+export 'services/order_qr_printer_service.dart'
+    show orderQrCodeText, printOrderQr;
 
 String orderQrOrderCode(DetailedOrder order) {
   final code = order.orderCode?.trim();
   return code != null && code.isNotEmpty ? code : '';
 }
 
-Future<void> _feedLines(BlueThermalPrinter printer, int count) async {
-  for (var i = 0; i < count; i++) {
-    await printer.printNewLine();
-  }
-}
-
-Future<void> printOrderQr(BuildContext context, DetailedOrder order) async {
-  final printerService = MerchantBluetoothPrinterService.instance;
-  final universalQr = orderQrCodeText(order);
-  final receiptLayout = buildOrderQrReceiptLayout(order);
-
-  try {
-    final device = await printerService.resolvePrinterDevice(context);
-    await printerService.connect(device);
-    final printer = printerService.printer;
-
-    final receiptPng = await buildOrderQrReceiptPngBytes(
-      qrPayload: universalQr,
-      layout: receiptLayout,
-      receiptTitle: orderQrReceiptTitle,
-    );
-    await printer.printImageBytes(receiptPng);
-    await _feedLines(printer, 3);
-    await printer.paperCut();
-
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('พิมพ์ QR และรายละเอียดออเดอร์แล้ว')),
-      );
-    }
-  } on PrinterUserException catch (error) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.message)),
-      );
-    }
-  } catch (e) {
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('เกิดข้อผิดพลาด: $e')),
-      );
-    }
-  }
-}
-
-class OrderQRScreen extends StatelessWidget {
-  const OrderQRScreen({super.key, required this.order});
+class OrderQRScreen extends StatefulWidget {
+  const OrderQRScreen({
+    super.key,
+    required this.order,
+    this.autoStartVoiceListening = false,
+  });
 
   final DetailedOrder order;
+  final bool autoStartVoiceListening;
 
-  String get _orderCode => orderQrOrderCode(order);
+  @override
+  State<OrderQRScreen> createState() => _OrderQRScreenState();
+}
+
+class _OrderQRScreenState extends State<OrderQRScreen> {
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _voiceReady = false;
+  bool _voiceAvailable = false;
+  bool _voiceSessionEnabled = false;
+  bool _isListening = false;
+  bool _hasAutoStartedVoice = false;
+  bool _isHandlingVoiceCommand = false;
+  String _voiceMessage = 'กดไมค์แล้วพูด ย้อนกลับ เพื่อกลับหน้าจัดการออเดอร์';
+  String _lastVoiceText = '';
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_initVoiceCommands());
+    if (widget.autoStartVoiceListening) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_maybeAutoStartVoiceListening());
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _voiceSessionEnabled = false;
+    unawaited(_speech.stop());
+    unawaited(_speech.cancel());
+    super.dispose();
+  }
+
+  Future<void> _initVoiceCommands() async {
+    try {
+      final available = await _speech.initialize(
+        onStatus: (status) {
+          if (!mounted) return;
+          if (status == 'done' || status == 'notListening') {
+            setState(() => _isListening = false);
+            if (_voiceSessionEnabled && !_isHandlingVoiceCommand) {
+              unawaited(_startVoiceListening());
+            }
+          }
+        },
+        onError: (_) {
+          if (!mounted) return;
+          setState(() {
+            _isListening = false;
+            _voiceMessage = 'ไมค์ยังฟังไม่ได้ ลองกดไมค์อีกครั้ง';
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _voiceAvailable = available;
+        _voiceReady = true;
+        _voiceMessage = available
+            ? _voiceMessage
+            : 'ไม่พบระบบรับเสียงของเครื่อง';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _voiceReady = true;
+        _voiceAvailable = false;
+        _voiceMessage = 'เปิดระบบเสียงไม่สำเร็จ';
+      });
+    }
+  }
+
+  Future<void> _maybeAutoStartVoiceListening() async {
+    if (_hasAutoStartedVoice || !_voiceReady || !_voiceAvailable) return;
+    final granted = await _ensureMicrophonePermission();
+    if (!granted || !mounted) return;
+    _hasAutoStartedVoice = true;
+    await _toggleVoiceSession();
+  }
+
+  Future<bool> _ensureMicrophonePermission() async {
+    final status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+    final requested = await Permission.microphone.request();
+    if (requested.isGranted) return true;
+    if (!mounted) return false;
+    setState(() {
+      _voiceMessage = requested.isPermanentlyDenied
+          ? 'กรุณาเปิดสิทธิ์ไมค์ในตั้งค่าเครื่อง'
+          : 'ต้องอนุญาตไมค์ก่อนใช้คำสั่งเสียง';
+    });
+    return false;
+  }
+
+  Future<void> _toggleVoiceSession() async {
+    if (_voiceSessionEnabled || _isListening) {
+      _voiceSessionEnabled = false;
+      await _speech.stop();
+      await _speech.cancel();
+      if (!mounted) return;
+      setState(() {
+        _isListening = false;
+        _voiceMessage = 'ปิดการฟังคำสั่งเสียงแล้ว';
+      });
+      return;
+    }
+
+    if (!_voiceReady) {
+      await _initVoiceCommands();
+    }
+    if (!_voiceAvailable) {
+      if (!mounted) return;
+      setState(() => _voiceMessage = 'ไม่พบระบบรับเสียงของเครื่อง');
+      return;
+    }
+
+    final granted = await _ensureMicrophonePermission();
+    if (!granted) return;
+
+    _voiceSessionEnabled = true;
+    await _startVoiceListening();
+  }
+
+  Future<void> _startVoiceListening() async {
+    if (!mounted || !_voiceSessionEnabled || _isHandlingVoiceCommand) return;
+    if (_isListening) return;
+
+    final started = await _speech.listen(
+      onResult: (result) {
+        _handleVoiceResult(
+          result.recognizedWords,
+          isFinal: result.finalResult,
+        );
+      },
+      localeId: 'th_TH',
+      listenMode: stt.ListenMode.confirmation,
+      partialResults: true,
+      cancelOnError: true,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _isListening = started;
+      _voiceMessage = started
+          ? 'พูด ย้อนกลับ เพื่อกลับหน้าจัดการออเดอร์'
+          : 'เปิดไมค์ไม่สำเร็จ ลองอีกครั้ง';
+    });
+  }
+
+  void _handleVoiceResult(String words, {required bool isFinal}) {
+    if (!mounted || _isHandlingVoiceCommand) return;
+    final heardText = words.trim();
+    if (heardText.isEmpty) return;
+
+    final isBack = ShopOrderVoiceCommands.matchBackNavigation(heardText);
+    if (!isFinal) {
+      setState(() {
+        _lastVoiceText = heardText;
+        _voiceMessage = isBack
+            ? 'ได้ยิน: ย้อนกลับ'
+            : 'กำลังฟัง... (พูด ย้อนกลับ)';
+      });
+      if (isBack) {
+        unawaited(_popWithVoiceFeedback(heardText));
+      }
+      return;
+    }
+
+    if (!isBack) {
+      setState(() {
+        _lastVoiceText = heardText;
+        _voiceMessage = 'ได้ยิน: $heardText — ลองพูด ย้อนกลับ';
+      });
+      return;
+    }
+
+    unawaited(_popWithVoiceFeedback(heardText));
+  }
+
+  Future<void> _popWithVoiceFeedback(String heardText) async {
+    if (!mounted || _isHandlingVoiceCommand) return;
+    _isHandlingVoiceCommand = true;
+    _voiceSessionEnabled = false;
+    await _speech.stop();
+    await _speech.cancel();
+    if (!mounted) return;
+    setState(() {
+      _lastVoiceText = heardText;
+      _isListening = false;
+      _voiceMessage = 'กำลังย้อนกลับ...';
+    });
+    Navigator.of(context).pop();
+  }
 
   String _qrPayload(String type) {
-    if (type == 'VAN_ORDER') return orderQrCodeText(order);
-    return '$type:${order.orderId}|$_orderCode|${order.totalAmount.toStringAsFixed(2)}';
+    if (type == 'VAN_ORDER') return orderQrCodeText(widget.order);
+    return '$type:${widget.order.orderId}|${orderQrOrderCode(widget.order)}|${widget.order.totalAmount.toStringAsFixed(2)}';
   }
 
   @override
@@ -88,32 +238,87 @@ class OrderQRScreen extends StatelessWidget {
         backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            FilledButton.icon(
-              onPressed: () => printOrderQr(context, order),
-              icon: const Icon(Icons.print_outlined),
-              label: const Text('พิมพ์ QR พร้อมรายละเอียดออเดอร์'),
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.accent,
-                padding: const EdgeInsets.symmetric(vertical: 14),
+      body: Column(
+        children: <Widget>[
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  FilledButton.icon(
+                    onPressed: () => printOrderQr(context, widget.order),
+                    icon: const Icon(Icons.print_outlined),
+                    label: const Text('พิมพ์ QR พร้อมรายละเอียดออเดอร์'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.accent,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _QrPayloadCard(
+                    title: 'QR เดียวสำหรับออเดอร์นี้',
+                    subtitle: 'สแกน QR เดียวตามสถานะออเดอร์',
+                    icon: Icons.qr_code_2_rounded,
+                    color: AppColors.accent,
+                    payload: universalQr,
+                  ),
+                  const SizedBox(height: 16),
+                  _OrderQrDetails(order: widget.order),
+                ],
               ),
             ),
-            const SizedBox(height: 16),
-            _QrPayloadCard(
-              title: 'QR เดียวสำหรับออเดอร์นี้',
-              subtitle: 'สแกน QR เดียวตามสถานะออเดอร์',
-              icon: Icons.qr_code_2_rounded,
-              color: AppColors.accent,
-              payload: universalQr,
+          ),
+          SafeArea(
+            top: false,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+              ),
+              child: Row(
+                children: <Widget>[
+                  IconButton.filledTonal(
+                    onPressed: _voiceReady ? _toggleVoiceSession : null,
+                    icon: Icon(
+                      _voiceSessionEnabled || _isListening
+                          ? Icons.mic_rounded
+                          : Icons.mic_none_rounded,
+                    ),
+                    tooltip: _voiceSessionEnabled
+                        ? 'หยุดฟังคำสั่งเสียง'
+                        : 'เริ่มฟังคำสั่งเสียง',
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          _voiceMessage,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                          ),
+                        ),
+                        if (_lastVoiceText.isNotEmpty)
+                          Text(
+                            'ได้ยิน: $_lastVoiceText',
+                            style: const TextStyle(
+                              color: Color(0xFF64748B),
+                              fontSize: 12,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
-            _OrderQrDetails(order: order),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

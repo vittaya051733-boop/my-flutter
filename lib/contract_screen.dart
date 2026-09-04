@@ -17,6 +17,7 @@ import 'register_shop_next.dart'; // เพิ่ม import สำหรับ R
 import 'data/merchant_service_agreement.dart';
 import 'utils/app_colors.dart';
 import 'storage_helper.dart';
+import 'utils/thai_id_card_scanner.dart';
 
 class ContractScreen extends StatefulWidget {
   final String? serviceType;
@@ -61,6 +62,7 @@ class _ContractScreenState extends State<ContractScreen> {
   File? _selectedIdCardBackImage;
   bool _isProcessingIdCardFront = false;
   bool _isProcessingIdCardBack = false;
+  String? _verifiedNationalId;
   String? _resolvedServiceType;
 
   String _currentDay = '';
@@ -163,6 +165,10 @@ class _ContractScreenState extends State<ContractScreen> {
   _showSnackBar('กรุณาอัปโหลดรูปบัตรประชาชน (ด้านหน้า)', AppColors.accent);
       return;
     }
+    if (_verifiedNationalId == null) {
+      _showSnackBar('ไม่สามารถอ่านเลขบัตรจากรูปด้านหน้าได้ — ถ่ายใหม่ให้ชัด', AppColors.accent);
+      return;
+    }
     if (_selectedIdCardBackImage == null) {
   _showSnackBar('กรุณาอัปโหลดรูปบัตรประชาชน (ด้านหลัง)', AppColors.accent);
       return;
@@ -235,6 +241,11 @@ class _ContractScreenState extends State<ContractScreen> {
         'signatureImageUrl': signatureUrl,
         'contractText': _contractTextController.text,
         'acceptedAt': FieldValue.serverTimestamp(),
+        if (_verifiedNationalId != null) ...<String, dynamic>{
+          'verifiedNationalId': _verifiedNationalId,
+          'nationalIdVerifiedAt': FieldValue.serverTimestamp(),
+          'nationalIdSource': 'mlkit',
+        },
       }, SetOptions(merge: true));
 
       if (mounted) {
@@ -585,19 +596,22 @@ class _ContractScreenState extends State<ContractScreen> {
     });
 
     try {
-      final blurry = await isImageBlurry(originalFile);
-      if (!mounted) return;
-
-      if (blurry) {
-        _showSnackBar('❌ ภาพเบลอ กรุณาเลือกรูปใหม่หรือถ่ายรูปให้ชัดเจน', Colors.red);
-        setState(() {
-          if (isFront) {
-            _selectedIdCardFrontImage = null;
-          } else {
+      if (isFront) {
+        final scan = await ThaiIdCardScanner.scanNationalId(originalFile);
+        _verifiedNationalId = scan.nationalId;
+      } else {
+        final quality = await ThaiIdCardScanner.validateImageQuality(originalFile);
+        if (!quality.passed) {
+          if (!mounted) return;
+          _showSnackBar(
+            quality.issues.map((issue) => issue.messageTh).join('\n'),
+            Colors.red,
+          );
+          setState(() {
             _selectedIdCardBackImage = null;
-          }
-        });
-        return;
+          });
+          return;
+        }
       }
 
       final persistedFile = await _persistTemporaryImage(originalFile, isFront: isFront);
@@ -611,7 +625,25 @@ class _ContractScreenState extends State<ContractScreen> {
         }
       });
 
-      _showSnackBar('✅ รูปภาพผ่านการตรวจสอบความชัดเจน', Colors.green);
+      if (isFront) {
+        _showSnackBar(
+          '✅ อ่านเลขบัตรจากรูปแล้ว (${_maskNationalId(_verifiedNationalId!)})',
+          Colors.green,
+        );
+      } else {
+        _showSnackBar('✅ รูปภาพผ่านการตรวจสอบความชัดเจน', Colors.green);
+      }
+    } on ThaiIdCardScanException catch (error) {
+      if (!mounted) return;
+      _showSnackBar('❌ ${error.message}', Colors.red);
+      setState(() {
+        if (isFront) {
+          _selectedIdCardFrontImage = null;
+          _verifiedNationalId = null;
+        } else {
+          _selectedIdCardBackImage = null;
+        }
+      });
     } catch (e) {
       if (!mounted) return;
       _showSnackBar('❌ เกิดข้อผิดพลาดในการตรวจสอบรูปภาพ: $e', Colors.red);
@@ -640,6 +672,13 @@ class _ContractScreenState extends State<ContractScreen> {
     final targetPath =
         '${Directory.systemTemp.path}/id_card_${suffix}_${DateTime.now().millisecondsSinceEpoch}.jpg';
     return source.copy(targetPath);
+  }
+
+  String _maskNationalId(String id) {
+    if (id.length < 4) {
+      return id;
+    }
+    return '${id.substring(0, 3)}******${id.substring(id.length - 2)}';
   }
 
   void _showErrorDialog(String error) {

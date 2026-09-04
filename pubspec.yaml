@@ -2,7 +2,7 @@ name: van1
 description: "Van 1 Flutter project."
 publish_to: 'none'
 
-version: 1.0.15+17
+version: 1.0.15+18
 
 environment:
   sdk: ^3.9.0
@@ -70,6 +70,8 @@ dependencies:
   visibility_detector: ^0.4.0
   speech_to_text: ^7.4.0
   image_gallery_saver_plus: 4.0.1
+  esc_pos_utils_plus: ^2.0.4
+  thermal_printer_flutter: ^2.0.0+3
 
 dev_dependencies:
   flutter_test:
