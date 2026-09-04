@@ -10,8 +10,6 @@ import '../utils/app_image_cache.dart';
 import '../utils/network_image_url.dart';
 import 'web_dom_image.dart';
 
-enum _ImageLoadPhase { loading, ready, failed }
-
 /// Network image with disk cache, URL fallbacks, and download timeout.
 class CachedAppImage extends StatefulWidget {
   const CachedAppImage({
@@ -43,19 +41,27 @@ class CachedAppImage extends StatefulWidget {
 
 class _CachedAppImageState extends State<CachedAppImage> {
   int _candidateIndex = 0;
-  _ImageLoadPhase _phase = _ImageLoadPhase.loading;
-  File? _localFile;
-  int _loadGeneration = 0;
+  File? _localUploadFile;
+  bool _localUploadFailed = false;
+  bool _advancing = false;
 
   List<String> get _candidates => normalizeImageUrlCandidates(<String?>[
         widget.imageUrl,
         ...widget.fallbackUrls,
       ]);
 
+  String? get _currentUrl {
+    final candidates = _candidates;
+    if (candidates.isEmpty) {
+      return null;
+    }
+    return candidates[_candidateIndex.clamp(0, candidates.length - 1)];
+  }
+
   @override
   void initState() {
     super.initState();
-    unawaited(_loadCurrentCandidate());
+    unawaited(_resolveLocalUpload());
   }
 
   @override
@@ -64,88 +70,56 @@ class _CachedAppImageState extends State<CachedAppImage> {
     if (oldWidget.imageUrl != widget.imageUrl ||
         !listEquals(oldWidget.fallbackUrls, widget.fallbackUrls)) {
       _candidateIndex = 0;
-      _localFile = null;
-      unawaited(_loadCurrentCandidate());
+      _localUploadFile = null;
+      _localUploadFailed = false;
+      _advancing = false;
+      unawaited(_resolveLocalUpload());
     }
   }
 
-  Future<void> _loadCurrentCandidate() async {
-    final generation = ++_loadGeneration;
-    final candidates = _candidates;
-
-    if (_candidateIndex >= candidates.length) {
-      if (mounted) {
-        setState(() {
-          _phase = _ImageLoadPhase.failed;
-          _localFile = null;
-        });
-      }
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        _phase = _ImageLoadPhase.loading;
-        _localFile = null;
-      });
-    }
-
-    final url = candidates[_candidateIndex];
-
-    if (!kIsWeb) {
-      final cachedPath = await MediaCacheService.instance.getCachedPath(url);
-      if (generation != _loadGeneration || !mounted) {
-        return;
-      }
-      if (cachedPath != null) {
-        setState(() {
-          _localFile = File(cachedPath);
-          _phase = _ImageLoadPhase.ready;
-        });
-        return;
-      }
-
-      try {
-        final file = await AppImageCacheManager.instance
-            .getSingleFile(url)
-            .timeout(kAppImageDownloadTimeout);
-        if (generation != _loadGeneration || !mounted) {
-          return;
-        }
-        setState(() {
-          _localFile = file;
-          _phase = _ImageLoadPhase.ready;
-        });
-        return;
-      } on TimeoutException {
-        // Try next candidate.
-      } catch (_) {
-        // Try next candidate.
-      }
-    }
-
-    if (generation != _loadGeneration || !mounted) {
-      return;
-    }
-
+  Future<void> _resolveLocalUpload() async {
     if (kIsWeb) {
-      setState(() => _phase = _ImageLoadPhase.ready);
       return;
     }
-
-    _candidateIndex += 1;
-    await _loadCurrentCandidate();
+    final url = _currentUrl;
+    if (url == null) {
+      return;
+    }
+    try {
+      final cachedPath = await MediaCacheService.instance.getCachedPath(url);
+      if (!mounted || cachedPath == null || _currentUrl != url) {
+        return;
+      }
+      setState(() {
+        _localUploadFile = File(cachedPath);
+        _localUploadFailed = false;
+      });
+    } catch (_) {
+      // CachedNetworkImage still loads from the network.
+    }
   }
 
-  void _onNetworkError() {
-    if (_candidateIndex + 1 >= _candidates.length) {
-      if (mounted) {
-        setState(() => _phase = _ImageLoadPhase.failed);
-      }
+  void _advanceCandidate() {
+    if (_advancing || !mounted) {
       return;
     }
-    _candidateIndex += 1;
-    unawaited(_loadCurrentCandidate());
+    final next = _candidateIndex + 1;
+    if (next >= _candidates.length) {
+      return;
+    }
+    _advancing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _candidateIndex = next;
+        _localUploadFile = null;
+        _localUploadFailed = false;
+        _advancing = false;
+      });
+      unawaited(_resolveLocalUpload());
+    });
   }
 
   Widget _defaultPlaceholder({double? w, double? h}) {
@@ -157,13 +131,6 @@ class _CachedAppImageState extends State<CachedAppImage> {
               alpha: 0.4,
             ),
         borderRadius: widget.borderRadius,
-      ),
-      child: const Center(
-        child: SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
       ),
     );
   }
@@ -187,7 +154,7 @@ class _CachedAppImageState extends State<CachedAppImage> {
     return child;
   }
 
-  Widget _buildForUrl({
+  Widget _buildNetworkImage({
     required String url,
     required double? boxWidth,
     required double? boxHeight,
@@ -201,54 +168,49 @@ class _CachedAppImageState extends State<CachedAppImage> {
         height: boxHeight,
         fit: widget.fit,
         borderRadius: widget.borderRadius,
-        errorBuilder: (_) => error,
+        errorBuilder: (_) {
+          _advanceCandidate();
+          return error;
+        },
       );
     }
 
     return CachedNetworkImage(
-      key: ValueKey<String>(url),
+      key: ValueKey<String>('net-$url'),
       imageUrl: url,
       width: boxWidth,
       height: boxHeight,
       fit: widget.fit,
       cacheManager: AppImageCacheManager.instance,
+      useOldImageOnUrlChange: true,
       memCacheWidth:
           widget.memCacheWidth ?? resolveMemCacheWidth(width: boxWidth),
+      fadeInDuration: const Duration(milliseconds: 120),
       placeholder: (_, __) => placeholder,
       errorWidget: (_, __, ___) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            _onNetworkError();
-          }
-        });
+        _advanceCandidate();
         return error;
       },
-      fadeInDuration: const Duration(milliseconds: 150),
     );
   }
 
   Widget _buildContent(BoxConstraints constraints) {
-    final boxWidth =
-        widget.width ??
+    final boxWidth = widget.width ??
         (constraints.maxWidth.isFinite ? constraints.maxWidth : null);
-    final boxHeight =
-        widget.height ??
+    final boxHeight = widget.height ??
         (constraints.maxHeight.isFinite ? constraints.maxHeight : null);
     final placeholder =
         widget.placeholder ?? _defaultPlaceholder(w: boxWidth, h: boxHeight);
     final error = widget.errorWidget ?? _defaultError(w: boxWidth, h: boxHeight);
+    final url = _currentUrl;
 
-    if (_candidates.isEmpty || _phase == _ImageLoadPhase.failed) {
+    if (url == null) {
       return error;
     }
 
-    if (_phase == _ImageLoadPhase.loading) {
-      return placeholder;
-    }
-
-    if (!kIsWeb && _localFile != null) {
+    if (!kIsWeb && _localUploadFile != null && !_localUploadFailed) {
       return Image.file(
-        _localFile!,
+        _localUploadFile!,
         width: boxWidth,
         height: boxHeight,
         fit: widget.fit,
@@ -257,16 +219,21 @@ class _CachedAppImageState extends State<CachedAppImage> {
         errorBuilder: (_, __, ___) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
-              _onNetworkError();
+              setState(() => _localUploadFailed = true);
             }
           });
-          return error;
+          return _buildNetworkImage(
+            url: url,
+            boxWidth: boxWidth,
+            boxHeight: boxHeight,
+            placeholder: placeholder,
+            error: error,
+          );
         },
       );
     }
 
-    final url = _candidates[_candidateIndex.clamp(0, _candidates.length - 1)];
-    return _buildForUrl(
+    return _buildNetworkImage(
       url: url,
       boxWidth: boxWidth,
       boxHeight: boxHeight,

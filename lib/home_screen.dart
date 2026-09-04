@@ -1622,16 +1622,13 @@ class _HomeDashboard extends StatelessWidget {
                                     child: Stack(
                                       children: [
                                         Positioned.fill(
-                                          child: LayoutBuilder(
-                                            builder: (context, constraints) {
-                                              return ProductNetworkImage(
-                                                urls: imageCandidates,
-                                                fit: BoxFit.cover,
-                                                width: constraints.maxWidth,
-                                                height: constraints.maxHeight,
-                                                memCacheWidth: 500,
-                                              );
-                                            },
+                                          child: ProductNetworkImage(
+                                            key: ValueKey<String>(
+                                              'home-img-${doc.id}',
+                                            ),
+                                            urls: imageCandidates,
+                                            fit: BoxFit.cover,
+                                            memCacheWidth: 400,
                                           ),
                                         ),
                                         Positioned(

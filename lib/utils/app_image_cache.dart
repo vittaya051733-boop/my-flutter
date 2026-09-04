@@ -5,7 +5,7 @@ class AppImageCacheManager extends CacheManager {
   AppImageCacheManager._()
       : super(
           Config(
-            'van1_merchant_images_v1',
+            'van1_merchant_images_v2',
             stalePeriod: const Duration(days: 30),
             maxNrOfCacheObjects: 2000,
           ),
@@ -13,8 +13,6 @@ class AppImageCacheManager extends CacheManager {
 
   static final AppImageCacheManager instance = AppImageCacheManager._();
 }
-
-const Duration kAppImageDownloadTimeout = Duration(seconds: 12);
 
 int? resolveMemCacheWidth({double? width, int maxPx = 512}) {
   if (width == null || !width.isFinite || width <= 0) {

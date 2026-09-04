@@ -715,6 +715,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
               ),
             ),
             child: Stack(
+              fit: StackFit.expand,
               children: [
                 GestureDetector(
                   onTap: isBusy
@@ -729,16 +730,10 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                   child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: previewCandidates.isNotEmpty
-                      ? LayoutBuilder(
-                          builder: (context, constraints) {
-                            return ProductNetworkImage(
-                              urls: previewCandidates,
-                              fit: BoxFit.cover,
-                              width: constraints.maxWidth,
-                              height: constraints.maxHeight,
-                              memCacheWidth: 500,
-                            );
-                          },
+                      ? ProductNetworkImage(
+                          urls: previewCandidates,
+                          fit: BoxFit.cover,
+                          memCacheWidth: 400,
                         )
                       : Container(
                           color: Colors.grey[200],

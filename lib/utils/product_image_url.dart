@@ -81,7 +81,7 @@ String? readProductThumbnailUrl(Map<String, dynamic> data) {
   return readProductImageUrl(data);
 }
 
-/// Ordered candidates for [ProductNetworkImage] (original → thumbnail → legacy).
+/// Ordered candidates for [ProductNetworkImage] (thumbnail → original → legacy).
 List<String> readProductImageUrlCandidates(Map<String, dynamic> data) {
   final seen = <String>{};
   final candidates = <String>[];
@@ -94,10 +94,10 @@ List<String> readProductImageUrlCandidates(Map<String, dynamic> data) {
     candidates.add(url);
   }
 
-  for (final url in readProductImageUrls(data)) {
+  for (final url in _readUrlList(data['thumbnailUrls'])) {
     add(url);
   }
-  for (final url in _readUrlList(data['thumbnailUrls'])) {
+  for (final url in readProductImageUrls(data)) {
     add(url);
   }
   for (final key in <String>['imageUrl', 'photoUrl', 'productImage']) {
