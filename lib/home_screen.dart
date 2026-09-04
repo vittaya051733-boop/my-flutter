@@ -4,7 +4,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 import 'wallet_screen.dart';
 import 'notifications_screen.dart';
@@ -385,7 +384,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (imageUrl != null && imageUrl.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            precacheImage(CachedNetworkImageProvider(imageUrl), context);
+            precacheImage(NetworkImage(imageUrl), context);
           }
         });
       }
@@ -1374,7 +1373,7 @@ class _HomeDashboard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ImageProvider? avatarImage =
         (shopImageUrl != null && shopImageUrl!.isNotEmpty)
-        ? CachedNetworkImageProvider(shopImageUrl!)
+        ? NetworkImage(shopImageUrl!)
         : null;
     final String displayName = (shopName != null && shopName!.isNotEmpty)
         ? shopName!
@@ -2657,18 +2656,10 @@ class _ProductGalleryContentState extends State<_ProductGalleryContent> {
   Widget _buildGalleryImage(String url) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
-      child: CachedNetworkImage(
-        imageUrl: url,
+      child: ProductNetworkImage(
+        urls: <String>[url],
         fit: BoxFit.cover,
         memCacheWidth: 800,
-        maxWidthDiskCache: 1000,
-        placeholder: (context, _) =>
-            const Center(child: CircularProgressIndicator()),
-        errorWidget: (context, _, __) => Container(
-          color: Colors.grey[200],
-          alignment: Alignment.center,
-          child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
-        ),
       ),
     );
   }

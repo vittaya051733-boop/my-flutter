@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -175,19 +174,29 @@ class _CachedAppImageState extends State<CachedAppImage> {
       );
     }
 
-    return CachedNetworkImage(
+    return Image.network(
       key: ValueKey<String>('net-$url'),
-      imageUrl: url,
+      url,
       width: boxWidth,
       height: boxHeight,
       fit: widget.fit,
-      cacheManager: AppImageCacheManager.instance,
-      useOldImageOnUrlChange: true,
-      memCacheWidth:
-          widget.memCacheWidth ?? resolveMemCacheWidth(width: boxWidth),
-      fadeInDuration: const Duration(milliseconds: 120),
-      placeholder: (_, __) => placeholder,
-      errorWidget: (_, __, ___) {
+      cacheWidth: widget.memCacheWidth ?? resolveMemCacheWidth(width: boxWidth),
+      filterQuality: FilterQuality.medium,
+      gaplessPlayback: true,
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+        if (wasSynchronouslyLoaded || frame != null) {
+          return child;
+        }
+        return placeholder;
+      },
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) {
+          return child;
+        }
+        return placeholder;
+      },
+      errorBuilder: (_, errorDetails, ___) {
+        debugPrint('Image load failed: $url ($errorDetails)');
         _advanceCandidate();
         return error;
       },
