@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'navigation_helper.dart';
@@ -88,38 +87,25 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _isLoading = true);
       try {
         final normalizedPhone = PhoneLoginHelper.normalize(input);
-        final existingUser = await FirebaseFirestore.instance
-            .collection('users')
-            .where('phoneNumber', isEqualTo: normalizedPhone)
-            .limit(1)
-            .get();
-
-        final loginEmail = existingUser.docs.isNotEmpty
-            ? (existingUser.docs.first.data()['loginEmail'] as String?)
-            : null;
-
-        if (loginEmail != null && loginEmail.isNotEmpty) {
-          await FirebaseAuth.instance.signInWithEmailAndPassword(
-            email: loginEmail,
-            password: password,
-          );
-          if (!mounted) return;
-          setState(() => _isLoading = false);
-          await _handlePostLogin();
-          return;
-        }
-
-        if (!mounted) return;
-        setState(() => _isLoading = false);
-        Navigator.of(context).pushNamed(
-          '/phone_auth',
-          arguments: {'phone': normalizedPhone, 'password': password},
+        final loginEmail = PhoneLoginHelper.pseudoEmail(normalizedPhone);
+        await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: loginEmail,
+          password: password,
         );
-        return;
-      } catch (e) {
         if (!mounted) return;
         setState(() => _isLoading = false);
-        _showSnack('เกิดข้อผิดพลาดในการเข้าสู่ระบบด้วยเบอร์โทร: $e');
+        await _handlePostLogin();
+        return;
+      } on FirebaseAuthException catch (e) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        if (e.code == 'user-not-found' ||
+            e.code == 'invalid-credential' ||
+            e.code == 'wrong-password') {
+          _showSnack('เบอร์โทรหรือรหัสผ่านไม่ถูกต้อง');
+        } else {
+          _showSnack(e.message ?? 'เข้าสู่ระบบด้วยเบอร์โทรไม่สำเร็จ');
+        }
         return;
       }
     }

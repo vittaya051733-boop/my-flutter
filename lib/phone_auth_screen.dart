@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'navigation_helper.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'services/notification_service.dart';
-import 'services/phone_registration_otp_service.dart';
 import 'services/security_pin_service.dart';
 import 'services/app_unlock_session.dart';
 import 'utils/app_colors.dart';
+import 'utils/phone_auth_errors.dart';
 import 'utils/phone_login_helper.dart';
 
 class PhoneAuthScreen extends StatefulWidget {
@@ -22,11 +23,12 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
   final TextEditingController _phoneController = TextEditingController();
   final TextEditingController _otpController = TextEditingController();
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  final PhoneRegistrationOtpService _otpService =
-      PhoneRegistrationOtpService.instance;
 
   bool _isLoading = false;
   bool _isOtpSent = false;
+  String? _verificationId;
+  int? _resendToken;
+  ConfirmationResult? _webConfirmationResult;
 
   String? _passwordForRegistration;
   String? _securityPinForRegistration;
@@ -111,31 +113,74 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
     });
 
     try {
-      await _otpService.sendOtp(phoneNumber);
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-        _isOtpSent = true;
-      });
-      _startCountdown();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('ส่ง OTP ไปที่ $phoneNumber แล้ว'),
-          backgroundColor: Colors.green,
-        ),
+      if (kIsWeb) {
+        _webConfirmationResult = await _auth.signInWithPhoneNumber(phoneNumber);
+        _markOtpSent(phoneNumber);
+        return;
+      }
+      await _auth.verifyPhoneNumber(
+        phoneNumber: phoneNumber,
+        timeout: const Duration(seconds: 120),
+        forceResendingToken: _resendToken,
+        verificationCompleted: (credential) async {
+          try {
+            await _auth.signInWithCredential(credential);
+            await _completePhoneAuthSuccess();
+          } on FirebaseAuthException catch (error) {
+            _showPhoneAuthError(error);
+          }
+        },
+        verificationFailed: _showPhoneAuthError,
+        codeSent: (verificationId, resendToken) {
+          if (!mounted) return;
+          _verificationId = verificationId;
+          _resendToken = resendToken;
+          _markOtpSent(phoneNumber);
+        },
+        codeAutoRetrievalTimeout: (verificationId) {
+          _verificationId = verificationId;
+        },
       );
+    } on FirebaseAuthException catch (error) {
+      _showPhoneAuthError(error);
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_otpService.mapError(error)),
+        const SnackBar(
+          content: Text('ไม่สามารถส่ง OTP ได้ กรุณาลองใหม่อีกครั้ง'),
           backgroundColor: Colors.red,
         ),
       );
     }
+  }
+
+  void _markOtpSent(String phoneNumber) {
+    if (!mounted) return;
+    setState(() {
+      _isLoading = false;
+      _isOtpSent = true;
+    });
+    _startCountdown();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('ส่ง OTP ไปที่ $phoneNumber แล้ว'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void _showPhoneAuthError(FirebaseAuthException error) {
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+    mapPhoneAuthError(error).then((message) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
+      );
+    });
   }
 
   Future<void> _verifyOtp() async {
@@ -154,30 +199,45 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
       return;
     }
 
-    final phoneNumber = PhoneLoginHelper.normalize(
-      _phoneController.text.trim(),
-    );
-
     setState(() {
       _isLoading = true;
     });
 
-    try {
-      final verifyResult = await _otpService.verifyOtp(
-        phoneNumber: phoneNumber,
-        otp: otp,
-        password: _passwordForRegistration,
+    final verificationId = _verificationId;
+    if (!kIsWeb && (verificationId == null || verificationId.isEmpty)) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('เซสชัน OTP หมดอายุ กรุณาขอรหัสใหม่')),
       );
-      await _auth.signInWithCustomToken(verifyResult.customToken);
+      return;
+    }
+
+    try {
+      if (kIsWeb) {
+        final confirmation = _webConfirmationResult;
+        if (confirmation == null) {
+          throw FirebaseAuthException(
+            code: 'session-expired',
+            message: 'เซสชัน OTP หมดอายุ กรุณาขอรหัสใหม่',
+          );
+        }
+        await confirmation.confirm(otp);
+      } else {
+        final credential = PhoneAuthProvider.credential(
+          verificationId: verificationId!,
+          smsCode: otp,
+        );
+        await _auth.signInWithCredential(credential);
+      }
       await _completePhoneAuthSuccess();
-    } catch (error) {
+    } on FirebaseAuthException catch (error) {
       if (!mounted) return;
       setState(() {
         _isLoading = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(_otpService.mapError(error)),
+          content: Text(await mapPhoneAuthError(error)),
           backgroundColor: Colors.red,
         ),
       );
@@ -200,6 +260,20 @@ class _PhoneAuthScreenState extends State<PhoneAuthScreen> {
 
       if (hasPassword) {
         final pseudoEmail = PhoneLoginHelper.pseudoEmail(normalizedPhone);
+        final password = _passwordForRegistration!;
+        final emailCredential = EmailAuthProvider.credential(
+          email: pseudoEmail,
+          password: password,
+        );
+        try {
+          await firebaseUser.linkWithCredential(emailCredential);
+        } on FirebaseAuthException catch (error) {
+          if (error.code == 'provider-already-linked') {
+            await firebaseUser.updatePassword(password);
+          } else {
+            rethrow;
+          }
+        }
         await FirebaseFirestore.instance
             .collection('users')
             .doc(firebaseUser.uid)

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
 import 'add_product_screen.dart';
 import 'merchant_security_deposit_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -35,6 +36,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   final Set<String> _updatingDiscountProductIds = {};
   final List<Product> _products = [];
   final List<Product> _pendingReviewProducts = [];
+  final Map<String, Map<String, dynamic>> _productRawById = {};
   bool _isLoading = false;
   bool _isFirstLoad = true;
   bool _hasMore = true;
@@ -75,7 +77,11 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200 &&
+    if (!_scrollController.hasClients) {
+      return;
+    }
+    if (_scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 200 &&
         !_isLoading &&
         _hasMore) {
       _fetchProducts();
@@ -118,6 +124,9 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       _pendingReviewProducts
         ..clear()
         ..addAll(docs.map(Product.fromAdminReviewSnapshot));
+      for (final doc in docs) {
+        _productRawById[doc.id] = Map<String, dynamic>.from(doc.data());
+      }
     } catch (e, stack) {
       debugPrint('ShopManagementScreen pending reviews error: $e');
       debugPrint('Stack: $stack');
@@ -127,38 +136,51 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
   Future<void> _fetchProducts() async {
     if (_isLoading || (!_hasMore && !_isFirstLoad)) return;
 
-    setState(() {
-      _isLoading = true;
-    });
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+      });
+    }
 
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
-        setState(() {
-          _isLoading = false;
-          _hasMore = false;
-          _isFirstLoad = false;
-        });
         return;
       }
 
-      if (_isFirstLoad) {
-        await _fetchPendingReviews();
+      final pendingFuture = _isFirstLoad ? _fetchPendingReviews() : null;
+
+      QuerySnapshot<Map<String, dynamic>> querySnapshot;
+      try {
+        Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+            .collection('products')
+            .where('ownerUid', isEqualTo: user.uid)
+            .orderBy('createdAt', descending: true);
+
+        if (_lastDocument != null) {
+          query = query.startAfterDocument(
+            _lastDocument! as DocumentSnapshot<Map<String, dynamic>>,
+          );
+        }
+
+        querySnapshot = await query.limit(_pageSize).get();
+      } catch (_) {
+        Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+            .collection('products')
+            .where('ownerUid', isEqualTo: user.uid);
+
+        querySnapshot = await query.limit(_pageSize).get();
       }
 
-      Query query = FirebaseFirestore.instance
-          .collection('products')
-          .where('ownerUid', isEqualTo: user.uid);
-
-      // To ensure consistent ordering for pagination, we should order by a field.
-      // 'createdAt' is a good candidate if it exists.
-      query = query.orderBy('createdAt', descending: true);
-
-      if (_lastDocument != null) {
-        query = query.startAfterDocument(_lastDocument!);
+      if (pendingFuture != null) {
+        unawaited(
+          pendingFuture.then((_) {
+            if (mounted) {
+              setState(() {});
+            }
+          }),
+        );
       }
-
-      final querySnapshot = await query.limit(_pageSize).get();
 
       if (querySnapshot.docs.length < _pageSize) {
         _hasMore = false;
@@ -166,7 +188,11 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
 
       if (querySnapshot.docs.isNotEmpty) {
         _lastDocument = querySnapshot.docs.last;
-        final newProducts = querySnapshot.docs.map((doc) => Product.fromSnapshot(doc as QueryDocumentSnapshot<Map<String, dynamic>>)).toList();
+        for (final doc in querySnapshot.docs) {
+          _productRawById[doc.id] = Map<String, dynamic>.from(doc.data());
+        }
+        final newProducts =
+            querySnapshot.docs.map(Product.fromSnapshot).toList();
         _products.addAll(newProducts);
       }
     } catch (e, stack) {
@@ -177,20 +203,24 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
           SnackBar(content: Text('เกิดข้อผิดพลาดในการโหลดข้อมูล: $e')),
         );
       }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isFirstLoad = false;
+        });
+      }
     }
-
-    setState(() {
-      _isLoading = false;
-      _isFirstLoad = false;
-    });
   }
 
   Future<void> _refresh() async {
     _products.clear();
     _pendingReviewProducts.clear();
+    _productRawById.clear();
     _lastDocument = null;
     _isFirstLoad = true;
     _hasMore = true;
+    _isLoading = false;
     await _fetchProducts();
   }
 
@@ -303,6 +333,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ลบสินค้าเรียบร้อยแล้ว')));
         setState(() {
           _products.removeWhere((p) => p.id == product.id);
+          _productRawById.remove(product.id!);
         });
       }
     } catch (e) {
@@ -640,25 +671,56 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
       );
     }
 
+  List<String> _productImageCandidates(Product product) {
+    final id = product.id;
+    if (id != null) {
+      final raw = _productRawById[id];
+      if (raw != null) {
+        return readProductImageUrlCandidates(raw);
+      }
+    }
+    return readProductImageUrlCandidates({
+      'imageUrls': product.imageUrls,
+      'thumbnailUrls': product.thumbnailUrls,
+    });
+  }
+
   Widget _buildProductList() {
     if (_isFirstLoad) {
-      return const Center(child: CircularProgressIndicator());
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: const [
+          SizedBox(
+            height: 320,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ],
+      );
     }
     if (_displayProducts.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.inbox_outlined, size: 80, color: Colors.grey[400]),
-            const SizedBox(height: 16),
-            const Text('ยังไม่มีสินค้าในร้านของคุณ', style: TextStyle(fontSize: 18, color: Colors.grey)),
-            const SizedBox(height: 8),
-            Text(
-              'แตะปุ่ม + มุมขวาล่างเพื่อเพิ่มสินค้า',
-              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          SizedBox(
+            height: 320,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.inbox_outlined, size: 80, color: Colors.grey[400]),
+                const SizedBox(height: 16),
+                const Text(
+                  'ยังไม่มีสินค้าในร้านของคุณ',
+                  style: TextStyle(fontSize: 18, color: Colors.grey),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'แตะปุ่ม + มุมขวาล่างเพื่อเพิ่มสินค้า',
+                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       );
     }
 
@@ -669,6 +731,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         crossAxisCount: 2,
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
+        childAspectRatio: 0.78,
       ),
       itemCount: _displayProducts.length + (_hasMore ? 1 : 0),
       itemBuilder: (context, index) {
@@ -692,10 +755,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
         final isHome = !isPendingReview &&
             product.id != null &&
             _homeProductIds.contains(product.id!);
-        final previewCandidates = readProductImageUrlCandidates({
-          'imageUrls': product.imageUrls,
-          'thumbnailUrls': product.thumbnailUrls,
-        });
+        final previewCandidates = _productImageCandidates(product);
         return Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -714,33 +774,33 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                 width: isPendingReview ? 2 : 1,
               ),
             ),
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: previewCandidates.isNotEmpty
-                        ? ProductNetworkImage(
-                            key: ValueKey<String>(
-                              'shop-product-image-${product.id ?? index}',
-                            ),
-                            urls: previewCandidates,
-                            fit: BoxFit.cover,
-                            memCacheWidth: 400,
-                          )
-                        : Container(
-                            color: Colors.grey[200],
-                            alignment: Alignment.center,
-                            child: const Icon(
-                              Icons.image,
-                              size: 40,
-                              color: Colors.grey,
-                            ),
-                          ),
-                  ),
-                ),
-                Positioned.fill(
-                  child: GestureDetector(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (previewCandidates.isNotEmpty)
+                    ProductNetworkImage(
+                      key: ValueKey<String>(
+                        'shop-product-image-${product.id ?? index}',
+                      ),
+                      urls: previewCandidates,
+                      fit: BoxFit.cover,
+                      memCacheWidth: 400,
+                    )
+                  else
+                    ColoredBox(
+                      color: Colors.grey[200]!,
+                      child: const Center(
+                        child: Icon(
+                          Icons.image,
+                          size: 40,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ),
+                  Positioned.fill(
+                    child: GestureDetector(
                     behavior: HitTestBehavior.translucent,
                     onTap: isBusy
                         ? null
@@ -751,13 +811,13 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                               _navigateToAddProduct(context, product: product);
                             }
                           },
+                    ),
                   ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
                     padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
                     decoration: const BoxDecoration(
                       borderRadius: BorderRadius.only(
@@ -914,6 +974,7 @@ class _ShopManagementScreenState extends State<ShopManagementScreen> {
                 ),
               ],
             ),
+          ),
         );
       },
     );
